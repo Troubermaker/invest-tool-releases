@@ -10,8 +10,8 @@ const hotSectors = ref([])
 // 成交额智能单位： 亿 / 万亿 自动切换
 function formatAmt(amt) {
     if (amt == null || amt === 0) return '-';
-    if (amt >= 10000) return (amt / 10000).toFixed(2) + '<span class="text-[13px] font-medium ml-[1px]">万亿</span>';
-    return amt.toFixed(2) + '<span class="text-[13px] font-medium ml-[1px]">亿</span>';
+    if (amt >= 10000) return (amt / 10000).toFixed(2) + '<span class="text-[11px] font-normal text-[#999] ml-[2px]">万亿</span>';
+    return amt.toFixed(2) + '<span class="text-[11px] font-normal text-[#999] ml-[2px]">亿</span>';
 }
 
 function formatAmtText(amt) {
@@ -459,13 +459,13 @@ onMounted(() => {
         <div class="shrink-0 xl:pl-4 xl:border-l border-[#e5e5e5] basis-[320px] grow-[0.2] max-w-[440px] flex items-stretch">
             <div class="bg-white border border-[#e8e8e8] shadow-[0_2px_4px_rgba(0,0,0,0.02)] rounded-[4px] py-[4px] px-[10px] flex items-center gap-[10px] w-full h-full cursor-default">
                 <!-- Left: Turnover value -->
-                <div class="flex flex-col justify-center border-r border-[#f0f0f0] pr-[10px] shrink-0">
-                    <span class="text-[#888] text-[11px] font-medium leading-none mb-[3px]">全市场成交额</span>
-                    <span class="text-[#222] text-[17px] font-bold leading-none tracking-tight" v-html="formatAmt(totalTurnover)"></span>
-                    <span class="text-[10px] text-[#0ecb81] font-medium leading-none mt-[4px]">↓缩量 745亿 (-3%)</span>
+                <div class="flex-[4] basis-0 min-w-0 flex flex-col justify-center border-r border-[#f0f0f0] pr-[12px]">
+                    <span class="text-[#999] text-[11px] font-medium leading-none tracking-[0.12em] mb-[7px]">全市场成交额</span>
+                    <span class="text-[#222] text-[18px] font-bold leading-none" v-html="formatAmt(totalTurnover)"></span>
+                    <span class="text-[10px] text-[#0ecb81] font-medium leading-none tracking-wide mt-[8px]">↓ 缩量 745亿 <span class="opacity-70 ml-[2px]">(-3%)</span></span>
                 </div>
                 <!-- Right: Market breadth -->
-                <div class="flex-1 flex flex-col justify-center min-w-0">
+                <div class="flex-[5] basis-0 min-w-0 flex flex-col justify-center">
                     <div class="flex justify-between items-center text-[10px] leading-none">
                         <span class="text-[#e84118] font-medium">涨 4205</span>
                         <span class="text-[#888]">平 133</span>
