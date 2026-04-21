@@ -45,11 +45,11 @@ def set_cache(key, data):
 def get_cache(key):
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT data FROM market_cache WHERE key = ?', (key,))
+    c.execute('SELECT data, updated_at FROM market_cache WHERE key = ?', (key,))
     row = c.fetchone()
     conn.close()
     if row:
-        return json.loads(row['data'])
-    return None
+        return json.loads(row['data']), row['updated_at']
+    return None, None
 
 init_db()

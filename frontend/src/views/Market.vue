@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, nextTick, watch } from 'vue'
+import { onMounted, onUnmounted, ref, nextTick, watch } from 'vue'
 
 const emit = defineEmits(['openAI'])
 
@@ -398,6 +398,12 @@ onMounted(() => {
     } else {
         window.addEventListener('pywebviewready', loadData) 
     }
+
+    // 每 60 秒自动刷新一次行情数据
+    const refreshInterval = setInterval(loadData, 60000)
+    onUnmounted(() => {
+        clearInterval(refreshInterval)
+    })
     
     // Fallback dummy
     setTimeout(() => {

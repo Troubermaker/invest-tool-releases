@@ -3,11 +3,39 @@ import pandas as pd
 import db
 import requests
 import time
+import datetime
+from datetime import datetime, time as dtime
 
-def get_market_indices():
+def is_cache_stale(updated_at_str):
+    """判断缓存是否过期"""
+    if not updated_at_str:
+        return True
+    try:
+        updated_at = datetime.fromisoformat(updated_at_str)
+        now = datetime.now()
+        
+        # 1. 跨天一定失效
+        if updated_at.date() < now.date():
+            return True
+            
+        # 2. 交易时段 (9:30-11:35, 13:00-15:05) 超过 1 分钟失效
+        cur = now.time()
+        is_trading = (dtime(9, 30) <= cur <= dtime(11, 35)) or \
+                     (dtime(13, 0) <= cur <= dtime(15, 0))
+        
+        delta = (now - updated_at).total_seconds()
+        if is_trading:
+            return delta > 60
+        else:
+            # 盘后或周末，1小时刷新一次
+            return delta > 3600
+    except Exception:
+        return True
+
+def get_market_indices(force=False):
     """获取顶部的核心指数数据并缓存"""
-    cached = db.get_cache('market_indices')
-    if cached:
+    cached, updated_at = db.get_cache('market_indices')
+    if not force and cached and not is_cache_stale(updated_at):
         return cached
 
     # Map Sina symbols to what user requested
@@ -81,10 +109,10 @@ def get_market_indices():
 
 import json
 
-def get_hot_sectors():
+def get_hot_sectors(force=False):
     """获取精选热门板块趋势 - 切换为最底层的稳定 Sina API 防止切断连线"""
-    cached = db.get_cache('hot_sectors')
-    if cached:
+    cached, updated_at = db.get_cache('hot_sectors')
+    if not force and cached and not is_cache_stale(updated_at):
         return cached
         
     try:

@@ -19,11 +19,12 @@ class Api:
         
     def get_market_data(self):
         """Fetch all necessary market overview data directly to frontend"""
-        indices = fetcher.get_market_indices()
+        idx_res = fetcher.get_market_indices()
         sectors = fetcher.get_hot_sectors()
         
         return {
-            "indices": indices,
+            "indices": idx_res.get("indices", []),
+            "total_turnover": idx_res.get("total_turnover", 0),
             "hotSectors": sectors
         }
         
