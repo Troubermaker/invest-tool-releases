@@ -456,7 +456,7 @@ onMounted(() => {
         </div>
 
         <!-- Volume / Sentiment -->
-        <div class="flex-shrink-0 xl:pl-4 xl:border-l border-[#e5e5e5] w-[320px] flex items-stretch">
+        <div class="shrink-0 xl:pl-4 xl:border-l border-[#e5e5e5] basis-[320px] grow-[0.2] max-w-[440px] flex items-stretch">
             <div class="bg-white border border-[#e8e8e8] shadow-[0_2px_4px_rgba(0,0,0,0.02)] rounded-[4px] py-[4px] px-[10px] flex items-center gap-[10px] w-full h-full cursor-default">
                 <!-- Left: Turnover value -->
                 <div class="flex flex-col justify-center border-r border-[#f0f0f0] pr-[10px] shrink-0">
