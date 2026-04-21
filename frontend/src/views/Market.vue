@@ -436,14 +436,14 @@ onMounted(() => {
   <div class="flex flex-col h-full bg-[#fcfcfc] relative overflow-hidden">
     
     <!-- TOP HORIZONTAL STRIP: INDICES -->
-    <div class="bg-[#fafafa] border-b border-[#e5e5e5] px-4 py-3 flex flex-wrap xl:flex-nowrap items-stretch w-full gap-4 z-10 shrink-0">
-        <div class="flex-1 flex flex-wrap gap-[10px] items-center min-w-0">
+    <div class="bg-[#fafafa] border-b border-[#e5e5e5] px-4 py-2 flex flex-wrap xl:flex-nowrap items-stretch w-full gap-4 z-10 shrink-0">
+        <div class="flex-1 flex gap-[8px] items-stretch min-w-0">
             <!-- Modified to click open drawer -->
-            <div 
-              v-for="idx in marketIndices" 
-              :key="idx.name" 
+            <div
+              v-for="idx in marketIndices"
+              :key="idx.name"
               @click="openIndexChart(idx.name)"
-              class="flex-1 min-w-[110px] max-w-[140px] bg-white border border-[#e8e8e8] shadow-[0_2px_4px_rgba(0,0,0,0.02)] rounded-[4px] py-[8px] px-[8px] cursor-pointer hover:border-[#f6465d]/40 transition-[border-color] flex flex-col items-center justify-center relative overflow-hidden group"
+              class="flex-1 basis-0 min-w-0 bg-white border border-[#e8e8e8] shadow-[0_2px_4px_rgba(0,0,0,0.02)] rounded-[4px] py-[4px] px-[8px] cursor-pointer hover:border-[#f6465d]/40 transition-[border-color] flex flex-col items-center justify-center relative overflow-hidden group"
             >
                 <div class="absolute inset-0 bg-[#e84118] opacity-0 group-hover:opacity-[0.02] transition-opacity"></div>
                 <div class="text-[#888] text-[12px] font-medium text-center tracking-wide">{{ idx.name }}</div>
@@ -456,28 +456,30 @@ onMounted(() => {
         </div>
 
         <!-- Volume / Sentiment -->
-        <div class="flex-shrink-0 xl:pl-4 xl:border-l border-[#e5e5e5] w-[280px] flex items-center">
-            <div class="bg-white border border-[#e8e8e8] shadow-[0_2px_4px_rgba(0,0,0,0.02)] rounded-[4px] p-3 flex flex-col justify-center w-full h-full cursor-default">
-                <div class="flex justify-between items-end mb-1">
-                    <span class="text-[#555] text-[13px] font-medium leading-none">全市场成交额</span>
-                    <span class="text-[#222] text-[18px] font-bold leading-none tracking-tight" v-html="formatAmt(totalTurnover)"></span>
+        <div class="flex-shrink-0 xl:pl-4 xl:border-l border-[#e5e5e5] w-[320px] flex items-stretch">
+            <div class="bg-white border border-[#e8e8e8] shadow-[0_2px_4px_rgba(0,0,0,0.02)] rounded-[4px] py-[4px] px-[10px] flex items-center gap-[10px] w-full h-full cursor-default">
+                <!-- Left: Turnover value -->
+                <div class="flex flex-col justify-center border-r border-[#f0f0f0] pr-[10px] shrink-0">
+                    <span class="text-[#888] text-[11px] font-medium leading-none mb-[3px]">全市场成交额</span>
+                    <span class="text-[#222] text-[17px] font-bold leading-none tracking-tight" v-html="formatAmt(totalTurnover)"></span>
+                    <span class="text-[10px] text-[#0ecb81] font-medium leading-none mt-[4px]">↓缩量 745亿 (-3%)</span>
                 </div>
-                <div class="text-[11px] text-[#888] flex items-center justify-between mt-1 border-b border-[#f0f0f0] pb-1.5 mb-1.5">
-                    <span>较昨日 <span class="text-[#0ecb81] font-semibold tracking-tight">↓缩量 745亿 (-3%)</span></span>
-                </div>
-                <div class="flex justify-between items-center w-full pt-0.5">
-                    <span class="text-[#e84118] text-[11px] font-medium">上涨 4205 <span class="font-normal">(80%)</span></span>
-                    <span class="text-[#888] text-[10px]">平 133</span>
-                    <span class="text-[#0ecb81] text-[11px] font-medium">下跌 1072 <span class="font-normal">(20%)</span></span>
-                </div>
-                <div class="w-full h-[6px] rounded-full bg-[#f0f0f0] flex mt-1 overflow-hidden">
-                    <div class="bg-[#e84118] h-full" style="width: 80%"></div>
-                    <div class="bg-transparent h-full" style="width: 2%"></div>
-                    <div class="bg-[#0ecb81] h-full" style="width: 18%"></div>
-                </div>
-                <div class="flex justify-between mt-1 mb-[-2px]">
-                    <span class="text-[#e84118] text-[10px] bg-[#fff0f0] px-1 rounded-sm">涨停 88</span>
-                    <span class="text-[#0ecb81] text-[10px] bg-[#f0fff0] px-1 rounded-sm">跌停 9</span>
+                <!-- Right: Market breadth -->
+                <div class="flex-1 flex flex-col justify-center min-w-0">
+                    <div class="flex justify-between items-center text-[10px] leading-none">
+                        <span class="text-[#e84118] font-medium">涨 4205</span>
+                        <span class="text-[#888]">平 133</span>
+                        <span class="text-[#0ecb81] font-medium">跌 1072</span>
+                    </div>
+                    <div class="w-full h-[5px] rounded-full bg-[#f0f0f0] flex mt-[4px] overflow-hidden">
+                        <div class="bg-[#e84118] h-full" style="width: 80%"></div>
+                        <div class="bg-transparent h-full" style="width: 2%"></div>
+                        <div class="bg-[#0ecb81] h-full" style="width: 18%"></div>
+                    </div>
+                    <div class="flex justify-between mt-[4px] text-[10px] leading-none">
+                        <span class="text-[#e84118] bg-[#fff0f0] px-1 py-[1px] rounded-sm">涨停 88</span>
+                        <span class="text-[#0ecb81] bg-[#f0fff0] px-1 py-[1px] rounded-sm">跌停 9</span>
+                    </div>
                 </div>
             </div>
         </div>
