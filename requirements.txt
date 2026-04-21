@@ -1,0 +1,6 @@
+requests
+akshare
+pandas
+schedule
+pywebview
+openai
