@@ -1,8 +1,45 @@
-import time
-import fetcher
-import db
-import ai_service
+"""
+PyWebview 前后端桥接层。
+
+每个对外方法都用 @api_endpoint 装饰，统一：
+- 把 service 异常捕获成 {ok: False, error, code} 信封
+- 把业务数据包装成 {ok: True, data: ...} 信封
+
+新增接口的标准流程（以"机构持仓榜"为例）：
+1. services/institution_service.py 写业务逻辑
+2. 在本文件 import 后加:
+      @api_endpoint
+      def get_institution_holdings(self, params):
+          return institution_service.get_xxx(params)
+"""
 import json
+import traceback
+from functools import wraps
+
+import db
+from http_client import FetchError
+
+from services import market_service
+from services import sector_service
+from services import sector_stocks_service
+from services import kline_service
+import ai_service
+
+
+def api_endpoint(func):
+    """统一 try/except + 响应信封封装。"""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        try:
+            data = func(self, *args, **kwargs)
+            return {"ok": True, "data": data}
+        except FetchError as e:
+            return {"ok": False, "error": str(e), "code": e.code}
+        except Exception as e:
+            traceback.print_exc()
+            return {"ok": False, "error": str(e), "code": "INTERNAL"}
+    return wrapper
+
 
 class Api:
     def __init__(self):
@@ -11,43 +48,48 @@ class Api:
     def set_window(self, window):
         self._window = window
 
+    @api_endpoint
     def get_system_status(self):
-        return {
-            "status": "online",
-            "message": "Desktop Backend (Python) connected!"
-        }
-        
+        return {"status": "online", "message": "Desktop Backend (Python) connected!"}
+
+    @api_endpoint
     def get_market_data(self):
-        """Fetch all necessary market overview data directly to frontend"""
-        idx_res = fetcher.get_market_indices()
-        sectors = fetcher.get_hot_sectors()
-        
+        """一次性返回首页需要的概览数据。"""
+        overview = market_service.get_market_indices()
+        sectors = sector_service.get_hot_sectors()
         return {
-            "indices": idx_res.get("indices", []),
-            "total_turnover": idx_res.get("total_turnover", 0),
-            "hotSectors": sectors
+            "indices": overview.get("indices", []),
+            "total_turnover": overview.get("total_turnover", 0),
+            "hotSectors": sectors,
         }
-        
+
+    @api_endpoint
     def get_kline(self, name, timeframe):
-        """Fetch historical multi-timeframe JSON for frontend Lightweight Charts"""
-        return fetcher.get_kline_data(name, timeframe)
-        
+        return kline_service.get_kline(name, timeframe)
+
+    @api_endpoint
+    def get_sector_stocks(self, plate_id):
+        """根据 KPL 板块 ID 返回该板块精选联动股票列表"""
+        return sector_stocks_service.get_sector_stocks(plate_id)
+
+    @api_endpoint
     def analyze_market_query(self, query):
-        """Called by RightDrawer.vue to get AI analysis"""
-        indices = fetcher.get_market_indices()
-        sectors = fetcher.get_hot_sectors()
-        
+        overview = market_service.get_market_indices()
+        sectors = sector_service.get_hot_sectors()
         context = json.dumps({
-            "indices": indices,
-            "top_hot_sectors": sectors[:3]  # Only pass top 3 to save tokens
+            "indices": overview.get("indices", []),
+            "top_hot_sectors": sectors[:3],
         }, ensure_ascii=False)
-        
         return ai_service.analyze_query(query, context=context)
-        
+
+    @api_endpoint
     def refresh_cache(self):
-        """Force manual refresh clearing the db cache"""
-        conn = db.get_db()
-        conn.execute("DELETE FROM market_cache")
-        conn.commit()
-        conn.close()
-        return self.get_market_data()
+        """强制清除所有缓存并重拉行情概览。"""
+        db.clear_cache()
+        overview = market_service.get_market_indices(force=True)
+        sectors = sector_service.get_hot_sectors(force=True)
+        return {
+            "indices": overview.get("indices", []),
+            "total_turnover": overview.get("total_turnover", 0),
+            "hotSectors": sectors,
+        }

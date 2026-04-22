@@ -1,5 +1,7 @@
 <script setup>
-import { onMounted, onUnmounted, ref, nextTick, watch } from 'vue'
+import { onMounted, ref, nextTick, watch } from 'vue'
+import { api } from '../api/client'
+import { useAutoRefresh } from '../composables/useAutoRefresh'
 
 const emit = defineEmits(['openAI'])
 
@@ -20,21 +22,29 @@ function formatAmtText(amt) {
     return amt.toFixed(2) + '亿';
 }
 
-// Dummy stocks for a selected sector
-const sectorStocksMap = {
-    '算力': [
-        { code: '600845', name: '宝信软件', price: '49.12', change: '+5.45%', changeVal: '+2.54', turnover: '8.54亿', up: true },
-        { code: '300308', name: '中际旭创', price: '158.55', change: '+4.12%', changeVal: '+6.27', turnover: '35.1亿', up: true },
-        { code: '300394', name: '天孚通信', price: '143.10', change: '+3.55%', changeVal: '+4.91', turnover: '15.2亿', up: true },
-        { code: '000977', name: '浪潮信息', price: '38.56', change: '-1.23%', changeVal: '-0.48', turnover: '22.1亿', up: false },
-    ],
-    '锂电池': [
-        { code: '300750', name: '宁德时代', price: '185.33', change: '+2.10%', changeVal: '+3.81', turnover: '65.3亿', up: true },
-        { code: '002074', name: '国轩高科', price: '21.50', change: '+1.52%', changeVal: '+0.32', turnover: '11.5亿', up: true },
-    ]
-}
+const selectedSector = ref(null)
+const sectorStocks = ref([])          // 当前选中板块的联动个股列表
+const sectorStocksLoading = ref(false) // 拉取中标志
 
-const selectedSector = ref(null) 
+// 拉取某板块的成分股
+async function loadSectorStocks(plateId) {
+    if (!plateId) {
+        sectorStocks.value = []
+        return
+    }
+    sectorStocksLoading.value = true
+    try {
+        const res = await api.getSectorStocks(plateId)
+        if (res.ok) {
+            sectorStocks.value = res.data || []
+        } else {
+            console.error('板块个股拉取失败:', res.error)
+            sectorStocks.value = []
+        }
+    } finally {
+        sectorStocksLoading.value = false
+    }
+}
 
 const showIndexDrawer = ref(false)
 const drawerIndexName = ref('')
@@ -76,6 +86,7 @@ function calculateSMA(data, count) {
 
 function handleSectorClick(sector) {
     selectedSector.value = sector
+    loadSectorStocks(sector.code)
 }
 
 // 成交量智能单位： 万手 / 亿手 自动切换
@@ -288,12 +299,11 @@ async function renderChartData() {
     currentMaSeries = [];
 
     let klineData = [];
-    if (window.pywebview && window.pywebview.api) {
-        try {
-            klineData = await window.pywebview.api.get_kline(drawerIndexName.value, activeTimeframe.value);
-        } catch(e) {
-            console.error("API error fetching klines", e);
-        }
+    const res = await api.getKline(drawerIndexName.value, activeTimeframe.value);
+    if (res.ok) {
+        klineData = res.data || [];
+    } else {
+        console.error("K线接口返回错误:", res.error);
     }
 
     // Build lookup map: time → full row (so tooltip can read vol, amt, chg, pct, amp)
@@ -384,36 +394,23 @@ async function renderChartData() {
     chartInstance.timeScale().fitContent();
 }
 
-onMounted(() => {
-    const loadData = async () => {
-        if (window.pywebview && window.pywebview.api) {
-            try {
-                const res = await window.pywebview.api.get_market_data()
-                marketIndices.value = res.indices
-                totalTurnover.value = res.total_turnover
-                hotSectors.value = res.hotSectors
-                // Default select the first hot sector to fill right side automatically
-                if (hotSectors.value.length > 0 && !selectedSector.value) {
-                    selectedSector.value = hotSectors.value[0]
-                }
-            } catch (e) {
-                console.error("获取数据失败:", e)
-            }
+// 挂载时立即拉一次 + 每 60s 自动刷新，pywebview 未就绪时自动等待
+useAutoRefresh(api.getMarketData, {
+    interval: 60_000,
+    onData: (data) => {
+        marketIndices.value = data.indices
+        totalTurnover.value = data.total_turnover
+        hotSectors.value = data.hotSectors
+        // 默认选中第一个板块，右侧才不会空着
+        if (hotSectors.value.length > 0 && !selectedSector.value) {
+            selectedSector.value = hotSectors.value[0]
+            loadSectorStocks(hotSectors.value[0].code)
         }
-    }
+    },
+    onError: (err) => console.error("获取行情数据失败:", err),
+})
 
-    if (window.pywebview && window.pywebview.api) {
-        loadData() 
-    } else {
-        window.addEventListener('pywebviewready', loadData) 
-    }
-
-    // 每 60 秒自动刷新一次行情数据
-    const refreshInterval = setInterval(loadData, 60000)
-    onUnmounted(() => {
-        clearInterval(refreshInterval)
-    })
-    
+onMounted(() => {
     // Fallback dummy
     setTimeout(() => {
         if (marketIndices.value.length === 0) {
@@ -508,22 +505,27 @@ onMounted(() => {
               v-for="item in hotSectors" 
               :key="item.name" 
               @click="handleSectorClick(item)"
-              class="flex items-center justify-between py-[12px] px-[16px] border-b border-[#f5f5f5] hover:bg-[#fffafa] cursor-pointer group transition duration-200"
-              :class="selectedSector?.name === item.name ? 'bg-[#fff0f0] border-l-2 border-l-[#dc2626] pr-[16px] pl-[14px]' : 'border-l-2 border-l-transparent'"
+              class="flex items-center justify-between py-[10px] px-[14px] border-b border-[#f5f5f5] hover:bg-[#fffafa] cursor-pointer group transition duration-200"
+              :class="selectedSector?.name === item.name ? 'bg-[#fff0f0] border-l-2 border-l-[#dc2626] pr-[14px] pl-[12px]' : 'border-l-2 border-l-transparent'"
             >
-              <div class="flex items-center gap-[10px] overflow-hidden max-w-[65%]">
-                 <div class="w-[20px] h-[20px] flex-shrink-0 rounded-full flex items-center justify-center text-[11px] font-bold" 
-                     :class="item.rank <= 3 ? 'bg-[#dc2626] text-white shadow-sm' : 'bg-[#f0f0f0] text-[#777]'">
+              <div class="flex items-center gap-[10px] flex-1 min-w-0">
+                <div class="w-[22px] h-[22px] shrink-0 rounded-[4px] flex items-center justify-center text-[11px] font-bold"
+                     :class="item.rank <= 3 ? 'bg-[#dc2626] text-white' : 'bg-[#f0f0f0] text-[#777]'">
                   {{ item.rank }}
                 </div>
                 <div class="flex flex-col min-w-0 leading-tight">
                   <span class="text-[14px] font-bold text-[#222] truncate block" :title="item.name">{{ item.name }}</span>
-                  <span class="text-[11px] text-[#999] truncate block mt-[2px] font-mono">{{ item.code }}</span>
+                  <span v-if="item.strength" class="text-[11px] text-[#999] font-medium mt-[3px] flex items-center gap-[4px]" :title="'KPL 精选强度分'">
+                    <svg class="w-[11px] h-[11px] text-[#dc2626]/55" viewBox="0 0 20 20" fill="currentColor">
+                      <path fill-rule="evenodd" d="M12.395 2.553a1 1 0 00-1.45-.385c-.345.23-.614.558-.822.88-.214.33-.403.713-.57 1.116-.334.804-.614 1.768-.84 2.734a31.365 31.365 0 00-.613 3.58 2.64 2.64 0 01-.945-1.067c-.328-.68-.398-1.534-.398-2.654A1 1 0 005.05 6.05 6.981 6.981 0 003 11a7 7 0 1011.95-4.95c-.592-.591-.98-.985-1.348-1.467-.363-.476-.724-1.063-1.207-2.03zM12.12 15.12A3 3 0 017 13s.879.5 2.5.5c0-1 .5-4 1.25-4.5.5 1 .786 1.293 1.371 1.879A2.99 2.99 0 0113 13a2.99 2.99 0 01-.879 2.121z" clip-rule="evenodd" />
+                    </svg>
+                    <span>{{ item.strength.toLocaleString() }}</span>
+                  </span>
                 </div>
               </div>
-              <div class="flex flex-col items-end leading-tight">
-                <span class="text-[14px] font-bold text-[#dc2626] block">{{ item.change }}</span>
-                <span class="text-[11px] text-[#dc2626]/70 font-medium block mt-[2px]">{{ item.inflow }}</span>
+              <div class="flex flex-col items-end leading-tight shrink-0 ml-2">
+                <span class="text-[13px] font-bold" :class="item.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ item.change }}</span>
+                <span class="text-[11px] font-medium mt-[3px]" :class="(item.inflow && item.inflow.startsWith('-')) ? 'text-[#059669]/80' : 'text-[#dc2626]/75'">{{ item.inflow }}</span>
               </div>
             </div>
         </div>
@@ -548,36 +550,69 @@ onMounted(() => {
                     <thead class="sticky top-0 bg-[#fafafa] shadow-[0_1px_0_#eeeeee] z-10 text-[12px] text-[#888]">
                         <tr>
                             <th class="px-[20px] py-[10px] font-normal w-[80px]">代码</th>
-                            <th class="px-[20px] py-[10px] font-normal w-[120px]">名称</th>
+                            <th class="px-[20px] py-[10px] font-normal w-[260px]">名称</th>
                             <th class="px-[20px] py-[10px] font-normal text-right">最新价</th>
-                            <th class="px-[20px] py-[10px] font-normal text-right">涨跌幅</th>
-                            <th class="px-[20px] py-[10px] font-normal text-right">涨跌额</th>
+                            <th class="px-[20px] py-[10px] font-normal text-right">涨幅</th>
                             <th class="px-[20px] py-[10px] font-normal text-right">成交额</th>
+                            <th class="px-[16px] py-[10px] font-normal text-right">主力买</th>
+                            <th class="px-[16px] py-[10px] font-normal text-right">主力卖</th>
+                            <th class="px-[16px] py-[10px] font-normal text-right">主力净额</th>
                             <th class="px-[20px] py-[10px] font-normal text-center">操作</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <tr 
-                            v-for="stock in (sectorStocksMap[selectedSector.name] || [])" 
+                        <tr
+                            v-for="stock in sectorStocks"
                             :key="stock.code"
                             class="border-b border-[#f5f5f5] hover:bg-[#f2f8fc] transition-colors group cursor-default"
                         >
-                            <td class="px-[20px] py-[12px] text-[13px] text-[#666] font-mono">{{ stock.code }}</td>
-                            <td class="px-[20px] py-[12px] text-[14px] font-bold text-[#111]">{{ stock.name }}</td>
-                            <td class="px-[20px] py-[12px] text-[15px] font-bold text-right" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.price }}</td>
-                            <td class="px-[20px] py-[12px] text-[14px] font-bold text-right" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.change }}</td>
-                            <td class="px-[20px] py-[12px] text-[13px] text-right" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.changeVal }}</td>
-                            <td class="px-[20px] py-[12px] text-[13px] text-[#555] font-medium text-right">{{ stock.turnover }}</td>
-                            <td class="px-[20px] py-[12px] text-[12px] text-center w-[120px]">
+                            <td class="px-[20px] py-[10px] text-[13px] text-[#666] font-mono align-top">{{ stock.code }}</td>
+                            <td class="px-[20px] py-[10px] align-top">
+                                <div class="flex items-center gap-[6px] flex-wrap">
+                                    <span class="text-[14px] font-bold text-[#111]">{{ stock.name }}</span>
+                                    <span v-if="stock.leader"
+                                          class="text-[10px] font-bold px-[6px] py-[1px] rounded-[3px] text-white leading-[1.4] shadow-[0_1px_2px_rgba(220,38,38,0.25)]"
+                                          :class="stock.leader === '破板' ? 'bg-[#94a3b8] !shadow-[0_1px_2px_rgba(100,116,139,0.25)]' : 'bg-[#dc2626]'">
+                                        {{ stock.leader }}
+                                    </span>
+                                    <span v-if="stock.streak"
+                                          class="text-[10px] font-semibold px-[6px] py-[1px] rounded-[3px] bg-[#fff0f0] text-[#dc2626] border border-[#fecaca] leading-[1.4]">
+                                        {{ stock.streak }}
+                                    </span>
+                                </div>
+                                <div v-if="stock.mainForce || stock.themesAll" class="mt-[4px] flex items-center gap-[4px] truncate leading-tight" :title="stock.themesAll">
+                                    <span v-if="stock.mainForce"
+                                          class="shrink-0 text-[10px] font-semibold px-[5px] py-[1px] rounded-[3px] leading-[1.4]"
+                                          :class="stock.mainForce === '游资' ? 'bg-[#f3e8ff] text-[#7c3aed]' : 'bg-[#dbeafe] text-[#1d4ed8]'">
+                                        {{ stock.mainForce }}
+                                    </span>
+                                    <span v-if="stock.themesAll" class="text-[11px] text-[#999] truncate">{{ stock.themesAll }}</span>
+                                </div>
+                            </td>
+                            <td class="px-[20px] py-[10px] text-[15px] font-bold text-right align-top tabular-nums" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.price }}</td>
+                            <td class="px-[20px] py-[10px] text-[14px] font-bold text-right align-top tabular-nums" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.change }}</td>
+                            <td class="px-[20px] py-[10px] text-[13px] text-[#475569] font-medium text-right align-top tabular-nums">{{ stock.turnover }}</td>
+                            <td class="px-[16px] py-[10px] text-[13px] text-[#475569] font-medium text-right align-top tabular-nums">{{ stock.mainBuy }}</td>
+                            <td class="px-[16px] py-[10px] text-[13px] text-[#475569] font-medium text-right align-top tabular-nums">{{ stock.mainSell }}</td>
+                            <td class="px-[16px] py-[10px] text-[13px] font-bold text-right align-top tabular-nums" :class="stock.mainNetUp ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.mainNet }}</td>
+                            <td class="px-[20px] py-[10px] text-[12px] text-center w-[120px] align-top">
                                 <div class="opacity-0 group-hover:opacity-100 flex justify-center gap-3 transition">
                                     <button class="text-[#3b82f6] hover:text-[#2563eb] font-medium border border-transparent hover:border-[#bfdbfe] px-2 py-0.5 rounded">详情</button>
                                     <button class="text-[#dc2626] hover:text-[#c23616] font-medium border border-transparent hover:border-[#ffcccc] px-2 py-0.5 rounded">+ 自选</button>
                                 </div>
                             </td>
                         </tr>
-                        <tr v-if="!sectorStocksMap[selectedSector.name] || sectorStocksMap[selectedSector.name].length === 0">
-                            <td colspan="7" class="px-[20px] py-[80px] text-center text-[#aaa] text-[13px]">
-                                暂无该板块成分股数据，开发环境下只接入了局部 Mock 数据...
+                        <tr v-if="sectorStocksLoading && !sectorStocks.length">
+                            <td colspan="9" class="px-[20px] py-[60px] text-center text-[#aaa] text-[13px]">
+                                <span class="inline-flex items-center gap-2">
+                                    <span class="w-[10px] h-[10px] rounded-full bg-[#dc2626]/50 animate-pulse"></span>
+                                    正在拉取 {{ selectedSector.name }} 板块联动个股...
+                                </span>
+                            </td>
+                        </tr>
+                        <tr v-else-if="!sectorStocks.length">
+                            <td colspan="9" class="px-[20px] py-[80px] text-center text-[#aaa] text-[13px]">
+                                暂无该板块成分股数据
                             </td>
                         </tr>
                     </tbody>

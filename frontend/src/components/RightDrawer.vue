@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import { api, isPywebviewReady } from '../api/client'
 
 const props = defineProps(['isOpen'])
 const emit = defineEmits(['close'])
@@ -9,25 +10,28 @@ const messages = ref([
 ])
 const input = ref('')
 
-function send() {
-  if(!input.value.trim()) return;
+async function send() {
+  if (!input.value.trim()) return
   messages.value.push({ role: 'user', text: input.value })
   const userText = input.value
   input.value = ''
-  
-  if (window.pywebview && window.pywebview.api) {
-      messages.value.push({ role: 'ai', text: '正在拼命扫描市场数据并思考中...' })
-      window.pywebview.api.analyze_market_query(userText).then(reply => {
-          messages.value.pop()
-          messages.value.push({ role: 'ai', text: reply })
-      }).catch(e => {
-          messages.value.pop()
-          messages.value.push({ role: 'ai', text: '调用出错: ' + e })
-      })
+
+  // 开发模式：没有 pywebview 桥接时给个模拟回复
+  if (!isPywebviewReady()) {
+    setTimeout(() => {
+      messages.value.push({ role: 'ai', text: `关于"${userText}"，本地无桌面引擎。` })
+    }, 600)
+    return
+  }
+
+  messages.value.push({ role: 'ai', text: '正在拼命扫描市场数据并思考中...' })
+  const res = await api.analyzeMarketQuery(userText)
+  messages.value.pop()
+
+  if (res.ok) {
+    messages.value.push({ role: 'ai', text: res.data })
   } else {
-      setTimeout(() => {
-        messages.value.push({ role: 'ai', text: `关于"${userText}"，本地无桌面引擎。` })
-      }, 600)
+    messages.value.push({ role: 'ai', text: '调用出错: ' + (res.error || '未知错误') })
   }
 }
 </script>
