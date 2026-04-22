@@ -1,3 +1,10 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Use tabular (monospace-width) digits across the whole app.
+   Makes prices / percentages / volumes vertically align and gives the
+   professional terminal feel typical of financial dashboards. */
+html {
+  font-variant-numeric: tabular-nums;
+}

@@ -179,7 +179,7 @@ async function initChart() {
                 const d = new Date(param.time * 1000);
                 const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
                 const full = klineDataMap.get(param.time) || {};
-                const clr = (full.chg ?? 0) >= 0 ? '#e84118' : '#0ecb81';
+                const clr = (full.chg ?? 0) >= 0 ? '#dc2626' : '#059669';
                 tooltipContent = `<div class="font-bold mb-1 text-[#333] border-b border-[#eee] pb-1">${timeStr}</div>
                                   <div class="flex flex-col gap-y-1 mt-1 text-[#555] font-mono min-w-[130px]">
                                     <div class="flex justify-between gap-4"><span>最新价</span> <span class="font-bold" style="color:${clr}">${data.value.toFixed(2)}</span></div>
@@ -195,7 +195,7 @@ async function initChart() {
                 const full = klineDataMap.get(param.time) || {};
                 const d = new Date(param.time * 1000);
                 const dateStr = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-                const clr = (full.chg ?? 0) >= 0 ? '#e84118' : '#0ecb81';
+                const clr = (full.chg ?? 0) >= 0 ? '#dc2626' : '#059669';
                 
                 tooltipContent = `<div class="font-bold mb-1 text-[#333] border-b border-[#eee] pb-1">${dateStr}</div>
                                   <div class="flex flex-col gap-y-1 mt-1 text-[#555] font-mono min-w-[130px]">
@@ -215,8 +215,8 @@ async function initChart() {
                     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
                 })();
                 const isUp = data.close >= data.open;
-                const color = isUp ? '#e84118' : '#0ecb81';
-                const chgColor = (full.chg ?? 0) >= 0 ? '#e84118' : '#0ecb81';
+                const color = isUp ? '#dc2626' : '#059669';
+                const chgColor = (full.chg ?? 0) >= 0 ? '#dc2626' : '#059669';
                 
                 // Build MA HTML strand
                 let maHTML = '';
@@ -311,8 +311,15 @@ async function renderChartData() {
         if(klineData && klineData.length) currentLineSeries.setData(klineData);
     } else {
         currentCandleSeries = chartInstance.addCandlestickSeries({
-            upColor: '#f6465d', downColor: '#0ecb81', borderVisible: false,
-            wickUpColor: '#f6465d', wickDownColor: '#0ecb81',
+            // 阳线（涨/红）空心：极淡红底 + 红色边框 —— 保留色彩暗示，又兼顾色弱辨识
+            upColor: 'rgba(220, 38, 38, 0.05)',
+            borderUpColor: '#dc2626',
+            wickUpColor: '#dc2626',
+            // 阴线（跌/绿）实体：整根实心绿色
+            downColor: '#059669',
+            borderDownColor: '#059669',
+            wickDownColor: '#059669',
+            borderVisible: true,
         });
         if(klineData && klineData.length) {
             currentCandleSeries.setData(klineData);
@@ -443,12 +450,12 @@ onMounted(() => {
               v-for="idx in marketIndices"
               :key="idx.name"
               @click="openIndexChart(idx.name)"
-              class="flex-1 basis-0 min-w-0 bg-white border border-[#e8e8e8] shadow-[0_2px_4px_rgba(0,0,0,0.02)] rounded-[4px] py-[4px] px-[8px] cursor-pointer hover:border-[#f6465d]/40 transition-[border-color] flex flex-col items-center justify-center relative overflow-hidden group"
+              class="flex-1 basis-0 min-w-0 bg-white border border-[#e8e8e8] rounded-[4px] py-[4px] px-[8px] cursor-pointer hover:border-[#dc2626]/40 transition-[border-color] flex flex-col items-center justify-center relative overflow-hidden group"
             >
-                <div class="absolute inset-0 bg-[#e84118] opacity-0 group-hover:opacity-[0.02] transition-opacity"></div>
+                <div class="absolute inset-0 bg-[#dc2626] opacity-0 group-hover:opacity-[0.02] transition-opacity"></div>
                 <div class="text-[#888] text-[12px] font-medium text-center tracking-wide">{{ idx.name }}</div>
-                <div class="font-bold text-center text-[16px] my-[2px] font-sans tracking-tight" :class="idx.up ? 'text-[#e84118]' : 'text-[#0ecb81]'">{{ idx.price }}</div>
-                <div class="flex justify-center items-center gap-[6px] text-[11px] font-medium" :class="idx.up ? 'text-[#e84118]' : 'text-[#0ecb81]'">
+                <div class="font-bold text-center text-[16px] my-[2px] font-sans tracking-tight" :class="idx.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ idx.price }}</div>
+                <div class="flex justify-center items-center gap-[6px] text-[11px] font-medium" :class="idx.up ? 'text-[#dc2626]' : 'text-[#059669]'">
                     <span>{{ idx.value }}</span>
                     <span>{{ idx.change }}</span>
                 </div>
@@ -457,28 +464,28 @@ onMounted(() => {
 
         <!-- Volume / Sentiment -->
         <div class="shrink-0 xl:pl-4 xl:border-l border-[#e5e5e5] basis-[320px] grow-[0.2] max-w-[440px] flex items-stretch">
-            <div class="bg-white border border-[#e8e8e8] shadow-[0_2px_4px_rgba(0,0,0,0.02)] rounded-[4px] py-[4px] px-[10px] flex items-center gap-[10px] w-full h-full cursor-default">
+            <div class="bg-white border border-[#e8e8e8] rounded-[4px] py-[4px] px-[10px] flex items-center gap-[10px] w-full h-full cursor-default">
                 <!-- Left: Turnover value -->
                 <div class="flex-[4] basis-0 min-w-0 flex flex-col justify-center border-r border-[#f0f0f0] pr-[12px]">
                     <span class="text-[#999] text-[11px] font-medium leading-none tracking-[0.12em] mb-[7px]">全市场成交额</span>
                     <span class="text-[#222] text-[18px] font-bold leading-none" v-html="formatAmt(totalTurnover)"></span>
-                    <span class="text-[10px] text-[#0ecb81] font-medium leading-none tracking-wide mt-[8px]">↓ 缩量 745亿 <span class="opacity-70 ml-[2px]">(-3%)</span></span>
+                    <span class="text-[10px] text-[#059669] font-medium leading-none tracking-wide mt-[8px]">↓ 缩量 745亿 <span class="opacity-70 ml-[2px]">(-3%)</span></span>
                 </div>
                 <!-- Right: Market breadth -->
                 <div class="flex-[5] basis-0 min-w-0 flex flex-col justify-center">
                     <div class="flex justify-between items-center text-[10px] leading-none">
-                        <span class="text-[#e84118] font-medium">涨 4205</span>
+                        <span class="text-[#dc2626] font-medium">涨 4205</span>
                         <span class="text-[#888]">平 133</span>
-                        <span class="text-[#0ecb81] font-medium">跌 1072</span>
+                        <span class="text-[#059669] font-medium">跌 1072</span>
                     </div>
                     <div class="w-full h-[5px] rounded-full bg-[#f0f0f0] flex mt-[4px] overflow-hidden">
-                        <div class="bg-[#e84118] h-full" style="width: 80%"></div>
+                        <div class="bg-[#dc2626] h-full" style="width: 80%"></div>
                         <div class="bg-transparent h-full" style="width: 2%"></div>
-                        <div class="bg-[#0ecb81] h-full" style="width: 18%"></div>
+                        <div class="bg-[#059669] h-full" style="width: 18%"></div>
                     </div>
                     <div class="flex justify-between mt-[4px] text-[10px] leading-none">
-                        <span class="text-[#e84118] bg-[#fff0f0] px-1 py-[1px] rounded-sm">涨停 88</span>
-                        <span class="text-[#0ecb81] bg-[#f0fff0] px-1 py-[1px] rounded-sm">跌停 9</span>
+                        <span class="text-[#dc2626] bg-[#fff0f0] px-1 py-[1px] rounded-sm">涨停 88</span>
+                        <span class="text-[#059669] bg-[#f0fff0] px-1 py-[1px] rounded-sm">跌停 9</span>
                     </div>
                 </div>
             </div>
@@ -490,7 +497,7 @@ onMounted(() => {
       
       <!-- Left Column: 精选板块 -->
       <div class="w-[280px] bg-white border-r border-[#e5e5e5] flex flex-col flex-shrink-0 z-0 relative">
-        <div class="h-[44px] bg-[#fff5f5] text-[#e84118] border-b border-[#ffe5e5] flex items-center justify-between px-[16px] font-semibold text-[14px]">
+        <div class="h-[44px] bg-[#fff5f5] text-[#dc2626] border-b border-[#ffe5e5] flex items-center justify-between px-[16px] font-semibold text-[14px]">
           <span>精选联动板块区</span>
         </div>
         
@@ -500,11 +507,11 @@ onMounted(() => {
               :key="item.name" 
               @click="handleSectorClick(item)"
               class="flex items-center justify-between py-[12px] px-[16px] border-b border-[#f5f5f5] hover:bg-[#fffafa] cursor-pointer group transition duration-200"
-              :class="selectedSector?.name === item.name ? 'bg-[#fff0f0] border-l-2 border-l-[#e84118] pr-[16px] pl-[14px]' : 'border-l-2 border-l-transparent'"
+              :class="selectedSector?.name === item.name ? 'bg-[#fff0f0] border-l-2 border-l-[#dc2626] pr-[16px] pl-[14px]' : 'border-l-2 border-l-transparent'"
             >
               <div class="flex items-center gap-[10px] overflow-hidden max-w-[65%]">
                  <div class="w-[20px] h-[20px] flex-shrink-0 rounded-full flex items-center justify-center text-[11px] font-bold" 
-                     :class="item.rank <= 3 ? 'bg-[#e84118] text-white shadow-sm' : 'bg-[#f0f0f0] text-[#777]'">
+                     :class="item.rank <= 3 ? 'bg-[#dc2626] text-white shadow-sm' : 'bg-[#f0f0f0] text-[#777]'">
                   {{ item.rank }}
                 </div>
                 <div class="flex flex-col min-w-0 leading-tight">
@@ -513,8 +520,8 @@ onMounted(() => {
                 </div>
               </div>
               <div class="flex flex-col items-end leading-tight">
-                <span class="text-[14px] font-bold text-[#e84118] block">{{ item.change }}</span>
-                <span class="text-[11px] text-[#e84118]/70 font-medium block mt-[2px]">{{ item.inflow }}</span>
+                <span class="text-[14px] font-bold text-[#dc2626] block">{{ item.change }}</span>
+                <span class="text-[11px] text-[#dc2626]/70 font-medium block mt-[2px]">{{ item.inflow }}</span>
               </div>
             </div>
         </div>
@@ -526,11 +533,11 @@ onMounted(() => {
             <div class="h-[43px] px-[20px] border-b border-[#f0f0f0] flex justify-between items-center bg-white shrink-0">
                 <div class="flex items-center gap-3">
                     <h2 class="text-[15px] font-bold text-[#111] tracking-wide">{{ selectedSector.name }} <span class="text-[12px] font-normal text-[#888] ml-1">板块成分股</span></h2>
-                    <div class="text-[12px] text-[#e84118] font-bold bg-[#fff5f5] px-2 py-0.5 rounded-[4px] border border-[#ffe5e5]">领涨: {{ selectedSector.change }}</div>
+                    <div class="text-[12px] text-[#dc2626] font-bold bg-[#fff5f5] px-2 py-0.5 rounded-[4px] border border-[#ffe5e5]">领涨: {{ selectedSector.change }}</div>
                 </div>
                 <div class="flex gap-[10px] items-center">
                     <input type="text" placeholder="键盘精灵搜索..." class="bg-[#f9fafb] border border-[#e5e5e5] rounded-[4px] px-[10px] py-[4px] text-[12px] outline-none focus:border-[#ff6b6b] focus:bg-white w-[180px] transition placeholder:text-[#ccc]">
-                    <button @click="emit('openAI')" class="px-[12px] py-[4px] bg-[#fff5f5] text-[#e84118] border border-[#ffe5e5] shadow-[0_1px_2px_rgba(0,0,0,0.02)] text-[12px] font-bold rounded-[4px] hover:bg-[#e84118] hover:text-white transition">AI 分析该题材</button>
+                    <button @click="emit('openAI')" class="px-[12px] py-[4px] bg-[#fff5f5] text-[#dc2626] border border-[#ffe5e5] text-[12px] font-bold rounded-[4px] hover:bg-[#dc2626] hover:text-white transition">AI 分析该题材</button>
                 </div>
             </div>
             
@@ -555,14 +562,14 @@ onMounted(() => {
                         >
                             <td class="px-[20px] py-[12px] text-[13px] text-[#666] font-mono">{{ stock.code }}</td>
                             <td class="px-[20px] py-[12px] text-[14px] font-bold text-[#111]">{{ stock.name }}</td>
-                            <td class="px-[20px] py-[12px] text-[15px] font-bold text-right" :class="stock.up ? 'text-[#e84118]' : 'text-[#0ecb81]'">{{ stock.price }}</td>
-                            <td class="px-[20px] py-[12px] text-[14px] font-bold text-right" :class="stock.up ? 'text-[#e84118]' : 'text-[#0ecb81]'">{{ stock.change }}</td>
-                            <td class="px-[20px] py-[12px] text-[13px] text-right" :class="stock.up ? 'text-[#e84118]' : 'text-[#0ecb81]'">{{ stock.changeVal }}</td>
+                            <td class="px-[20px] py-[12px] text-[15px] font-bold text-right" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.price }}</td>
+                            <td class="px-[20px] py-[12px] text-[14px] font-bold text-right" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.change }}</td>
+                            <td class="px-[20px] py-[12px] text-[13px] text-right" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.changeVal }}</td>
                             <td class="px-[20px] py-[12px] text-[13px] text-[#555] font-medium text-right">{{ stock.turnover }}</td>
                             <td class="px-[20px] py-[12px] text-[12px] text-center w-[120px]">
                                 <div class="opacity-0 group-hover:opacity-100 flex justify-center gap-3 transition">
                                     <button class="text-[#3b82f6] hover:text-[#2563eb] font-medium border border-transparent hover:border-[#bfdbfe] px-2 py-0.5 rounded">详情</button>
-                                    <button class="text-[#e84118] hover:text-[#c23616] font-medium border border-transparent hover:border-[#ffcccc] px-2 py-0.5 rounded">+ 自选</button>
+                                    <button class="text-[#dc2626] hover:text-[#c23616] font-medium border border-transparent hover:border-[#ffcccc] px-2 py-0.5 rounded">+ 自选</button>
                                 </div>
                             </td>
                         </tr>
@@ -589,7 +596,7 @@ onMounted(() => {
             <div class="h-[54px] px-[24px] border-b border-[#f0f0f0] flex justify-between items-center bg-[#fafafa] rounded-t-xl shrink-0 cursor-default">
                 <div class="flex items-center gap-[16px]">
                     <div class="flex items-center gap-2">
-                        <div class="w-1.5 h-4 rounded-full bg-[#e84118]"></div>
+                        <div class="w-1.5 h-4 rounded-full bg-[#dc2626]"></div>
                         <h2 class="text-[16px] font-bold text-[#111] tracking-wide">{{ drawerIndexName }}</h2>
                     </div>
                     
@@ -613,7 +620,7 @@ onMounted(() => {
                         AI 解盘
                     </button>
                     <!-- Close button -->
-                    <button @click="closeIndexChart" class="w-7 h-7 flex items-center justify-center rounded-full hover:bg-[#ffe5e5] text-[#999] hover:text-[#e84118] transition ml-2">
+                    <button @click="closeIndexChart" class="w-7 h-7 flex items-center justify-center rounded-full hover:bg-[#ffe5e5] text-[#999] hover:text-[#dc2626] transition ml-2">
                         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                         </svg>

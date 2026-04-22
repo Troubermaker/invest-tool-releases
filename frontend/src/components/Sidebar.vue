@@ -29,14 +29,14 @@ const settingsItem = { id: 'settings', name: '设置', icon: 'M9.594 3.94c.09-.5
         @click="emit('navigate', item.id)"
         class="flex flex-col items-center w-full group relative py-2"
       >
-        <div :class="['flex flex-col items-center transition-colors', currentTab === item.id ? 'text-[#e84118]' : 'text-[#7f8fa6] hover:text-[#e84118]']">
+        <div :class="['flex flex-col items-center transition-colors', currentTab === item.id ? 'text-[#dc2626]' : 'text-[#7f8fa6] hover:text-[#dc2626]']">
           <!-- Active Indicator line on left -->
-          <div v-if="currentTab === item.id" class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-full bg-[#e84118]"></div>
+          <div v-if="currentTab === item.id" class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-full bg-[#dc2626]"></div>
           
           <svg class="w-[22px] h-[22px] mb-1.5 mx-auto" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
           </svg>
-          <span class="text-[12px] font-medium block leading-none tracking-wider" :class="currentTab === item.id ? 'text-[#e84118]' : 'text-[#7f8fa6] group-hover:text-[#e84118]'">{{ item.name }}</span>
+          <span class="text-[12px] font-medium block leading-none tracking-wider" :class="currentTab === item.id ? 'text-[#dc2626]' : 'text-[#7f8fa6] group-hover:text-[#dc2626]'">{{ item.name }}</span>
         </div>
       </button>
     </div>
@@ -47,7 +47,7 @@ const settingsItem = { id: 'settings', name: '设置', icon: 'M9.594 3.94c.09-.5
         @click="emit('navigate', settingsItem.id)"
         class="flex flex-col items-center w-full group relative py-2 mb-2"
       >
-        <div :class="['flex flex-col items-center transition-colors', currentTab === settingsItem.id ? 'text-[#e84118]' : 'text-[#7f8fa6] hover:text-[#e84118]']">
+        <div :class="['flex flex-col items-center transition-colors', currentTab === settingsItem.id ? 'text-[#dc2626]' : 'text-[#7f8fa6] hover:text-[#dc2626]']">
           <svg class="w-[22px] h-[22px] mb-1.5 mx-auto" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" :d="settingsItem.icon" />
           </svg>
