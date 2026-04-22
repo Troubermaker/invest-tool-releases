@@ -25,6 +25,7 @@ from services import sector_stocks_service
 from services import kline_service
 from services import limit_up_ladder_service
 from services import market_sentiment_service
+from services import watchlist_service
 import ai_service
 
 
@@ -83,6 +84,74 @@ class Api:
     def get_market_sentiment(self):
         """市场情绪：全市场成交额（较昨日）+ 涨跌家数 + 涨停跌停"""
         return market_sentiment_service.get_sentiment()
+
+    # =========== 自选股 Watchlist =========== #
+
+    @api_endpoint
+    def get_watchlist_groups(self):
+        """所有自选分组（按 sort_order 升序）"""
+        return watchlist_service.get_groups()
+
+    @api_endpoint
+    def create_watchlist_group(self, name):
+        """创建新分组，返回 {id, name}"""
+        gid = watchlist_service.create_group(name)
+        return {"id": gid, "name": name}
+
+    @api_endpoint
+    def rename_watchlist_group(self, group_id, new_name):
+        watchlist_service.rename_group(group_id, new_name)
+        return {"ok": True}
+
+    @api_endpoint
+    def delete_watchlist_group(self, group_id):
+        watchlist_service.delete_group(group_id)
+        return {"ok": True}
+
+    @api_endpoint
+    def reorder_watchlist_groups(self, ordered_ids):
+        """参数是 group id 数组，顺序即新排序"""
+        watchlist_service.reorder_groups(ordered_ids)
+        return {"ok": True}
+
+    @api_endpoint
+    def get_watchlist_stocks(self, group_id):
+        """某分组下的股票列表（不含实时行情，P2 另行填充）"""
+        return watchlist_service.get_group_stocks(group_id)
+
+    @api_endpoint
+    def get_all_watchlist_stocks(self):
+        """虚拟分组'全部自选'：所有分组股票合并去重，返回含 groups 字段"""
+        return watchlist_service.get_all_stocks_deduped()
+
+    @api_endpoint
+    def add_watchlist_stock(self, group_id, code, name='', added_price=None, remark=''):
+        watchlist_service.add_stock(group_id, code, name, added_price, remark)
+        return {"ok": True}
+
+    @api_endpoint
+    def update_watchlist_stock(self, group_id, code, name=None, added_price=None, remark=None):
+        watchlist_service.update_stock(group_id, code, name=name, added_price=added_price, remark=remark)
+        return {"ok": True}
+
+    @api_endpoint
+    def remove_watchlist_stock(self, group_id, code):
+        watchlist_service.remove_stock(group_id, code)
+        return {"ok": True}
+
+    @api_endpoint
+    def reorder_watchlist_stocks(self, group_id, ordered_codes):
+        watchlist_service.reorder_stocks(group_id, ordered_codes)
+        return {"ok": True}
+
+    @api_endpoint
+    def get_user_preference(self, key, default=None):
+        return watchlist_service.get_preference(key, default)
+
+    @api_endpoint
+    def set_user_preference(self, key, value):
+        watchlist_service.set_preference(key, value)
+        return {"ok": True}
 
     @api_endpoint
     def analyze_market_query(self, query):

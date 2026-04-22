@@ -91,4 +91,35 @@ export const api = {
 
   /** 后端心跳探测 */
   getSystemStatus: () => call('get_system_status'),
+
+  // -------- 自选股 --------
+  /** 所有分组（按顺序）*/
+  getWatchlistGroups: () => call('get_watchlist_groups'),
+  /** 新建分组，返回 { id, name } */
+  createWatchlistGroup: (name) => call('create_watchlist_group', name),
+  /** 重命名分组 */
+  renameWatchlistGroup: (groupId, newName) => call('rename_watchlist_group', groupId, newName),
+  /** 删除分组（级联删除组内股票）*/
+  deleteWatchlistGroup: (groupId) => call('delete_watchlist_group', groupId),
+  /** 重排分组，参数 [id1, id2, ...] */
+  reorderWatchlistGroups: (orderedIds) => call('reorder_watchlist_groups', orderedIds),
+
+  /** 某分组下的股票列表 */
+  getWatchlistStocks: (groupId) => call('get_watchlist_stocks', groupId),
+  /** 全部自选（虚拟分组，去重合并）*/
+  getAllWatchlistStocks: () => call('get_all_watchlist_stocks'),
+  /** 添加股票到分组 */
+  addWatchlistStock: (groupId, code, name, addedPrice, remark) =>
+    call('add_watchlist_stock', groupId, code, name || '', addedPrice ?? null, remark || ''),
+  /** 编辑股票信息（仅更新传入的字段）*/
+  updateWatchlistStock: (groupId, code, updates) =>
+    call('update_watchlist_stock', groupId, code, updates.name ?? null, updates.addedPrice ?? null, updates.remark ?? null),
+  /** 从分组移除股票 */
+  removeWatchlistStock: (groupId, code) => call('remove_watchlist_stock', groupId, code),
+  /** 重排分组内股票，参数 [code1, code2, ...] */
+  reorderWatchlistStocks: (groupId, orderedCodes) => call('reorder_watchlist_stocks', groupId, orderedCodes),
+
+  // -------- 用户偏好 --------
+  getUserPreference: (key, defaultVal) => call('get_user_preference', key, defaultVal ?? null),
+  setUserPreference: (key, value) => call('set_user_preference', key, value),
 }

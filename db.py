@@ -21,7 +21,7 @@ def init_db():
             updated_at TIMESTAMP
         )
     ''')
-    # 自选股表
+    # 旧单表自选（保留兼容；新代码用下面的 watchlist_groups/watchlist_stocks）
     c.execute('''
         CREATE TABLE IF NOT EXISTS watchlist (
             code TEXT PRIMARY KEY,
@@ -29,6 +29,46 @@ def init_db():
             added_at TIMESTAMP
         )
     ''')
+    # 自选分组
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS watchlist_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # 自选分组下的股票
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS watchlist_stocks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT,
+            added_price REAL,
+            remark TEXT DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(group_id, code),
+            FOREIGN KEY (group_id) REFERENCES watchlist_groups(id) ON DELETE CASCADE
+        )
+    ''')
+    # 迁移旧表：给已存在的 watchlist_stocks 表补 added_price / remark 字段
+    for col, decl in [('added_price', 'REAL'), ('remark', "TEXT DEFAULT ''")]:
+        try:
+            c.execute(f'ALTER TABLE watchlist_stocks ADD COLUMN {col} {decl}')
+        except Exception:
+            pass  # 已存在则忽略
+    # 用户偏好键值存储（列顺序、主题等）
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # 开启外键约束（sqlite 默认关闭）
+    c.execute('PRAGMA foreign_keys = ON')
     conn.commit()
     conn.close()
 
