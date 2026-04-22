@@ -72,6 +72,7 @@ def get_sector_stocks(plate_id):
             "mainNet": _format_signed(main_net_yuan),
             "mainNetUp": main_net_yuan >= 0,
             "up": up,
+            "isLimitUp": _is_limit_up(code, change_pct, name),
             "leader": leader,
             "streak": streak,
             "theme": theme,
@@ -93,6 +94,36 @@ _LEADER_ORDER = {'龙一': 1, '龙二': 2, '龙三': 3, '龙四': 4, '龙五': 5
 def _leader_rank(leader_str):
     """龙头字符串 → 排序键。非龙头返回 99 排到最后。"""
     return _LEADER_ORDER.get(leader_str, 99)
+
+
+def _is_limit_up(code: str, change_pct: float, name: str) -> bool:
+    """
+    判断是否当日涨停。按 A 股规则：
+      1. 新股（'C' / 'N' 前缀）上市首 5 日无涨跌限制 → 不算涨停
+      2. 板块限制：北交所 30% / 创业板+科创板 20% / 主板 10%
+      3. ST 股 5% 限制 **仅对主板生效**，创业板/科创板 ST 仍用板块规则
+      容差 0.1% 避免浮点误差（如 9.97% ≈ 涨停）
+    """
+    name_str = name or ''
+    # 规则 1：新股跳过判定
+    if name_str.startswith('C') or name_str.startswith('N'):
+        return False
+
+    code = code or ''
+
+    # 规则 2：按板块确定基础涨停线
+    if code.startswith(('300', '301', '688')):
+        limit = 20.0       # 创业板 / 科创板
+    elif code.startswith(('8', '4', '920', '9')):
+        limit = 30.0       # 北交所 + 老三板
+    else:
+        limit = 10.0       # 沪深主板（60x / 000 / 001 / 002 / 003）
+        # 规则 3：ST 的 5% 限制只在主板生效
+        upper = name_str.upper()
+        if upper.startswith('ST') or upper.startswith('*ST'):
+            limit = 5.0
+
+    return change_pct >= limit - 0.1
 
 
 def _format_turnover(yuan):

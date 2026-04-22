@@ -25,6 +25,22 @@ function formatAmtText(amt) {
 const selectedSector = ref(null)
 const sectorStocks = ref([])          // 当前选中板块的联动个股列表
 const sectorStocksLoading = ref(false) // 拉取中标志
+const stockFilter = ref('')            // 股票列表搜索关键字（名称或代码，模糊匹配）
+
+// 当前板块的涨停家数（基于全量，不随筛选变化）
+const sectorLimitUpCount = computed(() =>
+    sectorStocks.value.filter(s => s.isLimitUp).length
+)
+
+// 经过搜索筛选后的股票列表
+const filteredStocks = computed(() => {
+    const q = stockFilter.value.trim().toLowerCase()
+    if (!q) return sectorStocks.value
+    return sectorStocks.value.filter(s =>
+        (s.name && s.name.toLowerCase().includes(q)) ||
+        (s.code && s.code.includes(q))
+    )
+})
 
 // 连板天梯数据（按 height 降序分组）
 const ladderTiers = ref([])
@@ -118,6 +134,7 @@ function calculateSMA(data, count) {
 
 function handleSectorClick(sector) {
     selectedSector.value = sector
+    stockFilter.value = ''  // 切板块时清空搜索
     loadSectorStocks(sector.code)
 }
 
@@ -589,12 +606,27 @@ onMounted(() => {
         <template v-if="selectedSector">
             <div class="h-[43px] px-[14px] border-b border-[#f0f0f0] flex justify-between items-center bg-white shrink-0">
                 <div class="flex items-center gap-2 min-w-0">
-                    <h2 class="text-[14px] font-bold text-[#111] tracking-wide truncate">{{ selectedSector.name }} <span class="text-[11px] font-normal text-[#888] ml-1">成分股</span></h2>
+                    <h2 class="text-[14px] font-bold text-[#111] tracking-wide truncate">{{ selectedSector.name }}</h2>
                     <div class="text-[11px] text-[#dc2626] font-bold bg-[#fff5f5] px-[6px] py-[1px] rounded-[4px] border border-[#ffe5e5] shrink-0">领涨 {{ selectedSector.change }}</div>
+                    <div v-if="sectorLimitUpCount > 0"
+                         class="text-[11px] font-bold bg-[#dc2626] text-white px-[6px] py-[1px] rounded-[4px] shrink-0 shadow-[0_1px_2px_rgba(220,38,38,0.25)] tabular-nums">
+                        涨停 {{ sectorLimitUpCount }}
+                    </div>
                 </div>
-                <div class="flex gap-[8px] items-center shrink-0">
-                    <input type="text" placeholder="搜索..." class="bg-[#f9fafb] border border-[#e5e5e5] rounded-[4px] px-[10px] py-[4px] text-[12px] outline-none focus:border-[#ff6b6b] focus:bg-white w-[110px] transition placeholder:text-[#ccc]">
-                    <button @click="emit('openAI')" class="px-[10px] py-[4px] bg-[#fff5f5] text-[#dc2626] border border-[#ffe5e5] text-[12px] font-bold rounded-[4px] hover:bg-[#dc2626] hover:text-white transition whitespace-nowrap">AI 分析</button>
+                <div class="flex gap-[8px] items-center shrink-0 relative">
+                    <input v-model="stockFilter"
+                           type="text"
+                           placeholder="筛选 名称 / 代码..."
+                           class="bg-[#f9fafb] border border-[#e5e5e5] rounded-[4px] pl-[10px] pr-[26px] py-[4px] text-[12px] outline-none focus:border-[#ff6b6b] focus:bg-white w-[180px] transition placeholder:text-[#ccc]">
+                    <!-- 清空按钮：有输入时显示 -->
+                    <button v-if="stockFilter"
+                            @click="stockFilter = ''"
+                            class="absolute right-[6px] top-1/2 -translate-y-1/2 w-[16px] h-[16px] flex items-center justify-center rounded-full text-[#aaa] hover:text-[#666] hover:bg-[#f0f0f0] transition"
+                            title="清空筛选">
+                        <svg class="w-[10px] h-[10px]" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
                 </div>
             </div>
             
@@ -614,13 +646,19 @@ onMounted(() => {
                     </thead>
                     <tbody>
                         <tr
-                            v-for="stock in sectorStocks"
+                            v-for="stock in filteredStocks"
                             :key="stock.code"
                             class="border-b border-[#f5f5f5] hover:bg-[#f2f8fc] transition-colors group cursor-default"
                         >
                             <td class="px-[12px] py-[10px] text-[12px] text-[#666] font-mono align-top">{{ stock.code }}</td>
                             <td class="px-[12px] py-[10px] align-top">
                                 <div class="flex items-center gap-[6px] flex-wrap">
+                                    <svg v-if="stock.isLimitUp"
+                                         class="w-[14px] h-[14px] shrink-0 text-[#ea580c] drop-shadow-[0_0_3px_rgba(234,88,12,0.45)]"
+                                         viewBox="0 0 20 20" fill="currentColor"
+                                         :title="'已涨停（+' + stock.change + '）'">
+                                        <path fill-rule="evenodd" d="M12.395 2.553a1 1 0 00-1.45-.385c-.345.23-.614.558-.822.88-.214.33-.403.713-.57 1.116-.334.804-.614 1.768-.84 2.734a31.365 31.365 0 00-.613 3.58 2.64 2.64 0 01-.945-1.067c-.328-.68-.398-1.534-.398-2.654A1 1 0 005.05 6.05 6.981 6.981 0 003 11a7 7 0 1011.95-4.95c-.592-.591-.98-.985-1.348-1.467-.363-.476-.724-1.063-1.207-2.03zM12.12 15.12A3 3 0 017 13s.879.5 2.5.5c0-1 .5-4 1.25-4.5.5 1 .786 1.293 1.371 1.879A2.99 2.99 0 0113 13a2.99 2.99 0 01-.879 2.121z" clip-rule="evenodd" />
+                                    </svg>
                                     <span class="text-[14px] font-bold text-[#111]">{{ stock.name }}</span>
                                     <span v-if="stock.leader"
                                           class="text-[10px] font-bold px-[6px] py-[1px] rounded-[3px] text-white leading-[1.4] shadow-[0_1px_2px_rgba(220,38,38,0.25)]"
@@ -659,6 +697,12 @@ onMounted(() => {
                         <tr v-else-if="!sectorStocks.length">
                             <td colspan="8" class="px-[20px] py-[80px] text-center text-[#aaa] text-[13px]">
                                 暂无该板块成分股数据
+                            </td>
+                        </tr>
+                        <tr v-else-if="!filteredStocks.length">
+                            <td colspan="8" class="px-[20px] py-[60px] text-center text-[#aaa] text-[13px]">
+                                未匹配到"{{ stockFilter }}"，
+                                <button @click="stockFilter = ''" class="text-[#dc2626] hover:underline">清空筛选</button>
                             </td>
                         </tr>
                     </tbody>
