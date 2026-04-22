@@ -138,6 +138,7 @@ function handleSectorClick(sector) {
     loadSectorStocks(sector.code)
 }
 
+
 // 成交量智能单位： 万手 / 亿手 自动切换
 function formatVol(vol) {
     if (vol == null) return '-';
@@ -754,13 +755,22 @@ onMounted(() => {
                     </div>
                 </div>
 
-                <!-- 股票行：2 列栅格，充分利用面板宽度 -->
+                <!-- 股票行：2 列栅格，每格内 2 行（name / concept badge）-->
                 <div class="grid grid-cols-2">
                     <div v-for="(stock, idx) in tier.stocks" :key="stock.code"
-                         class="flex items-center gap-[8px] pl-[14px] pr-[8px] py-[7px] cursor-default transition-colors min-w-0 border-b border-[#f5f5f5] hover:bg-[#fff5f5]"
+                         class="flex flex-col gap-[3px] pl-[14px] pr-[8px] py-[6px] cursor-default transition-colors min-w-0 border-b border-[#f5f5f5] hover:bg-[#fff5f5]"
                          :class="{ 'border-l border-[#f5f5f5]': idx % 2 === 1 }">
-                        <span class="text-[12px] text-[#666] font-mono tabular-nums shrink-0">{{ stock.code }}</span>
-                        <span class="text-[14px] font-bold text-[#111] truncate">{{ stock.name }}</span>
+                        <!-- 第一行：代码 + 名字 -->
+                        <div class="flex items-center gap-[8px] min-w-0">
+                            <span class="text-[12px] text-[#666] font-mono tabular-nums shrink-0">{{ stock.code }}</span>
+                            <span class="text-[14px] font-bold text-[#111] truncate">{{ stock.name }}</span>
+                        </div>
+                        <!-- 第二行：涨停池原始涨停原因（+号分隔灰色文字，作为辅助信息不抢主角戏份）-->
+                        <div v-if="stock.reasonAll"
+                             class="text-[11px] text-[#94a3b8] leading-[1.4] truncate"
+                             :title="stock.reasonAll">
+                            {{ stock.reasonAll }}
+                        </div>
                     </div>
                 </div>
             </div>
