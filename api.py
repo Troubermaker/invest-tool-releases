@@ -23,6 +23,8 @@ from services import market_service
 from services import sector_service
 from services import sector_stocks_service
 from services import kline_service
+from services import limit_up_ladder_service
+from services import market_sentiment_service
 import ai_service
 
 
@@ -71,6 +73,16 @@ class Api:
     def get_sector_stocks(self, plate_id):
         """根据 KPL 板块 ID 返回该板块精选联动股票列表"""
         return sector_stocks_service.get_sector_stocks(plate_id)
+
+    @api_endpoint
+    def get_limit_up_ladder(self):
+        """连板天梯：按连板高度降序分组的股票列表"""
+        return limit_up_ladder_service.get_ladder()
+
+    @api_endpoint
+    def get_market_sentiment(self):
+        """市场情绪：全市场成交额（较昨日）+ 涨跌家数 + 涨停跌停"""
+        return market_sentiment_service.get_sentiment()
 
     @api_endpoint
     def analyze_market_query(self, query):

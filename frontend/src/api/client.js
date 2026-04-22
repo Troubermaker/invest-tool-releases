@@ -77,6 +77,12 @@ export const api = {
   /** 板块联动个股。plateId: KPL 板块代码如 '801001' */
   getSectorStocks: (plateId) => call('get_sector_stocks', plateId),
 
+  /** 连板天梯：按连板高度分组的股票列表 */
+  getLimitUpLadder: () => call('get_limit_up_ladder'),
+
+  /** 市场情绪：成交额 + 涨跌家数 + 涨停跌停 */
+  getMarketSentiment: () => call('get_market_sentiment'),
+
   /** AI 复盘问答 */
   analyzeMarketQuery: (query) => call('analyze_market_query', query),
 
