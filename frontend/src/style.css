@@ -2,9 +2,23 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Use tabular (monospace-width) digits across the whole app.
-   Makes prices / percentages / volumes vertically align and gives the
-   professional terminal feel typical of financial dashboards. */
+/* Global typography:
+   1. System font stack — 优先用系统原生字体，Windows 下走 Segoe UI / 微软雅黑，
+      macOS 走 SF / 苹方，保证中英文 + 数字都是每个平台最佳渲染。
+   2. tabular-nums — 让价格、涨跌幅、成交量等数字等宽对齐，金融终端必备。
+   3. antialiased — 细字体在高分屏下更干净（尤其 macOS）。 */
 html {
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
   font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }

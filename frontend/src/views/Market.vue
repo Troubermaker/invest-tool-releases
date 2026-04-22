@@ -51,11 +51,12 @@ const timeframes = ['分时', '日K', '5日', '周K', '月K', '年K']
 const activeTimeframe = ref('日K')
 
 const maConfigs = [
-    { period: 5, color: '#f59e0b' },
-    { period: 10, color: '#3b82f6' },
-    { period: 20, color: '#ec4899' },
-    { period: 30, color: '#10b981' },
-    { period: 60, color: '#8b5cf6' }
+    // 专业终端 MA 配色：降饱和 + 避开红绿（红绿留给 K 线主语义，也利于色弱辨识）
+    { period: 5,  color: '#ca8a04' }, // 暗金 — 短期线最显眼
+    { period: 10, color: '#0891b2' }, // 墨青
+    { period: 20, color: '#7c3aed' }, // 沉紫
+    { period: 30, color: '#be185d' }, // 暗玫
+    { period: 60, color: '#64748b' }  // 中性灰 — 最长周期线弱化为"背景参考"
 ]
 
 function calculateSMA(data, count) {
@@ -373,7 +374,8 @@ async function renderChartData() {
             return {
                 time: d.time,
                 value: d.vol || 0,
-                color: isRed ? 'rgba(239, 83, 80, 0.8)' : 'rgba(38, 166, 154, 0.8)' // Make them stronger now that they don't overlap
+                // 上涨日红柱低不透明度（视觉"轻"）、下跌日绿柱高不透明度（视觉"重"）—— 与 K 线空心/实心逻辑一致，色弱也能靠明暗区分
+                color: isRed ? 'rgba(220, 38, 38, 0.45)' : 'rgba(5, 150, 105, 0.8)'
             };
         });
         currentVolumeSeries.setData(volData);
@@ -615,7 +617,7 @@ onMounted(() => {
                 </div>
                 
                 <div class="flex gap-4 items-center">
-                    <button @click="emit('openAI')" class="text-[12px] font-bold text-[#7cb342] hover:text-[#558b2f] flex items-center gap-1 transition">
+                    <button @click="emit('openAI')" class="text-[12px] font-bold text-[#dc2626] hover:text-[#991b1b] flex items-center gap-1 transition">
                         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
                         AI 解盘
                     </button>
@@ -630,6 +632,20 @@ onMounted(() => {
             
             <!-- Chart Container -->
             <div ref="chartContainer" class="flex-1 w-full bg-white relative overflow-hidden">
+                <!-- MA Legend: only on candle timeframes (分时/5日 是折线，不含 MA) -->
+                <div
+                    v-if="activeTimeframe !== '分时' && activeTimeframe !== '5日'"
+                    class="absolute top-[10px] left-[12px] flex items-center gap-[14px] bg-white/85 backdrop-blur-[2px] border border-[#e5e5e5] rounded-[4px] px-[10px] py-[4px] z-[5] pointer-events-none"
+                >
+                    <span
+                        v-for="m in maConfigs"
+                        :key="m.period"
+                        class="text-[11px] font-semibold tracking-wide"
+                        :style="{ color: m.color }"
+                    >
+                        MA{{ m.period }}
+                    </span>
+                </div>
                 <div ref="tooltipRef" class="absolute leading-tight hidden pointer-events-none bg-white/95 backdrop-blur-[2px] border border-[#e5e5e5] text-[12px] p-2.5 z-[100] rounded-[6px] shadow-[0_4px_16px_rgba(0,0,0,0.12)]" style="display: none; left: 0; top: 0;"></div>
             </div>
         </div>

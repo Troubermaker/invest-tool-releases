@@ -17,7 +17,7 @@ const settingsItem = { id: 'settings', name: '设置', icon: 'M9.594 3.94c.09-.5
 <template>
   <div class="h-full w-[64px] bg-[#fafafa] border-r border-[#e5e5e5] flex flex-col items-center py-4 z-10 shrink-0">
     <!-- Top Account/Logo Icon -->
-    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-[#ff6b6b] to-[#ee5253] text-white flex items-center justify-center font-bold mb-6 shadow-[0_2px_10px_rgba(238,82,83,0.3)] cursor-pointer">
+    <div class="w-8 h-8 rounded-lg bg-[#dc2626] text-white flex items-center justify-center font-bold mb-6 cursor-pointer">
       T
     </div>
 
