@@ -124,6 +124,29 @@ export const api = {
   /** 重排分组内股票，参数 [code1, code2, ...] */
   reorderWatchlistStocks: (groupId, orderedCodes) => call('reorder_watchlist_stocks', groupId, orderedCodes),
 
+  // -------- 持仓 Portfolio --------
+  /** 所有持仓账户（按顺序，含 count）*/
+  getPortfolioAccounts: () => call('get_portfolio_accounts'),
+  createPortfolioAccount: (name) => call('create_portfolio_account', name),
+  renamePortfolioAccount: (accountId, newName) => call('rename_portfolio_account', accountId, newName),
+  deletePortfolioAccount: (accountId) => call('delete_portfolio_account', accountId),
+  reorderPortfolioAccounts: (orderedIds) => call('reorder_portfolio_accounts', orderedIds),
+
+  /** 某账户下的持仓（不含行情）*/
+  getPortfolioPositions: (accountId) => call('get_portfolio_positions', accountId),
+  addPortfolioPosition: (accountId, code, name, shares, costPrice, remark) =>
+    call('add_portfolio_position', accountId, code, name || '', shares, costPrice, remark || ''),
+  /** 编辑持仓，updates 支持 { name, shares, costPrice, remark, addedAt } */
+  updatePortfolioPosition: (accountId, code, updates) =>
+    call('update_portfolio_position', accountId, code,
+         updates.name ?? null, updates.shares ?? null,
+         updates.costPrice ?? null, updates.remark ?? null, updates.addedAt ?? null),
+  removePortfolioPosition: (accountId, code) => call('remove_portfolio_position', accountId, code),
+  reorderPortfolioPositions: (accountId, orderedCodes) =>
+    call('reorder_portfolio_positions', accountId, orderedCodes),
+  /** 跨账户合并（汇总 tab 用）*/
+  getPortfolioMerged: () => call('get_portfolio_merged'),
+
   // -------- 用户偏好 --------
   getUserPreference: (key, defaultVal) => call('get_user_preference', key, defaultVal ?? null),
   setUserPreference: (key, value) => call('set_user_preference', key, value),

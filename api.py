@@ -26,6 +26,7 @@ from services import kline_service
 from services import limit_up_ladder_service
 from services import market_sentiment_service
 from services import watchlist_service
+from services import portfolio_service
 from services import quote_service
 from services import stock_search_service
 from services import sparkline_service
@@ -161,6 +162,65 @@ class Api:
     def set_user_preference(self, key, value):
         watchlist_service.set_preference(key, value)
         return {"ok": True}
+
+    # =========== 持仓 Portfolio =========== #
+
+    @api_endpoint
+    def get_portfolio_accounts(self):
+        """所有持仓账户（按 sort_order）"""
+        return portfolio_service.get_accounts()
+
+    @api_endpoint
+    def create_portfolio_account(self, name):
+        aid = portfolio_service.create_account(name)
+        return {"id": aid, "name": name}
+
+    @api_endpoint
+    def rename_portfolio_account(self, account_id, new_name):
+        portfolio_service.rename_account(account_id, new_name)
+        return {"ok": True}
+
+    @api_endpoint
+    def delete_portfolio_account(self, account_id):
+        portfolio_service.delete_account(account_id)
+        return {"ok": True}
+
+    @api_endpoint
+    def reorder_portfolio_accounts(self, ordered_ids):
+        portfolio_service.reorder_accounts(ordered_ids)
+        return {"ok": True}
+
+    @api_endpoint
+    def get_portfolio_positions(self, account_id):
+        """某账户下的持仓列表（不含实时行情，前端另拉 quotes 合并）"""
+        return portfolio_service.get_account_positions(account_id)
+
+    @api_endpoint
+    def add_portfolio_position(self, account_id, code, name='', shares=None, cost_price=None, remark=''):
+        portfolio_service.add_position(account_id, code, name, shares, cost_price, remark)
+        return {"ok": True}
+
+    @api_endpoint
+    def update_portfolio_position(self, account_id, code, name=None, shares=None,
+                                  cost_price=None, remark=None, added_at=None):
+        portfolio_service.update_position(account_id, code, name=name, shares=shares,
+                                          cost_price=cost_price, remark=remark, added_at=added_at)
+        return {"ok": True}
+
+    @api_endpoint
+    def remove_portfolio_position(self, account_id, code):
+        portfolio_service.remove_position(account_id, code)
+        return {"ok": True}
+
+    @api_endpoint
+    def reorder_portfolio_positions(self, account_id, ordered_codes):
+        portfolio_service.reorder_positions(account_id, ordered_codes)
+        return {"ok": True}
+
+    @api_endpoint
+    def get_portfolio_merged(self):
+        """'汇总'虚拟账户：所有账户持仓按 code 合并（Step 3 用）"""
+        return portfolio_service.get_all_positions_merged()
 
     @api_endpoint
     def get_batch_quotes(self, codes):

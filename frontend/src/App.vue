@@ -4,6 +4,7 @@ import Sidebar from './components/Sidebar.vue'
 import RightDrawer from './components/RightDrawer.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
+import Positions from './views/Positions.vue'
 
 const currentTab = ref('market')
 const isAIDrawerOpen = ref(false)
@@ -27,6 +28,7 @@ function handleNavigate(tabId) {
         <!-- Render Active View -->
         <Market v-if="currentTab === 'market'" @openAI="isAIDrawerOpen = true"/>
         <Watchlist v-else-if="currentTab === 'watchlist'" />
+        <Positions v-else-if="currentTab === 'positions'" />
 
         <!-- Placeholders for other tabs for now -->
         <div v-else class="flex items-center justify-center h-full text-gray-400 flex-col bg-white m-4 rounded-xl border border-gray-200">

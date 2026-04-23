@@ -67,6 +67,31 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # 持仓账户（多账户分组，和自选分组同构）
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS portfolio_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # 持仓记录：快照式，仅存 持股/成本价，市值/盈亏由前端配合实时行情算
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS portfolio_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT,
+            shares INTEGER NOT NULL,
+            cost_price REAL NOT NULL,
+            remark TEXT DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(account_id, code),
+            FOREIGN KEY (account_id) REFERENCES portfolio_accounts(id) ON DELETE CASCADE
+        )
+    ''')
     # 开启外键约束（sqlite 默认关闭）
     c.execute('PRAGMA foreign_keys = ON')
     conn.commit()
