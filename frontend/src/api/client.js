@@ -111,9 +111,14 @@ export const api = {
   /** 添加股票到分组 */
   addWatchlistStock: (groupId, code, name, addedPrice, remark) =>
     call('add_watchlist_stock', groupId, code, name || '', addedPrice ?? null, remark || ''),
-  /** 编辑股票信息（仅更新传入的字段）*/
+  /** 编辑股票信息（仅更新传入的字段）。updates 支持 { name, addedPrice, remark, addedAt } */
   updateWatchlistStock: (groupId, code, updates) =>
-    call('update_watchlist_stock', groupId, code, updates.name ?? null, updates.addedPrice ?? null, updates.remark ?? null),
+    call('update_watchlist_stock', groupId, code,
+         updates.name ?? null, updates.addedPrice ?? null,
+         updates.remark ?? null, updates.addedAt ?? null),
+
+  /** 股票搜索（A 股，支持代码/中文名/拼音）*/
+  searchStocks: (query, limit) => call('search_stocks', query, limit ?? 20),
   /** 从分组移除股票 */
   removeWatchlistStock: (groupId, code) => call('remove_watchlist_stock', groupId, code),
   /** 重排分组内股票，参数 [code1, code2, ...] */
@@ -122,4 +127,11 @@ export const api = {
   // -------- 用户偏好 --------
   getUserPreference: (key, defaultVal) => call('get_user_preference', key, defaultVal ?? null),
   setUserPreference: (key, value) => call('set_user_preference', key, value),
+
+  // -------- 批量行情 --------
+  /** 给一批股票代码，返回 {code: {price, changePct, turnoverRate, volRatio, marketCap, industry, ...}} */
+  getBatchQuotes: (codes) => call('get_batch_quotes', codes || []),
+
+  /** 批量分时 sparkline 数据，返回 {code: {preClose, prices: [...]}} */
+  getBatchSparklines: (codes) => call('get_batch_sparklines', codes || []),
 }

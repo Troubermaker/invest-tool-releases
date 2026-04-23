@@ -162,8 +162,8 @@ def add_stock(group_id, code, name='', added_price=None, remark=''):
         conn.close()
 
 
-def update_stock(group_id, code, *, name=None, added_price=None, remark=None):
-    """编辑股票：仅更新传入的非 None 字段。"""
+def update_stock(group_id, code, *, name=None, added_price=None, remark=None, added_at=None):
+    """编辑股票：仅更新传入的非 None 字段。added_at 接受 'YYYY-MM-DD' 或 ISO 字符串。"""
     conn = db.get_db()
     c = conn.cursor()
     updates, params = [], []
@@ -173,6 +173,8 @@ def update_stock(group_id, code, *, name=None, added_price=None, remark=None):
         updates.append('added_price = ?'); params.append(added_price)
     if remark is not None:
         updates.append('remark = ?'); params.append(remark)
+    if added_at is not None:
+        updates.append('added_at = ?'); params.append(added_at)
     if not updates:
         conn.close()
         return

@@ -144,6 +144,60 @@ def raw_em_limit_connections(secids):
     return fetch_json(url, params=params, headers=EM_JSON_HEADERS)
 
 
+def raw_em_search(keyword, page_size=20):
+    """
+    东财官方搜索接口。支持中文名、拼音缩写、代码 三种输入。
+    返回包括 A 股、港股、美股、期货、板块等全品类，调用方需按 Classify 过滤。
+    """
+    url = 'https://searchapi.eastmoney.com/api/Info/Search'
+    params = {
+        'appid': 'el1902262',
+        'type': '14',
+        'token': 'CCSDCZSDCXYMYZYYSYYXSMDDSMDHHDJT',
+        'and14': f'MultiMatch/Name,Code,PinYin/{keyword}/true',
+        'returnfields14': 'Name,Code,PinYin,SecurityTypeName,MarketPrefix,QuoteID,Classify',
+        'pageIndex14': '1',
+        'pageSize14': str(page_size),
+        'isAssociation14': 'false',
+    }
+    headers = {**EM_BASE_HEADERS, 'Referer': 'https://quote.eastmoney.com/'}
+    return fetch_json(url, params=params, headers=headers)
+
+
+def raw_em_trends2(secid):
+    """
+    分时数据（trends2）：单只股票当日分钟级价格序列。
+    返回 data.trends 是 'YYYY-MM-DD HH:MM,price,volume,avgPrice' 字符串数组
+    用途：画 mini 分时图（sparkline）、详情分时图
+    """
+    url = 'https://push2delay.eastmoney.com/api/qt/stock/trends2/get'
+    params = {
+        'secid': secid,
+        'fields1': 'f1,f2,f8,f10',          # 代码、市场、换手率、流通市值 等
+        'fields2': 'f51,f53,f56,f58',        # 时间、价格、成交量、均价
+        'iscr': '0', 'iscca': '0',
+        'ndays': '1',
+    }
+    return fetch_json(url, params=params, headers=EM_JSON_HEADERS)
+
+
+def raw_em_batch_quote(secids):
+    """
+    批量行情查询（用于自选股列表）。字段覆盖：
+        f2 价格、f3 涨跌幅%、f4 涨跌额、f5 成交量(手)、f6 成交额(元)
+        f7 振幅%、f8 换手率%、f9 市盈率、f10 量比、f12 代码、f14 名称
+        f18 昨收、f20 总市值、f22 涨速%、f25 YTD%、f62 主力净流入(元)、f100 所属板块
+    secids 接受 list 或 ','-分隔字符串
+    """
+    url = 'https://push2delay.eastmoney.com/api/qt/ulist.np/get'
+    params = {
+        'fltt': '2',
+        'fields': 'f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f18,f20,f22,f25,f62,f100',
+        'secids': secids if isinstance(secids, str) else ','.join(secids),
+    }
+    return fetch_json(url, params=params, headers=EM_JSON_HEADERS)
+
+
 # ---------------- 快讯 ---------------- #
 
 def raw_em_fast_news():

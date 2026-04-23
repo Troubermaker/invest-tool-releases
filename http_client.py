@@ -30,7 +30,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 10
+DEFAULT_TIMEOUT = 15  # 部分东财接口盘中峰值响应较慢，10s 容易触发超时；放宽到 15s
 DEFAULT_RETRY = 2
 
 # 分域名节流配置 (calls per second)
@@ -47,7 +47,7 @@ DOMAIN_RATE_LIMITS = {
     'applhb.longhuvip.com': 1.2,
     # 东方财富（相对宽松）
     'push2.eastmoney.com': 3.0,
-    'push2delay.eastmoney.com': 3.0,
+    'push2delay.eastmoney.com': 3.0,  # 安全优先：保持 3/s 避免被反爬识别
     'push2his.eastmoney.com': 3.0,
     'np-weblist.eastmoney.com': 2.0,
     # 其它
@@ -63,8 +63,9 @@ DOMAIN_RATE_LIMITS = {
 }
 DEFAULT_DOMAIN_RATE = 2.0
 
-# 节拍 jitter：实际间隔在 [min_interval * 0.7, min_interval * 1.3] 间随机
-JITTER_RATIO = 0.3
+# 节拍 jitter：实际间隔在 [min_interval * 0.5, min_interval * 1.5] 间随机
+# 0.5 比 0.3 更不规则，更难被反爬识别为定时任务
+JITTER_RATIO = 0.5
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -169,7 +170,10 @@ def _do_request(method, url, *, params=None, data=None, json_body=None,
 
         if attempt < retry:
             wait_s = 1.0 * (attempt + 1)
-            logger.warning(
+            # TIMEOUT/CONNECTION 是会自愈的瞬时错误，降到 DEBUG 不污染日志；
+            # HTTP/UNKNOWN 是潜在问题，保留 WARNING
+            log_fn = logger.debug if last_error[0] in ('TIMEOUT', 'CONNECTION') else logger.warning
+            log_fn(
                 f"{url} 第 {attempt + 1} 次失败 ({last_error[0]}: {last_error[1]}), "
                 f"{wait_s}s 后重试"
             )

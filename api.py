@@ -26,6 +26,9 @@ from services import kline_service
 from services import limit_up_ladder_service
 from services import market_sentiment_service
 from services import watchlist_service
+from services import quote_service
+from services import stock_search_service
+from services import sparkline_service
 import ai_service
 
 
@@ -130,9 +133,15 @@ class Api:
         return {"ok": True}
 
     @api_endpoint
-    def update_watchlist_stock(self, group_id, code, name=None, added_price=None, remark=None):
-        watchlist_service.update_stock(group_id, code, name=name, added_price=added_price, remark=remark)
+    def update_watchlist_stock(self, group_id, code, name=None, added_price=None, remark=None, added_at=None):
+        watchlist_service.update_stock(group_id, code, name=name, added_price=added_price,
+                                        remark=remark, added_at=added_at)
         return {"ok": True}
+
+    @api_endpoint
+    def search_stocks(self, query, limit=20):
+        """股票搜索：代码/中文名/拼音缩写，仅返 A 股"""
+        return stock_search_service.search_stocks(query, limit)
 
     @api_endpoint
     def remove_watchlist_stock(self, group_id, code):
@@ -152,6 +161,16 @@ class Api:
     def set_user_preference(self, key, value):
         watchlist_service.set_preference(key, value)
         return {"ok": True}
+
+    @api_endpoint
+    def get_batch_quotes(self, codes):
+        """按代码批量查实时行情 + 基本面（自选列表用）"""
+        return quote_service.get_batch_quotes(codes or [])
+
+    @api_endpoint
+    def get_batch_sparklines(self, codes):
+        """按代码批量查当日分时（画 sparkline 用）。返回 {code: {preClose, prices}}"""
+        return sparkline_service.get_batch_sparklines(codes or [])
 
     @api_endpoint
     def analyze_market_query(self, query):
