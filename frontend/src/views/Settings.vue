@@ -26,8 +26,9 @@ async function handleExport() {
     }
 }
 
-// ---------------- 导入（原生"打开"对话框 → 预览 → 确认）----------------
+// ---------------- 导入（原生"打开"对话框 → 预览 → 选模式 → 确认）----------------
 const importPreview = ref(null)  // { path, counts, exportedAt, schemaVersion }
+const importMode = ref('merge')  // 'merge' | 'replace'，默认合并（非破坏性）
 const importMsg = ref('')
 const importing = ref(false)
 
@@ -56,19 +57,34 @@ function cancelImport() {
 }
 
 async function confirmImport() {
+    const isReplace = importMode.value === 'replace'
     const ok = await askConfirm({
-        title: '确认导入备份',
-        message: '将清空当前设备所有自选和持仓数据，用备份文件替换。此操作不可恢复，建议先导出当前数据作为备份。',
-        confirmText: '确认导入',
+        title: isReplace ? '确认覆盖导入' : '确认合并导入',
+        message: isReplace
+            ? '「替换模式」将清空当前设备所有自选和持仓数据，用备份文件完整替换。此操作不可恢复。'
+            : '「合并模式」以名称/代码为键做 upsert：同键条目会被备份值覆盖（股数/成本价/自选价等），仅本地有的条目保留。用户偏好跳过。',
+        confirmText: isReplace ? '确认覆盖' : '确认合并',
     })
     if (!ok) return
     importing.value = true
     importMsg.value = ''
     try {
-        const res = await api.importBackupFile(importPreview.value.path, 'replace')
+        const res = await api.importBackupFile(importPreview.value.path, importMode.value)
         if (!res.ok) { importMsg.value = '导入失败：' + (res.error || '未知错误'); return }
         const ic = res.data?.imported || {}
-        importMsg.value = `导入成功！写入 ${ic.watchlist_stocks || 0} 只自选股 / ${ic.portfolio_positions || 0} 条持仓。切回自选/持仓 tab 即可看到。`
+        if (isReplace) {
+            importMsg.value = `替换完成！写入 ${ic.watchlist_stocks || 0} 只自选股 / ${ic.portfolio_positions || 0} 条持仓。切回自选/持仓 tab 即可看到。`
+        } else {
+            const wg = ic.watchlist_groups || { added: 0, updated: 0 }
+            const ws = ic.watchlist_stocks || { added: 0, updated: 0 }
+            const pa = ic.portfolio_accounts || { added: 0, updated: 0 }
+            const pp = ic.portfolio_positions || { added: 0, updated: 0 }
+            importMsg.value =
+                `合并完成！自选分组 新增 ${wg.added} / 已存在 ${wg.updated} · ` +
+                `自选股 新增 ${ws.added} / 更新 ${ws.updated} · ` +
+                `账户 新增 ${pa.added} / 已存在 ${pa.updated} · ` +
+                `持仓 新增 ${pp.added} / 更新 ${pp.updated}`
+        }
         importPreview.value = null
     } finally {
         importing.value = false
@@ -162,6 +178,32 @@ function confirmCancel() {
                             <div class="text-[15px] font-bold text-[#111] tabular-nums mt-[2px]">{{ v }}</div>
                         </div>
                     </div>
+
+                    <!-- 模式选择 -->
+                    <div class="mt-[14px] border-t border-[#eeeeee] pt-[12px]">
+                        <div class="text-[12px] font-semibold text-[#111] mb-[8px]">导入方式</div>
+                        <label class="flex items-start gap-[8px] px-[10px] py-[8px] rounded-[4px] cursor-pointer transition"
+                               :class="importMode === 'merge' ? 'bg-white border border-[#dc2626]' : 'border border-transparent hover:bg-white/60'">
+                            <input type="radio" value="merge" v-model="importMode" class="mt-[3px] accent-[#dc2626]">
+                            <div class="flex-1">
+                                <div class="text-[12px] font-semibold text-[#111]">合并（增量更新）<span class="ml-[6px] text-[10px] font-normal text-[#dc2626]">推荐</span></div>
+                                <div class="text-[11px] text-[#888] mt-[1px] leading-relaxed">
+                                    按「分组名/账户名/代码」匹配：<b>同键条目用备份值覆盖</b>（自选价、持股、成本价、备注等），<b>仅本地有的条目原样保留</b>。适合两台电脑都编辑过、希望同步增量改动的场景。
+                                </div>
+                            </div>
+                        </label>
+                        <label class="flex items-start gap-[8px] px-[10px] py-[8px] rounded-[4px] cursor-pointer transition mt-[4px]"
+                               :class="importMode === 'replace' ? 'bg-white border border-[#dc2626]' : 'border border-transparent hover:bg-white/60'">
+                            <input type="radio" value="replace" v-model="importMode" class="mt-[3px] accent-[#dc2626]">
+                            <div class="flex-1">
+                                <div class="text-[12px] font-semibold text-[#111]">替换（清空后全量写入）</div>
+                                <div class="text-[11px] text-[#888] mt-[1px] leading-relaxed">
+                                    先清空本地数据再用备份完整覆盖，本地独有的条目会丢失。适合<b>全新电脑首次迁移</b>或者<b>想以备份为权威版本</b>的场景。
+                                </div>
+                            </div>
+                        </label>
+                    </div>
+
                     <div class="flex justify-end gap-[8px] mt-[14px]">
                         <button @click="cancelImport"
                                 class="text-[12px] px-[14px] py-[6px] text-[#666] border border-[#e5e5e5] rounded-[4px] hover:bg-white transition">
@@ -169,7 +211,7 @@ function confirmCancel() {
                         </button>
                         <button @click="confirmImport" :disabled="importing"
                                 class="text-[12px] font-bold text-white bg-[#dc2626] px-[14px] py-[6px] rounded-[4px] hover:bg-[#991b1b] disabled:bg-[#ccc] disabled:cursor-not-allowed transition">
-                            {{ importing ? '导入中...' : '确认导入（覆盖现有数据）' }}
+                            {{ importing ? '导入中...' : (importMode === 'merge' ? '确认合并导入' : '确认覆盖导入') }}
                         </button>
                     </div>
                 </div>
