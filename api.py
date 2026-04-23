@@ -14,7 +14,10 @@ PyWebview 前后端桥接层。
 """
 import json
 import traceback
+from datetime import date
 from functools import wraps
+
+import webview
 
 import db
 from http_client import FetchError
@@ -30,6 +33,7 @@ from services import portfolio_service
 from services import quote_service
 from services import stock_search_service
 from services import sparkline_service
+from services import backup_service
 import ai_service
 
 
@@ -221,6 +225,72 @@ class Api:
     def get_portfolio_merged(self):
         """'汇总'虚拟账户：所有账户持仓按 code 合并（Step 3 用）"""
         return portfolio_service.get_all_positions_merged()
+
+    # =========== 数据备份 Backup =========== #
+
+    @api_endpoint
+    def export_user_data(self):
+        """导出自选 + 持仓 + 偏好为 JSON 可序列化 dict。前端触发文件下载。"""
+        return backup_service.export_user_data()
+
+    @api_endpoint
+    def import_user_data(self, data, mode='replace'):
+        """从 dict 恢复用户数据。返回每张表的写入条数。"""
+        counts = backup_service.import_user_data(data, mode=mode)
+        return {"imported": counts}
+
+    @api_endpoint
+    def export_user_data_interactive(self):
+        """
+        打开原生"另存为"对话框写入 JSON 文件。
+        返回 {cancelled: True} 或 {cancelled: False, path, counts}。
+        """
+        if not self._window:
+            raise RuntimeError("pywebview 窗口未就绪")
+        default_name = f"invest_data_backup_{date.today().isoformat()}.json"
+        result = self._window.create_file_dialog(
+            webview.SAVE_DIALOG,
+            save_filename=default_name,
+            file_types=('JSON Files (*.json)',),
+        )
+        if not result:
+            return {"cancelled": True}
+        # SAVE_DIALOG 返回字符串或单元素元组，兼容
+        path = result[0] if isinstance(result, (list, tuple)) else result
+        counts = backup_service.write_backup_to_file(path)
+        return {"cancelled": False, "path": path, "counts": counts}
+
+    @api_endpoint
+    def pick_backup_file(self):
+        """
+        打开文件选择对话框并返回路径 + 预览信息。
+        返回 {cancelled: True} 或 {cancelled: False, path, schema_version, exported_at, counts}。
+        """
+        if not self._window:
+            raise RuntimeError("pywebview 窗口未就绪")
+        result = self._window.create_file_dialog(
+            webview.OPEN_DIALOG,
+            file_types=('JSON Files (*.json)',),
+            allow_multiple=False,
+        )
+        if not result:
+            return {"cancelled": True}
+        path = result[0] if isinstance(result, (list, tuple)) else result
+        data = backup_service.read_backup_from_file(path)
+        counts = {t: len(data.get(t) or []) for t in backup_service.USER_TABLES}
+        return {
+            "cancelled": False,
+            "path": path,
+            "schema_version": data.get("schema_version"),
+            "exported_at": data.get("exported_at"),
+            "counts": counts,
+        }
+
+    @api_endpoint
+    def import_backup_file(self, path, mode='replace'):
+        """从指定路径导入备份文件。"""
+        counts = backup_service.import_from_file(path, mode=mode)
+        return {"imported": counts}
 
     @api_endpoint
     def get_batch_quotes(self, codes):

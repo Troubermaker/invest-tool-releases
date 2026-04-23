@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "exported_at": "2026-04-24T00:06:11",
+  "watchlist_groups": [
+    {
+      "id": 3,
+      "name": "科技",
+      "sort_order": 0,
+      "created_at": "2026-04-22 15:11:29"
+    }
+  ],
+  "watchlist_stocks": [],
+  "portfolio_accounts": [
+    {
+      "id": 1,
+      "name": "长江",
+      "sort_order": 0,
+      "created_at": "2026-04-23 09:12:10"
+    },
+    {
+      "id": 2,
+      "name": "国金",
+      "sort_order": 1,
+      "created_at": "2026-04-23 12:50:55"
+    },
+    {
+      "id": 3,
+      "name": "申港",
+      "sort_order": 2,
+      "created_at": "2026-04-23 12:51:06"
+    }
+  ],
+  "portfolio_positions": [
+    {
+      "id": 1,
+      "account_id": 1,
+      "code": "603300",
+      "name": "海南华铁",
+      "shares": 12000,
+      "cost_price": 9.832,
+      "remark": "",
+      "sort_order": 0,
+      "added_at": "2026-04-23 09:30:00"
+    },
+    {
+      "id": 2,
+      "account_id": 2,
+      "code": "000721",
+      "name": "西安饮食",
+      "shares": 1500,
+      "cost_price": 8.287,
+      "remark": "",
+      "sort_order": 0,
+      "added_at": "2026-04-23 09:30:00"
+    },
+    {
+      "id": 3,
+      "account_id": 2,
+      "code": "002097",
+      "name": "山河智能",
+      "shares": 10900,
+      "cost_price": 12.974,
+      "remark": "",
+      "sort_order": 1,
+      "added_at": "2026-04-23 09:30:00"
+    },
+    {
+      "id": 4,
+      "account_id": 3,
+      "code": "000981",
+      "name": "山子高科",
+      "shares": 6300,
+      "cost_price": 2.462,
+      "remark": "",
+      "sort_order": 0,
+      "added_at": "2026-04-23 09:30:00"
+    },
+    {
+      "id": 5,
+      "account_id": 3,
+      "code": "000710",
+      "name": "贝瑞基因",
+      "shares": 4900,
+      "cost_price": 11.958,
+      "remark": "",
+      "sort_order": 1,
+      "added_at": "2026-04-23 09:30:00"
+    },
+    {
+      "id": 6,
+      "account_id": 1,
+      "code": "000722",
+      "name": "湖南发展",
+      "shares": 2000,
+      "cost_price": 14.491,
+      "remark": "",
+      "sort_order": 1,
+      "added_at": "2026-04-23 09:30:00"
+    },
+    {
+      "id": 7,
+      "account_id": 1,
+      "code": "002269",
+      "name": "美邦服饰",
+      "shares": 52000,
+      "cost_price": 1.958,
+      "remark": "",
+      "sort_order": 2,
+      "added_at": "2026-04-23 09:30:00"
+    },
+    {
+      "id": 8,
+      "account_id": 1,
+      "code": "001236",
+      "name": "弘业期货",
+      "shares": 4700,
+      "cost_price": 10.673,
+      "remark": "",
+      "sort_order": 3,
+      "added_at": "2026-04-23 09:30:00"
+    },
+    {
+      "id": 9,
+      "account_id": 1,
+      "code": "002634",
+      "name": "棒杰股份",
+      "shares": 3500,
+      "cost_price": 5.466,
+      "remark": "",
+      "sort_order": 4,
+      "added_at": "2026-04-23 09:30:00"
+    }
+  ],
+  "user_preferences": [
+    {
+      "key": "watchlist_columns",
+      "value": "[\"code\", \"name\", \"price\", \"change\"]",
+      "updated_at": "2026-04-22T22:24:07.042839"
+    },
+    {
+      "key": "watchlist_column_order",
+      "value": "[\"price\", \"changePct\", \"speedPct\", \"amplitude\", \"turnoverRate\", \"amount\", \"marketCap\", \"volRatio\", \"industry\", \"addedPrice\", \"profit\", \"addedAt\", \"days\"]",
+      "updated_at": "2026-04-23T14:53:58.299923"
+    }
+  ]
+}

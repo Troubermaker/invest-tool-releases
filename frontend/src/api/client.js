@@ -151,6 +151,14 @@ export const api = {
   getUserPreference: (key, defaultVal) => call('get_user_preference', key, defaultVal ?? null),
   setUserPreference: (key, value) => call('set_user_preference', key, value),
 
+  // -------- 数据备份（跨机器迁移）--------
+  /** 弹原生"另存为"对话框并写入 JSON，返回 {cancelled, path, counts} */
+  exportUserDataInteractive: () => call('export_user_data_interactive'),
+  /** 弹原生"打开"对话框，读取并预览备份文件，返回 {cancelled, path, counts, exported_at, schema_version} */
+  pickBackupFile: () => call('pick_backup_file'),
+  /** 按路径导入指定备份文件。mode 默认 'replace' */
+  importBackupFile: (path, mode) => call('import_backup_file', path, mode ?? 'replace'),
+
   // -------- 批量行情 --------
   /** 给一批股票代码，返回 {code: {price, changePct, turnoverRate, volRatio, marketCap, industry, ...}} */
   getBatchQuotes: (codes) => call('get_batch_quotes', codes || []),
