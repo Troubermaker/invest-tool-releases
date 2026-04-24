@@ -43,7 +43,7 @@ const settingsItem = { id: 'settings', name: '设置', icon: 'M9.594 3.94c.09-.5
 
     <!-- Settings at Bottom -->
     <div class="mt-auto w-full">
-      <button 
+      <button
         @click="emit('navigate', settingsItem.id)"
         class="flex flex-col items-center w-full group relative py-2 mb-2"
       >

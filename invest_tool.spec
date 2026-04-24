@@ -1,0 +1,90 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""
+PyInstaller 打包配置。推荐走 build.py 一键脚本，别直接调 pyinstaller。
+
+直调用法：
+    pyinstaller invest_tool.spec --noconfirm --clean
+通过环境变量切换模式：
+    INVEST_BUILD_DEV=1      保留 console 窗口（方便看 Python 报错）
+    INVEST_BUILD_DEV=0/未设 发布版，无 console
+
+输出在 dist/invest_tool/ 目录下，双击 invest_tool.exe 即可运行。
+
+关键点：
+- onedir 模式（不是 onefile）：启动快，pywebview + WebView2 兼容性更好
+- 把 frontend/dist 原样打进去，main.py 会 detect 到并加载
+- api_endpoints 内含 _auth.py（cookies）也会一起带上 —— 个人使用没问题，
+  分发给别人前请手工清空 cookie
+"""
+import os
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_all
+
+DEV_MODE = os.environ.get('INVEST_BUILD_DEV') == '1'
+
+# ---- 打包入口 ----
+block_cipher = None
+
+# ---- 对 SSL/HTTPS 相关的复杂库做"整包收集" ----
+# cryptography 自带 OpenSSL DLL，PyInstaller 静态分析会漏掉一些运行时需要的二进制，
+# 导致第一次 HTTPS 请求触发 "OPENSSL_Uplink: no OPENSSL_Applink" 进程崩溃。
+# collect_all 把 datas / binaries / hiddenimports 全拿到，确保不缺件。
+hiddenimports = ['schedule']
+datas = [('frontend/dist', 'frontend/dist')]  # 前端打包产物
+binaries = []
+
+for pkg in ('webview', 'cryptography', 'certifi', 'charset_normalizer', 'urllib3'):
+    pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hidden
+
+a = Analysis(
+    ['main.py'],
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[
+        # 开发期测试文件，不要进打包
+        'scratch', 'tests',
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='invest_tool',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,              # UPX 压缩有时会被杀软误报，关闭
+    console=DEV_MODE,       # DEV_MODE=True 时保留命令行窗口看 Python 日志
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    # icon='icon.ico',      # 有图标时填上
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='invest_tool',
+)

@@ -1,6 +1,6 @@
 requests
-akshare
-pandas
 schedule
 pywebview
 openai
+pyinstaller
+chinese_calendar

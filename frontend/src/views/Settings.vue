@@ -2,25 +2,29 @@
 import { ref } from 'vue'
 import { api } from '../api/client'
 
-// ---------------- 导出（原生"另存为"对话框）----------------
+// ---------------- 导出（原生"另存为"对话框，可选分区）----------------
 const exporting = ref(false)
 const exportMsg = ref('')
+// 分区勾选（默认全部导出；分享给别人时可去掉"持仓"）
+const exportSections = ref({ watchlist: true, portfolio: true, preferences: true })
 
 async function handleExport() {
+    const selected = Object.keys(exportSections.value).filter(k => exportSections.value[k])
+    if (!selected.length) { exportMsg.value = '请至少选择一个分区'; return }
     exporting.value = true
     exportMsg.value = ''
     try {
-        const res = await api.exportUserDataInteractive()
+        const res = await api.exportUserDataInteractive(selected)
         if (!res.ok) { exportMsg.value = '导出失败：' + (res.error || '未知错误'); return }
         if (res.data.cancelled) { exportMsg.value = ''; return }
         const c = res.data.counts || {}
-        const parts = [
-            `${c.watchlist_groups || 0} 个自选分组`,
-            `${c.watchlist_stocks || 0} 只自选股`,
-            `${c.portfolio_accounts || 0} 个持仓账户`,
-            `${c.portfolio_positions || 0} 条持仓`,
-        ].join(' / ')
-        exportMsg.value = `已保存到 ${res.data.path}（${parts}）`
+        const parts = []
+        if (c.watchlist_groups != null) parts.push(`${c.watchlist_groups} 个自选分组`)
+        if (c.watchlist_stocks != null) parts.push(`${c.watchlist_stocks} 只自选股`)
+        if (c.portfolio_accounts != null) parts.push(`${c.portfolio_accounts} 个持仓账户`)
+        if (c.portfolio_positions != null) parts.push(`${c.portfolio_positions} 条持仓`)
+        if (c.user_preferences != null) parts.push(`${c.user_preferences} 条偏好`)
+        exportMsg.value = `已保存到 ${res.data.path}（${parts.join(' / ')}）`
     } finally {
         exporting.value = false
     }
@@ -136,15 +140,34 @@ function confirmCancel() {
                 <div class="flex items-start gap-[16px]">
                     <div class="flex-1">
                         <div class="text-[13px] font-semibold text-[#111]">导出数据</div>
-                        <div class="text-[12px] text-[#888] mt-[2px]">生成 <code class="text-[11px] bg-[#f5f5f5] px-[5px] py-[1px] rounded">invest_data_backup_*.json</code>，含：自选分组/自选股、持仓账户/持仓、用户偏好。不含市场行情缓存。</div>
+                        <div class="text-[12px] text-[#888] mt-[2px]">勾选要导出的分区 —— 比如<b class="text-[#dc2626]">分享自选给朋友时去掉"持仓"</b>。不含市场行情缓存。</div>
                     </div>
                     <button @click="handleExport" :disabled="exporting"
                             class="shrink-0 text-[12px] font-bold text-white bg-[#dc2626] px-[16px] py-[7px] rounded-[4px] hover:bg-[#991b1b] disabled:bg-[#ccc] disabled:cursor-not-allowed transition">
                         {{ exporting ? '导出中...' : '导出为 JSON' }}
                     </button>
                 </div>
-                <div v-if="exportMsg" class="text-[12px] text-[#059669] mt-[10px] bg-[#f0fdf4] border border-[#dcfce7] px-[10px] py-[6px] rounded-[4px]">
-                    ✓ {{ exportMsg }}
+                <!-- 分区勾选 -->
+                <div class="flex items-center gap-[16px] mt-[10px] text-[12px]">
+                    <label class="flex items-center gap-[6px] cursor-pointer select-none">
+                        <input type="checkbox" v-model="exportSections.watchlist" class="accent-[#dc2626]">
+                        <span class="text-[#333]">自选（分组 + 股票）</span>
+                    </label>
+                    <label class="flex items-center gap-[6px] cursor-pointer select-none">
+                        <input type="checkbox" v-model="exportSections.portfolio" class="accent-[#dc2626]">
+                        <span class="text-[#333]">持仓（账户 + 持仓记录）</span>
+                    </label>
+                    <label class="flex items-center gap-[6px] cursor-pointer select-none">
+                        <input type="checkbox" v-model="exportSections.preferences" class="accent-[#dc2626]">
+                        <span class="text-[#666]">用户偏好（列顺序等）</span>
+                    </label>
+                </div>
+                <div v-if="exportMsg"
+                     class="text-[12px] mt-[10px] px-[10px] py-[6px] rounded-[4px]"
+                     :class="exportMsg.startsWith('请') || exportMsg.startsWith('导出失败')
+                         ? 'text-[#dc2626] bg-[#fef2f2] border border-[#fecaca]'
+                         : 'text-[#059669] bg-[#f0fdf4] border border-[#dcfce7]'">
+                    {{ exportMsg }}
                 </div>
             </div>
 

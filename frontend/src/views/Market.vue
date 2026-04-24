@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref, nextTick, watch, computed } from 'vue'
 import { api } from '../api/client'
-import { useAutoRefresh } from '../composables/useAutoRefresh'
+import { useSmartRefresh } from '../composables/useSmartRefresh'
 
 const emit = defineEmits(['openAI'])
 
@@ -444,9 +444,9 @@ async function renderChartData() {
     chartInstance.timeScale().fitContent();
 }
 
-// 挂载时立即拉一次 + 每 60s 自动刷新，pywebview 未就绪时自动等待
-useAutoRefresh(api.getMarketData, {
-    interval: 60_000,
+// 指数 + 板块榜：基础 15s，窗口隐藏 / idle 时自动降频
+useSmartRefresh(api.getMarketData, {
+    baseInterval: 15_000,
     onData: (data) => {
         marketIndices.value = data.indices
         totalTurnover.value = data.total_turnover
@@ -460,16 +460,16 @@ useAutoRefresh(api.getMarketData, {
     onError: (err) => console.error("获取行情数据失败:", err),
 })
 
-// 连板天梯：独立刷新频率（盘中 2 分钟一次，比板块榜稍慢，因为变化不剧烈）
-useAutoRefresh(api.getLimitUpLadder, {
-    interval: 120_000,
+// 连板天梯：基础 30s
+useSmartRefresh(api.getLimitUpLadder, {
+    baseInterval: 30_000,
     onData: (data) => { ladderTiers.value = data || [] },
     onError: (err) => console.error("连板天梯拉取失败:", err),
 })
 
-// 市场情绪：成交额 + 涨跌分布，盘中 30s 刷新（分钟级变化明显）
-useAutoRefresh(api.getMarketSentiment, {
-    interval: 30_000,
+// 市场情绪：成交额 + 涨跌分布，基础 15s
+useSmartRefresh(api.getMarketSentiment, {
+    baseInterval: 15_000,
     onData: (data) => { marketSentiment.value = data },
     onError: (err) => console.error("市场情绪拉取失败:", err),
 })

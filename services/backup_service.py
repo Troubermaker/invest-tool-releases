@@ -16,26 +16,43 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
+# 按"业务分区"聚合表：导出/导入以分区为粒度，避免用户理解成散碎的 5 张表
+SECTION_TABLES = {
+    'watchlist':   ['watchlist_groups', 'watchlist_stocks'],
+    'portfolio':   ['portfolio_accounts', 'portfolio_positions'],
+    'preferences': ['user_preferences'],
+}
+ALL_SECTIONS = list(SECTION_TABLES.keys())
+
 # 顺序敏感：导出/清空按相反顺序处理外键依赖
-# groups → stocks（stocks 依赖 groups），accounts → positions（positions 依赖 accounts）
-USER_TABLES = [
-    'watchlist_groups',
-    'watchlist_stocks',
-    'portfolio_accounts',
-    'portfolio_positions',
-    'user_preferences',
-]
+USER_TABLES = [t for section in ALL_SECTIONS for t in SECTION_TABLES[section]]
 
 
-def export_user_data():
-    """把用户表全部导出为一个 dict（可直接序列化为 JSON）。"""
+def export_user_data(sections=None):
+    """
+    导出指定分区的用户数据。
+    sections: 'watchlist' / 'portfolio' / 'preferences' 的子集列表；None = 全部
+    未包含的分区其对应的表 key 在结果 dict 中不出现（隐私即结构表达）。
+    """
+    if sections is None:
+        sections = list(ALL_SECTIONS)
+    # 校验 + 去重保持顺序
+    sections = [s for s in ALL_SECTIONS if s in sections]
+    if not sections:
+        raise ValueError("至少选择一个分区导出")
+
+    tables_to_include = []
+    for s in sections:
+        tables_to_include.extend(SECTION_TABLES[s])
+
     conn = db.get_db()
     c = conn.cursor()
     result = {
         'schema_version': SCHEMA_VERSION,
         'exported_at': datetime.now().isoformat(timespec='seconds'),
+        'sections': sections,
     }
-    for t in USER_TABLES:
+    for t in tables_to_include:
         c.execute(f'SELECT * FROM {t}')
         result[t] = [dict(r) for r in c.fetchall()]
     conn.close()
@@ -75,13 +92,23 @@ def import_user_data(data, mode='replace'):
 
 
 def _do_replace(c, data, conn):
+    """
+    替换模式：**只清空并重写备份里存在的分区**。
+    如果备份是"仅自选"的文件，导入后持仓数据完好 —— 避免误杀。
+    """
+    # 只动备份里实际存在的表
+    present = [t for t in USER_TABLES if t in data]
+    if not present:
+        conn.commit()
+        return {}
     # 清空：逆序（先清依赖方再清被依赖方）
-    for t in reversed(USER_TABLES):
+    for t in reversed(present):
         c.execute(f'DELETE FROM {t}')
     c.execute("DELETE FROM sqlite_sequence WHERE name IN ({})".format(
-        ','.join(['?'] * len(USER_TABLES))), USER_TABLES)
+        ','.join(['?'] * len(present))), present)
+    # 插入：正序
     counts = {}
-    for t in USER_TABLES:
+    for t in present:
         rows = data.get(t) or []
         counts[t] = len(rows)
         if not rows:
@@ -214,12 +241,13 @@ def _do_merge(c, data, conn):
 
 # =========== 文件 I/O 包装（给原生文件对话框用）=========== #
 
-def write_backup_to_file(path):
-    """导出并写入指定路径。返回每张表条数。"""
-    data = export_user_data()
+def write_backup_to_file(path, sections=None):
+    """导出并写入指定路径。sections=None 表示导出所有分区。"""
+    data = export_user_data(sections=sections)
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    return {t: len(data.get(t) or []) for t in USER_TABLES}
+    # 只统计实际导出的表（未导出的表不出现在 dict 里）
+    return {t: len(data.get(t) or []) for t in USER_TABLES if t in data}
 
 
 def read_backup_from_file(path):

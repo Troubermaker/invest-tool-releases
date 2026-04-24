@@ -1,7 +1,23 @@
-import webview
 import os
-import socket
 import sys
+
+# ========= PyInstaller windowed 模式 stdout 兜底 =========
+# console=False 打包后 sys.stdout / sys.stderr 为 None，任何 print()、pywebview 的
+# debug 日志、scheduler 后台线程的 print 都会"写 None 报错 → 进程崩溃"。
+# 在最早期就把两者重定向到 exe 旁边的 log 文件，从此所有输出安全落盘。
+if getattr(sys, 'frozen', False) and (sys.stdout is None or sys.stderr is None):
+    _log_path = os.path.join(os.path.dirname(sys.executable), 'invest_tool.log')
+    try:
+        _f = open(_log_path, 'a', encoding='utf-8', buffering=1)
+        sys.stdout = _f
+        sys.stderr = _f
+    except Exception:
+        # 实在打不开就用黑洞 null 设备，总之不能让 print 崩
+        sys.stdout = open(os.devnull, 'w')
+        sys.stderr = sys.stdout
+
+import webview
+import socket
 from api import Api
 import scheduler
 
@@ -49,7 +65,13 @@ def main():
     )
     
     api.set_window(window)
-    webview.start(debug=True)
+    # debug 模式自动策略：
+    #   python main.py                → debug=True （开发）
+    #   打包后 invest_tool.exe         → debug=False（商用发布默认关闭 DevTools）
+    #   打包后 invest_tool.exe --debug → debug=True （维护人员排查问题时显式开启）
+    is_packaged = getattr(sys, 'frozen', False)
+    debug_mode = (not is_packaged) or ('--debug' in sys.argv)
+    webview.start(debug=debug_mode)
 
 if __name__ == '__main__':
     main()

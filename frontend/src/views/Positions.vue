@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import draggable from 'vuedraggable'
 import { api } from '../api/client'
+import { useSmartRefresh } from '../composables/useSmartRefresh'
 
 // ---------------- 账户 / 持仓状态 ----------------
 const SUMMARY_ID = 'summary'  // 选中汇总 tab 时的哨兵值（真实账户 id 都是数字）
@@ -32,7 +33,6 @@ const sortOrder = ref('desc')
 
 // 实时行情
 const quotes = ref({})
-let quoteRefreshTimer = null
 
 // ---------------- 添加持仓弹窗 ----------------
 const showAddModal = ref(false)
@@ -46,6 +46,274 @@ const addFormError = ref('')
 // ---------------- 编辑持仓弹窗 ----------------
 const editingPosition = ref(null)
 const editFormError = ref('')
+
+// ---------------- 加减仓模拟弹窗 ----------------
+// { position, mode: 'buy'|'sell', price: string, shares: string }
+const simulating = ref(null)
+const simFormError = ref('')
+
+function _defaultPriceFor(code, fallback) {
+    const q = quotes.value[code]
+    if (q?.price != null) return q.price.toFixed(2)
+    return fallback != null ? fallback.toFixed(2) : ''
+}
+
+function startSimulate(p) {
+    simulating.value = {
+        position: p,                        // 原始 DB 持仓（只读引用，用于对比）
+        simShares: p.shares,                // 模拟态持股（随每步变化）
+        simCost: p.cost_price,              // 模拟态成本价（摊薄）
+        steps: [],                          // 已规划步骤列表（步骤详情含价格/数量/单步 realizedDelta）
+        mode: 'buy',                        // 当前正在编辑的步骤
+        price: _defaultPriceFor(p.code, p.cost_price),
+        shares: '',
+    }
+    simFormError.value = ''
+    simDragOffset.value = { x: 0, y: 0 }
+}
+
+// 累计现金流：加仓 = 现金流出（负），减仓 = 现金流入（正）
+const simCashFlow = computed(() => {
+    const s = simulating.value
+    if (!s) return 0
+    return s.steps.reduce((sum, step) => {
+        const sign = step.mode === 'sell' ? 1 : -1
+        return sum + sign * step.shares * step.price
+    }, 0)
+})
+
+// 本方案增量 = 现金流 + (新持股 - 原持股) × 现价
+// 含义：执行本方案 vs 什么都不做，按现价折算能多赚 / 少亏的金额
+const simNetGain = computed(() => {
+    const s = simulating.value
+    if (!s) return null
+    const q = quotes.value[s.position.code]
+    if (!q?.price) return null
+    const shareDelta = s.simShares - s.position.shares
+    return simCashFlow.value + shareDelta * q.price
+})
+
+// 把当前输入作为一步"提交"到模拟态（不写 DB），继续叠下一步
+function commitStep() {
+    const res = simulationResult.value
+    const s = simulating.value
+    if (!s || !res || res.error) return
+    // 记录这步的描述（步骤列表展示用），costDelta 两种模式都有
+    s.steps.push({
+        mode: s.mode,
+        price: parseFloat(s.price),
+        shares: parseInt(s.shares, 10),
+        realizedDelta: res.mode === 'sell' ? res.realizedProfit : 0,
+        costDelta: res.costDelta,
+    })
+    // 叠加到模拟态：加仓 / 减仓 都更新 simCost（摊薄法）
+    s.simShares = res.newShares
+    s.simCost = res.newCost
+    // 清空输入准备下一步
+    s.price = _defaultPriceFor(s.position.code, s.simCost)
+    s.shares = ''
+    simFormError.value = ''
+}
+
+// 撤销最后一步：从头重算，保证状态一致
+function undoLastStep() {
+    const s = simulating.value
+    if (!s || !s.steps.length) return
+    s.steps.pop()
+    s.simShares = s.position.shares
+    s.simCost = s.position.cost_price
+    for (const step of s.steps) {
+        if (step.mode === 'buy') {
+            const newShares = s.simShares + step.shares
+            s.simCost = (s.simShares * s.simCost + step.shares * step.price) / newShares
+            s.simShares = newShares
+        } else {
+            // 减仓用摊薄法：回收资金从总投入里扣除后均摊到剩余股数
+            const newShares = s.simShares - step.shares
+            s.simCost = newShares > 0
+                ? (s.simShares * s.simCost - step.shares * step.price) / newShares
+                : 0
+            s.simShares = newShares
+        }
+    }
+}
+
+// 清空所有步骤，回到原始持仓
+function resetSimulation() {
+    const s = simulating.value
+    if (!s) return
+    s.simShares = s.position.shares
+    s.simCost = s.position.cost_price
+    s.steps = []
+    s.mode = 'buy'
+    s.price = _defaultPriceFor(s.position.code, s.position.cost_price)
+    s.shares = ''
+    simFormError.value = ''
+}
+
+// ---------------- 模拟弹窗：可拖动 + 防误关 ----------------
+const simDragOffset = ref({ x: 0, y: 0 })
+let _simDragStart = null  // { mouseX, mouseY, offsetX, offsetY }
+
+function onSimDragStart(e) {
+    if (e.button !== 0) return  // 仅左键
+    e.preventDefault()
+    _simDragStart = {
+        mouseX: e.clientX,
+        mouseY: e.clientY,
+        offsetX: simDragOffset.value.x,
+        offsetY: simDragOffset.value.y,
+    }
+    window.addEventListener('mousemove', onSimDragMove)
+    window.addEventListener('mouseup', onSimDragEnd)
+}
+function onSimDragMove(e) {
+    if (!_simDragStart) return
+    simDragOffset.value = {
+        x: _simDragStart.offsetX + (e.clientX - _simDragStart.mouseX),
+        y: _simDragStart.offsetY + (e.clientY - _simDragStart.mouseY),
+    }
+}
+function onSimDragEnd() {
+    _simDragStart = null
+    window.removeEventListener('mousemove', onSimDragMove)
+    window.removeEventListener('mouseup', onSimDragEnd)
+}
+
+// 遮罩点击关闭：仅当 mousedown 和 click 都发生在遮罩上时才关，
+// 避免"输入框里按下 → 拖出到遮罩上松开"被误判为点击遮罩
+let _simOverlayMouseDown = false
+function onSimOverlayMouseDown(e) {
+    _simOverlayMouseDown = (e.target === e.currentTarget)
+}
+function onSimOverlayClick(e) {
+    if (_simOverlayMouseDown && e.target === e.currentTarget) {
+        cancelSimulate()
+    }
+    _simOverlayMouseDown = false
+}
+
+function cancelSimulate() {
+    simulating.value = null
+    simFormError.value = ''
+}
+
+// 实时计算下一步的结果（叠加在当前模拟态 simShares/simCost 上）
+const simulationResult = computed(() => {
+    const s = simulating.value
+    if (!s) return null
+    const curShares = s.simShares           // ← 基于模拟态，不是原始持仓
+    const curCost = s.simCost
+    const opPrice = parseFloat(s.price)
+    const opShares = parseInt(s.shares, 10)
+    if (isNaN(opPrice) || opPrice <= 0) return null
+    if (isNaN(opShares) || opShares <= 0 || opShares % 100 !== 0) return null
+
+    if (s.mode === 'buy') {
+        const newShares = curShares + opShares
+        const newCost = (curShares * curCost + opShares * opPrice) / newShares
+        return {
+            mode: 'buy',
+            newShares,
+            newCost,
+            costDelta: newCost - curCost,
+            cashUsed: opShares * opPrice,
+        }
+    }
+    // 卖出
+    if (opShares > curShares) {
+        return { error: `卖出数量 ${opShares.toLocaleString()} 超过当前持有 ${curShares.toLocaleString()}` }
+    }
+    const newShares = curShares - opShares
+    const realizedProfit = opShares * (opPrice - curCost)
+    const realizedPct = (opPrice - curCost) / curCost * 100
+    // 摊薄成本法（同花顺 / 东财等券商标准）：
+    //   新成本 = (原总投入 − 本次回收) / 剩余股数
+    //         = (curShares × curCost − opShares × opPrice) / newShares
+    // 物理含义：剩余股份"还没被回收的那部分钱"均摊到每股。
+    // 亏损卖出 → 成本被摊高；盈利卖出 → 成本被摊低（甚至变负，表示已回本还有盈余）
+    const newCost = newShares > 0
+        ? (curShares * curCost - opShares * opPrice) / newShares
+        : 0  // 清仓无剩余，成本无意义
+    return {
+        mode: 'sell',
+        newShares,
+        newCost,
+        costDelta: newCost - curCost,
+        realizedProfit,
+        realizedPct,
+        cashGained: opShares * opPrice,
+        isFullClose: newShares === 0,
+    }
+})
+
+// 模拟态下的"浮动盈亏"：(现价 − 当前摊薄成本) × 模拟持股
+// 配合"已实现"一起看可以知道"如果此刻按现价卖光，总共赚/亏多少"
+const simUnrealized = computed(() => {
+    const s = simulating.value
+    if (!s || s.simShares === 0) return null
+    const q = quotes.value[s.position.code]
+    if (!q?.price) return null
+    const amount = s.simShares * (q.price - s.simCost)
+    // 摊薄成本可能为负（罕见但合法），此时百分比无物理意义，只返回金额
+    const pct = s.simCost > 0 ? (q.price - s.simCost) / s.simCost * 100 : null
+    return { amount, pct }
+})
+
+// 执行按钮的文案：根据是否清仓 / 有无多步 动态变化
+const executeButtonLabel = computed(() => {
+    const s = simulating.value
+    if (!s) return '执行'
+    const hasSteps = s.steps.length > 0
+    // 加上当前未提交的这步，预判最终 shares
+    const pendingFinalShares = simulationResult.value && !simulationResult.value.error
+        ? simulationResult.value.newShares
+        : s.simShares
+    if (pendingFinalShares === 0) return '执行（清仓）'
+    if (hasSteps) return `执行 ${s.steps.length + (simulationResult.value && !simulationResult.value.error ? 1 : 0)} 步到持仓`
+    if (simulationResult.value?.mode === 'buy') return '执行加仓'
+    if (simulationResult.value?.mode === 'sell') return '执行减仓'
+    return '执行'
+})
+
+async function executeSimulation() {
+    const s = simulating.value
+    if (!s) return
+    simFormError.value = ''
+
+    // 如果当前有未提交的有效输入，先把它 commit 进 steps 再执行
+    if (simulationResult.value && !simulationResult.value.error) {
+        commitStep()
+    }
+
+    if (s.steps.length === 0) {
+        simFormError.value = '还没有任何操作步骤'
+        return
+    }
+
+    const p = s.position
+    let apiRes
+    if (s.simShares === 0) {
+        // 清仓
+        apiRes = await api.removePortfolioPosition(selectedAccountId.value, p.code)
+    } else if (s.simShares === p.shares && Math.abs(s.simCost - p.cost_price) < 1e-9) {
+        // 净效应为 0（比如加仓再同价减仓）
+        simulating.value = null
+        return
+    } else {
+        apiRes = await api.updatePortfolioPosition(selectedAccountId.value, p.code, {
+            shares: s.simShares,
+            costPrice: s.simCost,
+        })
+    }
+
+    if (!apiRes.ok) {
+        simFormError.value = apiRes.error || '执行失败'
+        return
+    }
+    simulating.value = null
+    await Promise.all([loadAccounts(), loadPositions()])
+}
 
 // ---------------- 管理账户 modal ----------------
 const showManageModal = ref(false)
@@ -528,14 +796,12 @@ async function handleRemovePosition(position) {
 // ---------------- 生命周期 ----------------
 watch(positions, () => { refreshQuotes() }, { deep: false })
 
+// 智能刷新：行情基础 10s，窗口隐藏 / 空闲时自动降频
+useSmartRefresh(refreshQuotes, { baseInterval: 10_000, immediate: false })
+
 onMounted(async () => {
     await loadAccounts()
     await loadPositions()
-    quoteRefreshTimer = setInterval(refreshQuotes, 30_000)
-})
-
-onUnmounted(() => {
-    if (quoteRefreshTimer) clearInterval(quoteRefreshTimer)
 })
 </script>
 
@@ -881,6 +1147,14 @@ onUnmounted(() => {
                         <!-- 操作（仅单账户视图）-->
                         <td v-if="!isSummary" class="px-[10px] py-[8px] text-center">
                             <div class="flex items-center justify-center gap-[8px] opacity-0 group-hover:opacity-100 transition">
+                                <button @click="startSimulate(p)" class="text-[#666] hover:text-[#16a34a] transition" title="加减仓模拟">
+                                    <!-- 计算器图标：加号 + 减号 -->
+                                    <svg class="w-[14px] h-[14px]" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="4" y="3" width="12" height="14" rx="1.5"/>
+                                        <path stroke-linecap="round" d="M7 7h6M10 10V7"/>
+                                        <path stroke-linecap="round" d="M7 13h6"/>
+                                    </svg>
+                                </button>
                                 <button @click="startEdit(p)" class="text-[#666] hover:text-[#2563eb] transition" title="编辑">
                                     <svg class="w-[14px] h-[14px]" viewBox="0 0 20 20" fill="currentColor">
                                         <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/>
@@ -966,6 +1240,250 @@ onUnmounted(() => {
                 <button @click="submitAdd"
                         class="text-[12px] font-bold text-white bg-[#dc2626] px-[14px] py-[6px] rounded-[4px] hover:bg-[#991b1b]">确认添加</button>
             </div>
+        </div>
+    </div>
+
+    <!-- ============ 加减仓模拟 Modal（可拖动）============ -->
+    <div v-if="simulating" class="fixed inset-0 bg-black/20 z-50 flex items-center justify-center"
+         @mousedown="onSimOverlayMouseDown"
+         @click="onSimOverlayClick">
+        <div class="bg-white rounded-[6px] w-[460px] shadow-[0_10px_40px_rgba(0,0,0,0.15)] overflow-hidden"
+             :style="{ transform: `translate(${simDragOffset.x}px, ${simDragOffset.y}px)` }">
+            <!-- 可拖拽的标题栏（按住这里移动弹窗）-->
+            <div class="px-[20px] pt-[16px] pb-[8px] cursor-grab active:cursor-grabbing select-none bg-gradient-to-b from-[#fafafa] to-white border-b border-[#f0f0f0]"
+                 @mousedown="onSimDragStart">
+                <div class="flex items-center justify-between">
+                    <div class="text-[14px] font-bold text-[#111]">
+                        加减仓模拟 — {{ simulating.position.name || simulating.position.code }}
+                    </div>
+                    <svg class="w-[14px] h-[14px] text-[#bbb]" viewBox="0 0 20 20" fill="currentColor" title="可拖动">
+                        <circle cx="7" cy="6" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="7" cy="14" r="1.2"/>
+                        <circle cx="13" cy="6" r="1.2"/><circle cx="13" cy="10" r="1.2"/><circle cx="13" cy="14" r="1.2"/>
+                    </svg>
+                </div>
+                <div class="text-[11px] text-[#999] mt-[2px]">先试算，再决定是否更新持仓记录</div>
+            </div>
+
+            <div class="px-[20px] py-[16px]">
+
+            <!-- 操作模式切换 -->
+            <div class="flex gap-[4px] bg-[#f5f5f5] rounded-[4px] p-[3px] mb-[14px]">
+                <button @click="simulating.mode = 'buy'"
+                        class="flex-1 text-[12px] py-[6px] rounded-[3px] font-semibold transition"
+                        :class="simulating.mode === 'buy' ? 'bg-white text-[#dc2626] shadow-sm' : 'text-[#666] hover:text-[#111]'">
+                    + 加仓
+                </button>
+                <button @click="simulating.mode = 'sell'"
+                        class="flex-1 text-[12px] py-[6px] rounded-[3px] font-semibold transition"
+                        :class="simulating.mode === 'sell' ? 'bg-white text-[#059669] shadow-sm' : 'text-[#666] hover:text-[#111]'">
+                    − 减仓
+                </button>
+            </div>
+
+            <!-- 当前状态（模拟态）-->
+            <div class="bg-[#fafafa] border border-[#eeeeee] rounded-[4px] px-[12px] py-[10px] mb-[10px]">
+                <div class="flex items-center justify-between mb-[6px]">
+                    <div class="text-[11px] text-[#888]">
+                        {{ simulating.steps.length === 0 ? '当前持仓（原始）' : `模拟态（已走 ${simulating.steps.length} 步）` }}
+                    </div>
+                    <button v-if="simulating.steps.length > 0"
+                            @click="resetSimulation"
+                            class="text-[11px] text-[#999] hover:text-[#dc2626] transition">
+                        重置到原始
+                    </button>
+                </div>
+                <div class="grid grid-cols-5 gap-[6px] text-center">
+                    <div>
+                        <div class="text-[10px] text-[#999]">持股</div>
+                        <div class="text-[13px] font-bold text-[#111] tabular-nums">
+                            {{ simulating.simShares === 0 ? '清仓' : fmtShares(simulating.simShares) }}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="text-[10px] text-[#999]">成本价</div>
+                        <div class="text-[13px] font-bold text-[#111] tabular-nums">
+                            {{ simulating.simShares === 0 ? '—' : simulating.simCost?.toFixed(3) }}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="text-[10px] text-[#999]">现价</div>
+                        <div class="text-[13px] font-bold tabular-nums"
+                             :class="colorClassOf(quotes[simulating.position.code]?.changePct)">
+                            {{ fmtPrice(quotes[simulating.position.code]?.price) }}
+                        </div>
+                    </div>
+                    <!-- 浮动盈亏：按现价折算剩余持仓的未实现盈亏 -->
+                    <div>
+                        <div class="text-[10px] text-[#999]">浮动盈亏</div>
+                        <div class="text-[13px] font-bold tabular-nums"
+                             :class="colorClassOf(simUnrealized?.amount)">
+                            {{ simUnrealized ? fmtSignedAmount(simUnrealized.amount) : '—' }}
+                        </div>
+                        <div v-if="simUnrealized && simUnrealized.pct != null"
+                             class="text-[10px] tabular-nums"
+                             :class="colorClassOf(simUnrealized.pct)">
+                            {{ fmtPercent(simUnrealized.pct) }}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="text-[10px] text-[#999]" title="执行本方案 vs 什么都不做，按现价折算的净收益">本方案增量</div>
+                        <div class="text-[13px] font-bold tabular-nums"
+                             :class="colorClassOf(simNetGain)">
+                            {{ simNetGain == null ? '—' : fmtSignedAmount(simNetGain) }}
+                        </div>
+                        <div v-if="simCashFlow !== 0" class="text-[10px] text-[#999] tabular-nums">
+                            现金流 {{ simCashFlow > 0 ? '+' : '' }}{{ fmtAmount(simCashFlow) }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 已规划步骤列表 -->
+            <div v-if="simulating.steps.length > 0"
+                 class="mb-[12px] max-h-[120px] overflow-auto custom-scrollbar border border-[#eeeeee] rounded-[4px]">
+                <div class="px-[10px] py-[6px] bg-[#fafafa] text-[11px] text-[#888] border-b border-[#eeeeee] sticky top-0 flex items-center justify-between">
+                    <span>已规划 {{ simulating.steps.length }} 步</span>
+                    <button @click="undoLastStep"
+                            class="text-[11px] text-[#999] hover:text-[#dc2626] transition">撤销最后一步</button>
+                </div>
+                <div v-for="(step, i) in simulating.steps" :key="i"
+                     class="flex items-center justify-between px-[10px] py-[5px] text-[11px] tabular-nums border-b border-[#f5f5f5] last:border-b-0">
+                    <span>
+                        <span class="text-[#999] mr-[6px]">#{{ i + 1 }}</span>
+                        <span class="font-semibold" :class="step.mode === 'buy' ? 'text-[#dc2626]' : 'text-[#059669]'">
+                            {{ step.mode === 'buy' ? '加仓' : '减仓' }}
+                        </span>
+                        <span class="ml-[6px] text-[#111]">{{ step.shares.toLocaleString() }} 股 @ {{ step.price.toFixed(3) }}</span>
+                    </span>
+                    <span v-if="step.mode === 'sell'" :class="colorClassOf(step.realizedDelta)" class="font-semibold">
+                        {{ fmtSignedAmount(step.realizedDelta) }}
+                    </span>
+                    <span v-else class="text-[#999]">
+                        成本 {{ (step.costDelta >= 0 ? '+' : '') + step.costDelta.toFixed(3) }}
+                    </span>
+                </div>
+            </div>
+
+            <!-- 操作输入 -->
+            <div class="flex gap-[10px] mb-[14px]">
+                <label class="flex flex-col gap-[4px] flex-1">
+                    <span class="text-[12px] text-[#666]">{{ simulating.mode === 'buy' ? '买入' : '卖出' }}价格</span>
+                    <input v-model="simulating.price" type="number" step="0.001"
+                           class="text-[13px] px-[10px] py-[6px] border border-[#e5e5e5] rounded-[4px] outline-none focus:border-[#dc2626] tabular-nums">
+                </label>
+                <label class="flex flex-col gap-[4px] flex-1">
+                    <span class="text-[12px] text-[#666]">{{ simulating.mode === 'buy' ? '买入' : '卖出' }}数量（100 的倍数）</span>
+                    <input v-model="simulating.shares" type="number" step="100" min="100"
+                           :max="simulating.mode === 'sell' ? simulating.position.shares : undefined"
+                           placeholder="如 500"
+                           class="text-[13px] px-[10px] py-[6px] border border-[#e5e5e5] rounded-[4px] outline-none focus:border-[#dc2626] tabular-nums">
+                </label>
+            </div>
+
+            <!-- 操作后结果预览 -->
+            <div v-if="simulationResult && simulationResult.error"
+                 class="bg-[#fef2f2] border border-[#fecaca] text-[#dc2626] text-[12px] px-[12px] py-[8px] rounded-[4px] mb-[14px]">
+                {{ simulationResult.error }}
+            </div>
+
+            <div v-else-if="simulationResult"
+                 class="border rounded-[4px] px-[12px] py-[10px] mb-[14px]"
+                 :class="simulationResult.mode === 'buy'
+                    ? 'bg-[#fff0f0] border-[#fecaca]'
+                    : 'bg-[#f0fdf4] border-[#bbf7d0]'">
+                <div class="text-[11px] mb-[6px]"
+                     :class="simulationResult.mode === 'buy' ? 'text-[#dc2626]' : 'text-[#059669]'">
+                    这步操作后
+                    <span v-if="simulationResult.isFullClose" class="ml-[4px] font-bold">（清仓）</span>
+                </div>
+
+                <!-- 加仓结果 -->
+                <template v-if="simulationResult.mode === 'buy'">
+                    <div class="grid grid-cols-3 gap-[8px] text-center">
+                        <div>
+                            <div class="text-[10px] text-[#999]">新持股</div>
+                            <div class="text-[14px] font-bold text-[#111] tabular-nums">{{ fmtShares(simulationResult.newShares) }}</div>
+                        </div>
+                        <div>
+                            <div class="text-[10px] text-[#999]">新成本价</div>
+                            <div class="text-[14px] font-bold text-[#111] tabular-nums">{{ simulationResult.newCost.toFixed(3) }}</div>
+                        </div>
+                        <div>
+                            <div class="text-[10px] text-[#999]">成本变动</div>
+                            <div class="text-[13px] font-bold tabular-nums"
+                                 :class="colorClassOf(simulationResult.costDelta)">
+                                {{ (simulationResult.costDelta >= 0 ? '+' : '') + simulationResult.costDelta.toFixed(3) }}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-[11px] text-[#888] mt-[8px] text-right">
+                        投入资金：<span class="font-bold text-[#111] tabular-nums">{{ fmtAmount(simulationResult.cashUsed) }}</span>
+                    </div>
+                </template>
+
+                <!-- 减仓结果 -->
+                <template v-else>
+                    <div class="grid grid-cols-3 gap-[8px] text-center">
+                        <div>
+                            <div class="text-[10px] text-[#999]">剩余持股</div>
+                            <div class="text-[14px] font-bold text-[#111] tabular-nums">
+                                {{ simulationResult.isFullClose ? '已清仓' : fmtShares(simulationResult.newShares) }}
+                            </div>
+                        </div>
+                        <div>
+                            <div class="text-[10px] text-[#999]">剩余成本价</div>
+                            <div class="text-[14px] font-bold text-[#111] tabular-nums">
+                                {{ simulationResult.isFullClose ? '—' : simulationResult.newCost.toFixed(3) }}
+                            </div>
+                        </div>
+                        <div>
+                            <div class="text-[10px] text-[#999]">已实现盈亏</div>
+                            <div class="text-[14px] font-bold tabular-nums"
+                                 :class="colorClassOf(simulationResult.realizedProfit)">
+                                {{ fmtSignedAmount(simulationResult.realizedProfit) }}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-[11px] mt-[8px] flex justify-between">
+                        <span class="text-[#888]">
+                            回收资金：<span class="font-bold text-[#111] tabular-nums">{{ fmtAmount(simulationResult.cashGained) }}</span>
+                        </span>
+                        <span :class="colorClassOf(simulationResult.realizedPct)" class="font-semibold tabular-nums">
+                            收益率 {{ fmtPercent(simulationResult.realizedPct) }}
+                        </span>
+                    </div>
+                </template>
+            </div>
+
+            <div v-else class="bg-[#fafafa] border border-dashed border-[#e5e5e5] text-[#aaa] text-[12px] px-[12px] py-[14px] rounded-[4px] mb-[14px] text-center">
+                输入价格和数量后自动计算
+            </div>
+
+            <div v-if="simFormError" class="text-[12px] text-[#dc2626] mb-[10px]">{{ simFormError }}</div>
+
+            <div class="flex items-center justify-end gap-[8px]">
+                <button @click="cancelSimulate"
+                        class="text-[12px] px-[14px] py-[6px] text-[#666] border border-[#e5e5e5] rounded-[4px] hover:bg-[#f5f5f5]">
+                    取消
+                </button>
+                <!-- 继续叠一步：把本步加入规划，不写 DB，清空输入准备下一步 -->
+                <button @click="commitStep"
+                        :disabled="!simulationResult || !!simulationResult?.error"
+                        class="text-[12px] px-[14px] py-[6px] text-[#2563eb] border border-[#93c5fd] rounded-[4px] hover:bg-[#eff6ff] disabled:text-[#ccc] disabled:border-[#e5e5e5] disabled:cursor-not-allowed transition"
+                        title="把这一步加入规划，继续叠加下一步（不写入持仓）">
+                    ＋ 继续叠一步
+                </button>
+                <!-- 执行：把所有已规划步骤的净效果写入持仓 -->
+                <button @click="executeSimulation"
+                        :disabled="simulating.steps.length === 0 && (!simulationResult || !!simulationResult?.error)"
+                        class="text-[12px] font-bold text-white px-[14px] py-[6px] rounded-[4px] transition disabled:bg-[#ccc] disabled:cursor-not-allowed"
+                        :class="simulating.simShares === 0 || (simulationResult && simulationResult.isFullClose && simulating.steps.length === 0)
+                            ? 'bg-[#059669] hover:bg-[#047857]'
+                            : 'bg-[#dc2626] hover:bg-[#991b1b]'">
+                    {{ executeButtonLabel }}
+                </button>
+            </div>
+            </div>  <!-- /px-20 py-16 内容区 -->
         </div>
     </div>
 

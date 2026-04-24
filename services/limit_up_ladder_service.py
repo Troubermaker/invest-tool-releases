@@ -23,18 +23,28 @@ logger = logging.getLogger(__name__)
 CACHE_KEY = "limit_up_ladder"
 
 
-def get_ladder():
-    """返回按连板高度降序的天梯数据，每只股票带概念标签。"""
+def get_ladder(force=False):
+    """返回按连板高度降序的天梯数据，每只股票带概念标签。force=True 跳过缓存直接抓。"""
     cached, updated_at = db.get_cache(CACHE_KEY)
-    if cached and not db.is_market_cache_stale(updated_at):
+    # 连板天梯变化较慢，前端 30s 轮询，TTL 同步 30s
+    if not force and cached and not db.is_market_cache_stale(updated_at, trading_ttl=30):
         return cached
 
     # —— 1. 拉连板天梯（主结构）—— #
     ladder_raw = tonghuashun.raw_ths_continuous_limit_up()
-    if ladder_raw.get('status_code', 0) not in (0, '0', None):
+    status = ladder_raw.get('status_code', 0)
+    msg = ladder_raw.get('status_msg') or ''
+    if status not in (0, '0', None):
+        # 集合竞价时段（9:15-9:25、14:57-15:00）THS 会拒绝返回 status=10003，
+        # 这是已知业务行为，不是故障；降级返回上次缓存（若无则空数组），让前端静静地用历史数据即可
+        if status == 10003 or '集合竞价' in msg:
+            logger.info(
+                f"THS 天梯集合竞价时段拒绝服务（status={status} msg={msg}），"
+                f"返回{'缓存' if cached else '空列表'}"
+            )
+            return cached if cached else []
         raise RuntimeError(
-            f"THS 连板天梯接口错误 status_code={ladder_raw.get('status_code')} "
-            f"msg={ladder_raw.get('status_msg')}"
+            f"THS 连板天梯接口错误 status_code={status} msg={msg}"
         )
 
     # —— 2. 拉涨停池（拿 reason_type 做 code → 概念 映射）—— #

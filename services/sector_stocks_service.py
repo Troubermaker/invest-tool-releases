@@ -14,17 +14,18 @@ logger = logging.getLogger(__name__)
 CACHE_PREFIX = "sector_stocks:"
 
 
-def get_sector_stocks(plate_id):
+def get_sector_stocks(plate_id, force=False):
     """
     返回 [{code, name, price, change, changeVal, turnover, up}, ...]
     按 KPL 精选顺序（通常是资金+动量排序）返回前 60 只。
+    force=True 跳过缓存直接抓取最新数据。
     """
     if not plate_id:
         return []
 
     cache_key = f"{CACHE_PREFIX}{plate_id}"
     cached, updated_at = db.get_cache(cache_key)
-    if cached and not db.is_market_cache_stale(updated_at):
+    if not force and cached and not db.is_market_cache_stale(updated_at):
         return cached
 
     raw = kaipanla.raw_kpl_plate_stocks(plate_id)

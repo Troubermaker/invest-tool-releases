@@ -6,12 +6,19 @@
     换手率% / 量比 / 昨收 / 总市值(元) / 涨速% / YTD% / 所属板块
 
 数据源：东财 push2delay.ulist.np（批量，一次调用可查 200+ 只）
+
+缓存策略（按 code 独立缓存 key: "quote:XXXXXX"）：
+- 盘中 TTL 10s：与前端轮询节奏对齐，正常每次都重抓（保证实时性）
+- 非交易 TTL 24h：收盘后价格冻结，命中缓存完全不抓接口
 """
 import logging
 
+import db
 from api_endpoints import eastmoney
 
 logger = logging.getLogger(__name__)
+
+CACHE_KEY_PREFIX = "quote:"
 
 
 def code_to_secid(code):
@@ -33,7 +40,12 @@ def code_to_secid(code):
 
 def get_batch_quotes(codes):
     """
-    批量查询实时行情。
+    批量查询实时行情（按 code 独立缓存）。
+
+    流程：
+      1. 每个 code 先查本地缓存；盘中 TTL 10s / 非交易 TTL 24h
+      2. 未命中的 code 集中打一次 EM 批量接口
+      3. 新抓的行情写回各自的缓存 key
 
     Args:
         codes: 股票代码列表，如 ['600519', '000001', '300750']
@@ -54,22 +66,37 @@ def get_batch_quotes(codes):
     if not unique_codes:
         return {}
 
-    secids = [code_to_secid(c) for c in unique_codes]
+    # ---- 第 1 步：命中缓存的 code 直接用，未命中的加入待抓队列 ----
+    results = {}
+    codes_to_fetch = []
+    for code in unique_codes:
+        cached, updated_at = db.get_cache(f"{CACHE_KEY_PREFIX}{code}")
+        if cached and not db.is_market_cache_stale(updated_at, trading_ttl=10):
+            results[code] = cached
+        else:
+            codes_to_fetch.append(code)
+
+    # 全命中 → 零网络请求
+    if not codes_to_fetch:
+        return results
+
+    # ---- 第 2 步：只抓未命中的部分 ----
+    secids = [code_to_secid(c) for c in codes_to_fetch]
     secids = [s for s in secids if s]
 
     try:
         raw = eastmoney.raw_em_batch_quote(secids)
     except Exception as e:
         logger.error(f"东财批量行情失败: {e}")
-        return {}
+        # 网络失败也把缓存命中的那部分返回（优雅降级）
+        return results
 
     diff = (raw.get('data') or {}).get('diff') or []
-    results = {}
     for item in diff:
         code = str(item.get('f12') or '').strip()
         if not code:
             continue
-        results[code] = {
+        quote = {
             "name": _s(item.get('f14')),
             "price": _f(item.get('f2')),
             "changePct": _f(item.get('f3')),
@@ -87,6 +114,9 @@ def get_batch_quotes(codes):
             "mainNetInflow": _f(item.get('f62')),  # 主力今日净流入（元）
             "industry": _s(item.get('f100')),      # 所属板块/行业
         }
+        results[code] = quote
+        # ---- 第 3 步：写回各自缓存 key ----
+        db.set_cache(f"{CACHE_KEY_PREFIX}{code}", quote)
     return results
 
 

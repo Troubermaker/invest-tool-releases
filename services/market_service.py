@@ -19,7 +19,8 @@ def get_market_indices(force=False):
     """
     if not force:
         cached, updated_at = db.get_cache(CACHE_KEY)
-        if cached and not db.is_market_cache_stale(updated_at):
+        # 指数 + 板块榜，前端 15s 轮询，配套 15s 盘中 TTL
+        if cached and not db.is_market_cache_stale(updated_at, trading_ttl=15):
             return cached
 
     codes = symbols.get_sina_quote_codes()

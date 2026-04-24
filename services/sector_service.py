@@ -39,7 +39,8 @@ def get_hot_sectors(force=False):
 def _get_from_kpl(force=False):
     if not force:
         cached, updated_at = db.get_cache(KPL_CACHE_KEY)
-        if cached and not db.is_market_cache_stale(updated_at):
+        # 板块榜与 market_service 同步 15s 刷新节奏
+        if cached and not db.is_market_cache_stale(updated_at, trading_ttl=15):
             return cached
 
     raw = kaipanla.raw_kpl_real_ranking()
@@ -82,7 +83,7 @@ def _get_from_kpl(force=False):
 def _get_from_sina(force=False):
     if not force:
         cached, updated_at = db.get_cache(SINA_CACHE_KEY)
-        if cached and not db.is_market_cache_stale(updated_at):
+        if cached and not db.is_market_cache_stale(updated_at, trading_ttl=15):
             return cached
 
     url = "http://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"

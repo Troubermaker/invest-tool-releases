@@ -37,6 +37,23 @@ from services import backup_service
 import ai_service
 
 
+def _build_default_filename(sections):
+    """根据选中的分区生成有辨识度的备份文件名。
+    watchlist+portfolio+preferences → invest_data_backup_YYYY-MM-DD.json
+    只有 watchlist → watchlist_only_YYYY-MM-DD.json
+    只有 portfolio → portfolio_only_YYYY-MM-DD.json
+    其他组合 → sections_a_b_YYYY-MM-DD.json
+    """
+    today = date.today().isoformat()
+    if not sections or set(sections) == set(['watchlist', 'portfolio', 'preferences']):
+        return f"invest_data_backup_{today}.json"
+    if sections == ['watchlist']:
+        return f"watchlist_only_{today}.json"
+    if sections == ['portfolio']:
+        return f"portfolio_only_{today}.json"
+    return f"sections_{'_'.join(sorted(sections))}_{today}.json"
+
+
 def api_endpoint(func):
     """统一 try/except + 响应信封封装。"""
     @wraps(func)
@@ -240,14 +257,16 @@ class Api:
         return {"imported": counts}
 
     @api_endpoint
-    def export_user_data_interactive(self):
+    def export_user_data_interactive(self, sections=None):
         """
         打开原生"另存为"对话框写入 JSON 文件。
-        返回 {cancelled: True} 或 {cancelled: False, path, counts}。
+        sections: 'watchlist'/'portfolio'/'preferences' 的子集；None = 全部
+        返回 {cancelled: True} 或 {cancelled: False, path, counts, sections}。
         """
         if not self._window:
             raise RuntimeError("pywebview 窗口未就绪")
-        default_name = f"invest_data_backup_{date.today().isoformat()}.json"
+        # 根据分区组合定制默认文件名，便于一眼分辨共享的是啥
+        default_name = _build_default_filename(sections)
         result = self._window.create_file_dialog(
             webview.SAVE_DIALOG,
             save_filename=default_name,
@@ -255,10 +274,10 @@ class Api:
         )
         if not result:
             return {"cancelled": True}
-        # SAVE_DIALOG 返回字符串或单元素元组，兼容
         path = result[0] if isinstance(result, (list, tuple)) else result
-        counts = backup_service.write_backup_to_file(path)
-        return {"cancelled": False, "path": path, "counts": counts}
+        counts = backup_service.write_backup_to_file(path, sections=sections)
+        actual_sections = sections or list(backup_service.ALL_SECTIONS)
+        return {"cancelled": False, "path": path, "counts": counts, "sections": actual_sections}
 
     @api_endpoint
     def pick_backup_file(self):

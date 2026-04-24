@@ -94,12 +94,18 @@ def _validate_shares(shares):
     return n
 
 
-def _validate_cost_price(cost_price):
+def _validate_cost_price(cost_price, *, require_positive=False):
+    """
+    成本价校验。
+    - 新建持仓（add_position）→ require_positive=True，必须 > 0
+    - 更新持仓（update_position）→ require_positive=False，允许负数或零，
+      因为摊薄成本法下 "高位卖出后剩余股份的摊薄成本" 可以变负数（= 已全部回本还有盈余）
+    """
     try:
         p = float(cost_price)
     except (TypeError, ValueError):
         raise ValueError("成本价必须为数字")
-    if p <= 0:
+    if require_positive and p <= 0:
         raise ValueError("成本价必须大于 0")
     return p
 
@@ -123,7 +129,8 @@ def add_position(account_id, code, name='', shares=None, cost_price=None, remark
     if not code:
         raise ValueError("股票代码不能为空")
     shares = _validate_shares(shares)
-    cost_price = _validate_cost_price(cost_price)
+    # 新建持仓必须是正成本价（你不可能免费或"负价"买入股票）
+    cost_price = _validate_cost_price(cost_price, require_positive=True)
 
     conn = db.get_db()
     c = conn.cursor()

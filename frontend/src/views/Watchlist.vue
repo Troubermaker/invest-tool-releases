@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import draggable from 'vuedraggable'
 import Sortable from 'sortablejs'
 import { api } from '../api/client'
+import { useSmartRefresh } from '../composables/useSmartRefresh'
 
 // ---------------- 数据状态 ----------------
 const groups = ref([])
@@ -79,7 +80,6 @@ function confirmCancel() {
 
 // 实时行情（code → quote）
 const quotes = ref({})
-let quoteRefreshTimer = null
 
 // 分时 sparkline 数据（code → { preClose, prices }）
 const sparklines = ref({})
@@ -709,7 +709,11 @@ watch(stocks, () => {
     refreshSparklines()
 }, { deep: false })
 
-let sparklineRefreshTimer = null
+// 智能刷新：行情基础 10s；分时基础 60s。
+// 窗口隐藏 / 5 分钟内活跃度低时自动降频，盯盘模式下强制保持节奏。
+useSmartRefresh(refreshQuotes,     { baseInterval: 10_000, immediate: false })
+useSmartRefresh(refreshSparklines, { baseInterval: 60_000, immediate: false })
+
 
 // ============ 列顺序持久化 ============
 async function loadColumnOrder() {
@@ -755,17 +759,10 @@ onMounted(async () => {
     await loadStocks()
     await nextTick()
     initHeaderSortable()
-    // 行情每 30s 刷新（单次请求，轻量）
-    quoteRefreshTimer = setInterval(refreshQuotes, 30_000)
-    // 分时每 60s 刷新（多次请求，拉长间隔 + 前端分批降低反爬风险）
-    // 分钟级别的分时数据，60s 刷一次已经足够及时
-    sparklineRefreshTimer = setInterval(refreshSparklines, 60_000)
 })
 
 onUnmounted(() => {
     document.removeEventListener('click', onDocumentClick)
-    if (quoteRefreshTimer) clearInterval(quoteRefreshTimer)
-    if (sparklineRefreshTimer) clearInterval(sparklineRefreshTimer)
     if (headerSortable) { headerSortable.destroy(); headerSortable = null }
 })
 </script>

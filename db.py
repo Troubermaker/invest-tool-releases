@@ -1,7 +1,7 @@
 import sqlite3
 import os
 import json
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'invest_data.db')
 
@@ -146,12 +146,63 @@ def clear_cache(key=None):
     conn.commit()
     conn.close()
 
-def is_market_cache_stale(updated_at_str):
+# ========= A 股交易日历 =========
+# 用 chinese_calendar 判断是否交易日。它是纯 Python 离线库，不带 V8 引擎，
+# 不会和 pywebview 的 Chromium/V8 冲突（akshare 因为依赖 py_mini_racer 会崩进程）。
+# chinese_calendar.is_workday 基于国务院公告的法定节假日 + 调休规则，
+# A 股交易日基本等同于"法定工作日"（节假日休市，调休补班日也开市）。
+
+def is_trading_day(d):
     """
-    行情数据专用的时效判断（保留原 fetcher.is_cache_stale 的语义）：
-    - 跨天 → 一定失效
-    - 交易时段（9:30-11:35 / 13:00-15:00）→ 超过 1 分钟失效
-    - 盘后或周末 → 超过 1 小时失效
+    判断某 date 是不是 A 股交易日。
+    规则：
+      - 周末 → 先默认非交易日
+      - chinese_calendar 识别的法定节假日 → 非交易日
+      - chinese_calendar 识别的调休补班日（周末但算工作日）→ 交易日
+      - 失败时降级到 weekday 判断
+    """
+    try:
+        import chinese_calendar as cc
+        return cc.is_workday(d)
+    except Exception:
+        # 库未安装 / 日期超出支持范围（chinese_calendar 通常支持当前年份 + 下一年）
+        return d.weekday() < 5
+
+
+def _current_trading_day(t):
+    """
+    把任意时刻归属到一个"交易日"。
+    规则：
+      - 9:30 开盘前 → 回退到上一个交易日（今天算在昨天的交易日里）
+      - 开盘后 → 今天（如果今天本身不是交易日则继续回退）
+      - 周末 / 节假日 / 调休不开市日 → 回退到最近的交易日
+    """
+    time_of_day = t.time()
+    d = t.date()
+    if time_of_day < dtime(9, 30):
+        d -= timedelta(days=1)
+    # 最多回退两周避免死循环（春节长假最长 10 天左右）
+    safety = 14
+    while safety > 0 and not is_trading_day(d):
+        d -= timedelta(days=1)
+        safety -= 1
+    return d
+
+
+def is_market_cache_stale(updated_at_str, trading_ttl=60, offhours_ttl=24*3600):
+    """
+    行情数据专用的时效判断。支持按数据源差异化 TTL。
+
+    判定顺序：
+      1) 跨交易日 → 立即失效（保证每天开盘第一次访问必然拉新）
+      2) 同一交易日、交易时段内 → trading_ttl（默认 60s）
+      3) 同一交易日、非交易时段 → offhours_ttl（默认 24h，主要是兜底）
+
+    各服务按自身刷新节奏传入适当的 trading_ttl：
+        - 指数/板块/市场情绪：15s
+        - 连板天梯：30s
+        - sparkline 分时：保留默认 60s
+        - 自选持仓 quotes：10s
     """
     if not updated_at_str:
         return True
@@ -159,18 +210,28 @@ def is_market_cache_stale(updated_at_str):
         updated_at = datetime.fromisoformat(updated_at_str)
         now = datetime.now()
 
-        if updated_at.date() < now.date():
+        # 规则 1: 跨交易日 → 必然失效
+        if _current_trading_day(updated_at) != _current_trading_day(now):
+            return True
+
+        # 规则 2: 同一交易日内的"盘中 → 收盘"转换
+        # 缓存写于本交易日 15:00 之前，而现在已过 15:00 → 强制刷新一次拿收盘价
+        # 否则 16:00 打开 app 会一直看着今天 10:00 的盘中价
+        trading_day_of_cache = _current_trading_day(updated_at)
+        session_close = datetime.combine(trading_day_of_cache, dtime(15, 0))
+        if updated_at < session_close <= now:
             return True
 
         cur = now.time()
-        is_trading = (dtime(9, 30) <= cur <= dtime(11, 35)) or \
-                     (dtime(13, 0) <= cur <= dtime(15, 0))
-
+        # A 股交易日 + 交易时段双重校验，节假日 / 调休日不算交易时段
+        is_trading = is_trading_day(now.date()) and (
+            (dtime(9, 30) <= cur <= dtime(11, 35)) or
+            (dtime(13, 0) <= cur <= dtime(15, 0))
+        )
         delta = (now - updated_at).total_seconds()
         if is_trading:
-            return delta > 60
-        else:
-            return delta > 3600
+            return delta > trading_ttl
+        return delta > offhours_ttl
     except Exception:
         return True
 

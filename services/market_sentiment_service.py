@@ -28,7 +28,8 @@ def get_sentiment(force=False):
     """
     if not force:
         cached, updated_at = db.get_cache(CACHE_KEY)
-        if cached and not db.is_market_cache_stale(updated_at):
+        # 市场情绪（成交额 + 涨跌）前端 15s 轮询
+        if cached and not db.is_market_cache_stale(updated_at, trading_ttl=15):
             return cached
 
     # 1. 成交额分时（取 header 里的聚合值，point_list 暂不用）
