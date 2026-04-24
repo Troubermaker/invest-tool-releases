@@ -151,6 +151,10 @@ export const api = {
   getUserPreference: (key, defaultVal) => call('get_user_preference', key, defaultVal ?? null),
   setUserPreference: (key, value) => call('set_user_preference', key, value),
 
+  // -------- 老板键 --------
+  getBossKey: () => call('get_boss_key'),
+  setBossKey: (hotkey) => call('set_boss_key', hotkey),
+
   // -------- 数据备份（跨机器迁移）--------
   /** 弹原生"另存为"对话框并写入 JSON。sections: ['watchlist','portfolio','preferences'] 的子集，null=全部 */
   exportUserDataInteractive: (sections) => call('export_user_data_interactive', sections ?? null),

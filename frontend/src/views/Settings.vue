@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../api/client'
 
 // ---------------- 导出（原生"另存为"对话框，可选分区）----------------
@@ -94,6 +94,123 @@ async function confirmImport() {
         importing.value = false
     }
 }
+
+// ---------------- 老板键 ----------------
+const bossKey = ref(null)
+const recording = ref(false)
+const capturedMods = ref([])   // ['ctrl' | 'alt' | 'shift']
+const capturedKey = ref(null)  // 'b' / '`' / 'f2' 等
+const bossKeyMsg = ref('')
+
+async function loadBossKey() {
+    const res = await api.getBossKey()
+    if (res.ok) bossKey.value = res.data.hotkey
+}
+
+function startRecording() {
+    recording.value = true
+    capturedMods.value = []
+    capturedKey.value = null
+    bossKeyMsg.value = ''
+    window.addEventListener('keydown', onCaptureKeyDown, true)
+    window.addEventListener('keyup', onCaptureKeyUp, true)
+}
+
+function cancelRecording() {
+    recording.value = false
+    capturedMods.value = []
+    capturedKey.value = null
+    bossKeyMsg.value = ''
+    window.removeEventListener('keydown', onCaptureKeyDown, true)
+    window.removeEventListener('keyup', onCaptureKeyUp, true)
+}
+
+// 浏览器 e.key → keyboard 库的按键名
+function normalizeKey(e) {
+    const k = e.key.toLowerCase()
+    if (k === ' ') return 'space'
+    if (k === 'escape') return 'esc'
+    if (k === 'arrowup') return 'up'
+    if (k === 'arrowdown') return 'down'
+    if (k === 'arrowleft') return 'left'
+    if (k === 'arrowright') return 'right'
+    return k
+}
+
+function onCaptureKeyDown(e) {
+    e.preventDefault()
+    e.stopPropagation()
+    const k = normalizeKey(e)
+    // 如果本身是修饰键，只更新修饰键列表
+    if (['control', 'alt', 'shift', 'meta'].includes(k)) {
+        const mod = k === 'control' ? 'ctrl' : (k === 'meta' ? null : k)
+        if (mod && !capturedMods.value.includes(mod)) {
+            capturedMods.value = [...capturedMods.value, mod]
+        }
+        return
+    }
+    // 非修饰键 → 作为"第 2 键"捕获
+    capturedKey.value = k
+    // 同时重新计算当前按下的修饰键（避免之前松开又按下的脏数据）
+    const mods = []
+    if (e.ctrlKey) mods.push('ctrl')
+    if (e.altKey) mods.push('alt')
+    if (e.shiftKey) mods.push('shift')
+    capturedMods.value = mods
+}
+
+function onCaptureKeyUp() {
+    // 松开时不做处理；保存按钮会用当前捕获的值校验
+}
+
+const capturedCombo = computed(() => {
+    const mods = capturedMods.value
+    const key = capturedKey.value
+    if (!key) return mods.join(' + ') || ''
+    return [...mods, key].join(' + ')
+})
+
+const capturedComboRaw = computed(() => {
+    const mods = capturedMods.value
+    const key = capturedKey.value
+    if (!key) return ''
+    return [...mods, key].join('+')
+})
+
+const isValidCombo = computed(() => {
+    return capturedMods.value.length === 1 && capturedKey.value && !['ctrl', 'alt', 'shift'].includes(capturedKey.value)
+})
+
+const validationHint = computed(() => {
+    if (!capturedKey.value) return '先按住 Ctrl / Alt / Shift 中的一个，再按一个字母或符号键'
+    if (capturedMods.value.length === 0) return '缺少修饰键（Ctrl / Alt / Shift）'
+    if (capturedMods.value.length > 1) return `只能 1 个修饰键，当前有 ${capturedMods.value.length} 个（请只按住一个）`
+    return '这个组合可以用 ✓'
+})
+
+async function saveBossKey() {
+    if (!isValidCombo.value) return
+    const res = await api.setBossKey(capturedComboRaw.value)
+    if (!res.ok) {
+        bossKeyMsg.value = '保存失败：' + (res.error || '未知错误')
+        return
+    }
+    bossKey.value = res.data.hotkey
+    bossKeyMsg.value = `已更新：${formatDisplay(res.data.hotkey)}`
+    cancelRecording()
+}
+
+function formatDisplay(h) {
+    if (!h) return '未设置'
+    return h.split('+').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' + ')
+}
+
+onMounted(() => { loadBossKey() })
+onUnmounted(() => {
+    // 若用户在录制中直接离开页面，清理监听
+    window.removeEventListener('keydown', onCaptureKeyDown, true)
+    window.removeEventListener('keyup', onCaptureKeyUp, true)
+})
 
 // ---------------- 通用确认弹窗 ----------------
 const confirmState = ref({ show: false, title: '', message: '', confirmText: '确定', _resolve: null })
@@ -250,6 +367,68 @@ function confirmCancel() {
         <!-- 提示：手工拷库路径 -->
         <div class="max-w-[760px] mt-[16px] bg-[#fffbeb] border border-[#fde68a] rounded-[6px] px-[14px] py-[10px] text-[12px] text-[#92400e]">
             💡 应急方案：也可以直接把 <code class="bg-white px-[5px] py-[1px] rounded text-[11px]">invest_data.db</code> 拷贝到另一台电脑的相同路径，但不建议用云盘自动同步（SQLite 锁冲突风险）。
+        </div>
+
+        <!-- ============ 老板键 ============ -->
+        <div class="max-w-[760px] mt-[20px] bg-white border border-[#eeeeee] rounded-[8px] shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
+            <div class="px-[20px] py-[14px] border-b border-[#f0f0f0]">
+                <div class="text-[14px] font-bold text-[#111]">老板键</div>
+                <div class="text-[12px] text-[#999] mt-[2px]">
+                    一键隐藏 / 恢复窗口。窗口从任务栏、Alt+Tab 彻底消失，再按同组合恢复。
+                    <b>只允许 2 键组合（1 个修饰键 + 1 个普通键）</b>。
+                </div>
+            </div>
+
+            <div class="px-[20px] py-[16px]">
+                <!-- 查看态 -->
+                <div v-if="!recording" class="flex items-center justify-between">
+                    <div>
+                        <div class="text-[12px] text-[#888]">当前快捷键</div>
+                        <div class="text-[16px] font-bold text-[#111] mt-[4px] tabular-nums">
+                            {{ formatDisplay(bossKey) }}
+                        </div>
+                    </div>
+                    <button @click="startRecording"
+                            class="shrink-0 text-[12px] font-bold text-[#444] bg-white border border-[#d4d4d4] px-[16px] py-[7px] rounded-[4px] hover:bg-[#f5f5f5] hover:border-[#999] transition">
+                        修改快捷键
+                    </button>
+                </div>
+
+                <!-- 录制态 -->
+                <div v-else
+                     class="bg-[#fafafa] border border-dashed border-[#fbbf24] rounded-[6px] px-[14px] py-[14px]">
+                    <div class="text-[12px] text-[#92400e] mb-[8px]">请按下新的快捷键组合 ⌨</div>
+                    <div class="text-[20px] font-bold text-[#111] tabular-nums tracking-wider py-[10px] text-center bg-white rounded-[4px] border border-[#eeeeee]">
+                        {{ capturedCombo || '等待按键...' }}
+                    </div>
+                    <div class="text-[11px] mt-[8px]"
+                         :class="isValidCombo ? 'text-[#059669]' : 'text-[#888]'">
+                        {{ validationHint }}
+                    </div>
+                    <div class="flex justify-end gap-[8px] mt-[12px]">
+                        <button @click="cancelRecording"
+                                class="text-[12px] px-[14px] py-[6px] text-[#666] border border-[#e5e5e5] rounded-[4px] hover:bg-white">
+                            取消
+                        </button>
+                        <button @click="saveBossKey" :disabled="!isValidCombo"
+                                class="text-[12px] font-bold text-white bg-[#dc2626] px-[14px] py-[6px] rounded-[4px] hover:bg-[#991b1b] disabled:bg-[#ccc] disabled:cursor-not-allowed transition">
+                            保存
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="bossKeyMsg && !recording"
+                     class="text-[12px] mt-[10px] px-[10px] py-[6px] rounded-[4px]"
+                     :class="bossKeyMsg.includes('失败')
+                         ? 'text-[#dc2626] bg-[#fef2f2] border border-[#fecaca]'
+                         : 'text-[#059669] bg-[#f0fdf4] border border-[#dcfce7]'">
+                    {{ bossKeyMsg }}
+                </div>
+
+                <div class="mt-[12px] text-[11px] text-[#999]">
+                    推荐组合：Ctrl + `（反引号）、Alt + Z、Ctrl + B 等。避免与浏览器 / 系统常用快捷键冲突。
+                </div>
+            </div>
         </div>
 
     </div>

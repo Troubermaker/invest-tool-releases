@@ -34,7 +34,33 @@ from services import quote_service
 from services import stock_search_service
 from services import sparkline_service
 from services import backup_service
+from services import boss_key_service
 import ai_service
+
+
+# 老板键合法性校验：恰好 2 键组合，且必须有 1 个修饰键 + 1 个普通键
+_VALID_MODIFIERS = {'ctrl', 'alt', 'shift'}
+_VALID_KEYS = set('abcdefghijklmnopqrstuvwxyz0123456789`-=[];\',./') | {
+    'space', 'enter', 'tab', 'esc', 'backspace', 'insert', 'delete',
+    'home', 'end', 'pageup', 'pagedown', 'up', 'down', 'left', 'right',
+} | {f'f{i}' for i in range(1, 13)}  # F1-F12
+
+
+def _validate_two_key_combo(hotkey):
+    """只允许 '<修饰键>+<普通键>' 形式，严格 2 个 token。"""
+    if not hotkey or not isinstance(hotkey, str):
+        raise ValueError("快捷键不能为空")
+    parts = [p.strip().lower() for p in hotkey.split('+')]
+    if len(parts) != 2:
+        raise ValueError(f"必须是 2 键组合（如 ctrl+b），收到 {len(parts)} 键: {hotkey}")
+    mod, key = parts
+    if mod not in _VALID_MODIFIERS:
+        raise ValueError(f"第 1 键必须是修饰键（ctrl / alt / shift），收到: {mod}")
+    if key in _VALID_MODIFIERS:
+        raise ValueError(f"不能两个都是修饰键，第 2 键需要字母 / 数字 / 符号: {key}")
+    if key not in _VALID_KEYS:
+        raise ValueError(f"不支持的按键: {key}")
+    return f'{mod}+{key}'
 
 
 def _build_default_filename(sections):
@@ -310,6 +336,21 @@ class Api:
         """从指定路径导入备份文件。"""
         counts = backup_service.import_from_file(path, mode=mode)
         return {"imported": counts}
+
+    # =========== 老板键 =========== #
+
+    @api_endpoint
+    def get_boss_key(self):
+        """当前已注册的老板键（hotkey 字符串，可能是 None 表示没注册）"""
+        return {"hotkey": boss_key_service.get_current()}
+
+    @api_endpoint
+    def set_boss_key(self, hotkey):
+        """修改老板键。严格 2 键组合，成功后立即热切换，并持久化到 user_preferences。"""
+        normalized = _validate_two_key_combo(hotkey)  # 校验 + 标准化大小写
+        boss_key_service.update(normalized)            # 运行时热切换
+        watchlist_service.set_preference('boss_key', normalized)  # 持久化
+        return {"hotkey": normalized}
 
     @api_endpoint
     def get_batch_quotes(self, codes):
