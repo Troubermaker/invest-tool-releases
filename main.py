@@ -110,6 +110,8 @@ def main():
     api.set_window(window)
     # 注册老板键（全局快捷键，从 user_preferences 读配置；可在设置页修改）
     setup_boss_key(window)
+    # 启动时按需预热缓存（盘后 / 非交易日打开 app 时，先后台抓最新交易日数据）
+    scheduler.warm_cache_on_startup_async()
     # debug 模式自动策略：
     #   python main.py                → debug=True （开发）
     #   打包后 invest_tool.exe         → debug=False（商用发布默认关闭 DevTools）

@@ -17,15 +17,20 @@ logger = logging.getLogger(__name__)
 CACHE_KEY = "market_sentiment"
 
 
-def get_sentiment(force=False):
+def get_sentiment(date=None, force=False):
     """
     返回 {
         turnover: { today, yesterday, change, changePct, isExpansion },
         breadth:  { up, down, flat, limitUp, limitDown, suspend, upPct, downPct, flatPct },
         updateTime: "YYYY-MM-DD HH:MM:SS"
     }
-    所有金额单位：元（前端自行 → 亿/万亿）
+
+    注意：THS 这两个底层接口（turnover_minute / up_down_distribution）只服务 realtime，
+    没有历史日期版本。所以传入 date 时直接返回 None，让前端在历史视图隐藏这块面板。
     """
+    if date:
+        return None  # 历史不支持
+
     if not force:
         cached, updated_at = db.get_cache(CACHE_KEY)
         # 市场情绪（成交额 + 涨跌）前端 15s 轮询

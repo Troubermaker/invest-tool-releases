@@ -444,14 +444,13 @@ async function renderChartData() {
     chartInstance.timeScale().fitContent();
 }
 
-// 指数 + 板块榜：基础 15s，窗口隐藏 / idle 时自动降频
+// 指数 + 板块榜：基础 15s
 useSmartRefresh(api.getMarketData, {
     baseInterval: 15_000,
     onData: (data) => {
         marketIndices.value = data.indices
         totalTurnover.value = data.total_turnover
         hotSectors.value = data.hotSectors
-        // 默认选中第一个板块，右侧才不会空着
         if (hotSectors.value.length > 0 && !selectedSector.value) {
             selectedSector.value = hotSectors.value[0]
             loadSectorStocks(hotSectors.value[0].code)
@@ -467,7 +466,7 @@ useSmartRefresh(api.getLimitUpLadder, {
     onError: (err) => console.error("连板天梯拉取失败:", err),
 })
 
-// 市场情绪：成交额 + 涨跌分布，基础 15s
+// 市场情绪：基础 15s
 useSmartRefresh(api.getMarketSentiment, {
     baseInterval: 15_000,
     onData: (data) => { marketSentiment.value = data },
@@ -504,7 +503,7 @@ onMounted(() => {
 
 <template>
   <div class="flex flex-col h-full bg-[#fcfcfc] relative overflow-hidden">
-    
+
     <!-- TOP HORIZONTAL STRIP: INDICES -->
     <div class="bg-[#fafafa] border-b border-[#e5e5e5] px-4 py-2 flex flex-wrap xl:flex-nowrap items-stretch w-full gap-4 z-10 shrink-0">
         <div class="flex-1 flex gap-[8px] items-stretch min-w-0">

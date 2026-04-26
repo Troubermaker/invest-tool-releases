@@ -14,6 +14,7 @@
     - reasonAll : 完整概念串（如 "煤制烯烃+一季报增长+青岛国资"），前端 hover 气泡全显
 """
 import logging
+from datetime import datetime
 
 import db
 from api_endpoints import tonghuashun
@@ -23,15 +24,34 @@ logger = logging.getLogger(__name__)
 CACHE_KEY = "limit_up_ladder"
 
 
-def get_ladder(force=False):
-    """返回按连板高度降序的天梯数据，每只股票带概念标签。force=True 跳过缓存直接抓。"""
-    cached, updated_at = db.get_cache(CACHE_KEY)
-    # 连板天梯变化较慢，前端 30s 轮询，TTL 同步 30s
-    if not force and cached and not db.is_market_cache_stale(updated_at, trading_ttl=30):
-        return cached
+def get_ladder(date=None, force=False):
+    """
+    返回按连板高度降序的天梯数据，每只股票带概念标签。
+    Args:
+        date:  'YYYY-MM-DD' 历史日期；None 表示用最近一个交易日
+        force: 跳过缓存
+    """
+    # 决定查询哪天的数据
+    if date:
+        target_date_str = date.replace('-', '')  # 'YYYY-MM-DD' → 'YYYYMMDD'
+        cache_key = f"{CACHE_KEY}:{target_date_str}"
+        is_historical = True
+    else:
+        target_date = db.current_trading_day(datetime.now())
+        target_date_str = target_date.strftime('%Y%m%d')
+        cache_key = CACHE_KEY
+        is_historical = False
+
+    # 缓存检查：历史永久新鲜；实时按 30s TTL
+    if not force:
+        cached, updated_at = db.get_cache(cache_key)
+        if cached and (is_historical or not db.is_market_cache_stale(updated_at, trading_ttl=30)):
+            return cached
+    else:
+        cached, _ = db.get_cache(cache_key)
 
     # —— 1. 拉连板天梯（主结构）—— #
-    ladder_raw = tonghuashun.raw_ths_continuous_limit_up()
+    ladder_raw = tonghuashun.raw_ths_continuous_limit_up(date=target_date_str)
     status = ladder_raw.get('status_code', 0)
     msg = ladder_raw.get('status_msg') or ''
     if status not in (0, '0', None):
@@ -47,10 +67,10 @@ def get_ladder(force=False):
             f"THS 连板天梯接口错误 status_code={status} msg={msg}"
         )
 
-    # —— 2. 拉涨停池（拿 reason_type 做 code → 概念 映射）—— #
+    # —— 2. 拉涨停池（拿 reason_type 做 code → 概念 映射），同一天 —— #
     reason_map = {}
     try:
-        pool_raw = tonghuashun.raw_ths_limit_up_pool()
+        pool_raw = tonghuashun.raw_ths_limit_up_pool(date=target_date_str)
         pool_info = (pool_raw.get('data') or {}).get('info') or []
         for stock in pool_info:
             if isinstance(stock, dict) and stock.get('code'):
@@ -92,5 +112,12 @@ def get_ladder(force=False):
     # 按连板高度降序（最高板在最上）
     results.sort(key=lambda t: -t['height'])
 
-    db.set_cache(CACHE_KEY, results)
+    # 空结果不写缓存：周末 / 节假日 THS 接口会返回空（status=0 但 data=[]），
+    # 如果把空写进去就把上一个交易日的好缓存覆盖掉了。
+    # 此时返回上次的好缓存（如果有），让用户看到上一个交易日的天梯。
+    if not results:
+        logger.info("THS 天梯返回空（可能是非交易日），保留上次缓存")
+        return cached if cached else []
+
+    db.set_cache(cache_key, results)  # 用动态 cache_key（实时 / 历史区分）
     return results

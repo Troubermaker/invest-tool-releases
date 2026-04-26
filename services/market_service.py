@@ -11,12 +11,16 @@ import symbols
 CACHE_KEY = "market_indices"
 
 
-def get_market_indices(force=False):
+def get_market_indices(date=None, force=False):
     """
     返回 {"indices": [...], "total_turnover": float}
     - 使用"行情专用"缓存策略：盘中 60s、盘后 1h、跨天失效
     - force=True 时跳过缓存
+    - date 历史日期：暂不支持（新浪批量指数接口无历史版），返回 None 让前端隐藏面板
     """
+    if date:
+        return None  # 历史不支持
+
     if not force:
         cached, updated_at = db.get_cache(CACHE_KEY)
         # 指数 + 板块榜，前端 15s 轮询，配套 15s 盘中 TTL

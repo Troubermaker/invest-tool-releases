@@ -33,6 +33,8 @@ const sortOrder = ref('desc')
 
 // 实时行情
 const quotes = ref({})
+// 分时 sparkline 数据（code → { preClose, prices, avgPrices }）
+const sparklines = ref({})
 
 // ---------------- 添加持仓弹窗 ----------------
 const showAddModal = ref(false)
@@ -52,6 +54,40 @@ const editFormError = ref('')
 const simulating = ref(null)
 const simFormError = ref('')
 
+// 交易费率（持久化在 user_preferences['trade_fees']）
+// 默认值参考用户提供的标准；用户可在模拟弹窗里改并保存
+const DEFAULT_FEES = {
+    commission: 0.0000869,  // 佣金率（双向）
+    transfer:   0.0000096,  // 过户费率（双向）
+    stamp:      0.000498,   // 印花税率（仅卖出）
+}
+const tradeFees = ref({ ...DEFAULT_FEES })
+const showFeesEditor = ref(false)
+const feesSaveStatus = ref('')
+
+async function loadTradeFees() {
+    const res = await api.getUserPreference('trade_fees')
+    if (res.ok && res.data && typeof res.data === 'object') {
+        tradeFees.value = { ...DEFAULT_FEES, ...res.data }
+    }
+}
+async function saveTradeFees() {
+    const res = await api.setUserPreference('trade_fees', tradeFees.value)
+    feesSaveStatus.value = res.ok ? '✓ 已保存' : '保存失败'
+    setTimeout(() => { feesSaveStatus.value = '' }, 1500)
+}
+function resetFeesToDefault() {
+    tradeFees.value = { ...DEFAULT_FEES }
+}
+
+// 计算单次操作的手续费明细
+function _computeFee(amount, mode) {
+    const commission = amount * tradeFees.value.commission
+    const transfer   = amount * tradeFees.value.transfer
+    const stamp      = mode === 'sell' ? amount * tradeFees.value.stamp : 0
+    return { commission, transfer, stamp, total: commission + transfer + stamp }
+}
+
 function _defaultPriceFor(code, fallback) {
     const q = quotes.value[code]
     if (q?.price != null) return q.price.toFixed(2)
@@ -63,27 +99,54 @@ function startSimulate(p) {
         position: p,                        // 原始 DB 持仓（只读引用，用于对比）
         simShares: p.shares,                // 模拟态持股（随每步变化）
         simCost: p.cost_price,              // 模拟态成本价（摊薄）
-        steps: [],                          // 已规划步骤列表（步骤详情含价格/数量/单步 realizedDelta）
+        steps: [],                          // 已规划步骤列表（步骤详情含 mode/price/shares/date）
         mode: 'buy',                        // 当前正在编辑的步骤
         price: _defaultPriceFor(p.code, p.cost_price),
         shares: '',
+        date: todayStr(),                   // 当前步骤的交易日期，用于 T+1 校验
     }
     simFormError.value = ''
     simDragOffset.value = { x: 0, y: 0 }
 }
 
-// 累计现金流：加仓 = 现金流出（负），减仓 = 现金流入（正）
+// 计算给定日期当天最多可卖股数（T+1 约束）
+// 原始持股 + 该日期之前所有买入 - 之前所有卖出 - 同日已计划的卖出
+// 同日的买入不计入可卖（A 股 T+1 规则）
+function _availableToSellOn(date) {
+    const s = simulating.value
+    if (!s) return 0
+    let entering = s.position.shares
+    let sameDateSells = 0
+    for (const step of s.steps) {
+        if (step.date < date) {
+            entering += (step.mode === 'buy' ? step.shares : -step.shares)
+        } else if (step.date === date) {
+            if (step.mode === 'sell') sameDateSells += step.shares
+            // 当日买入不进入可卖池
+        }
+    }
+    return entering - sameDateSells
+}
+
+// 累计现金流（已扣费）：加仓 = -(操作金额+费用)，减仓 = +(操作金额-费用)
 const simCashFlow = computed(() => {
     const s = simulating.value
     if (!s) return 0
     return s.steps.reduce((sum, step) => {
-        const sign = step.mode === 'sell' ? 1 : -1
-        return sum + sign * step.shares * step.price
+        const amount = step.shares * step.price
+        const fee = step.feeTotal || 0
+        return sum + (step.mode === 'sell' ? (amount - fee) : -(amount + fee))
     }, 0)
 })
 
-// 本方案增量 = 现金流 + (新持股 - 原持股) × 现价
-// 含义：执行本方案 vs 什么都不做，按现价折算能多赚 / 少亏的金额
+// 累计交易费用（所有步骤的手续费总和）
+const simTotalFees = computed(() => {
+    const s = simulating.value
+    if (!s) return 0
+    return s.steps.reduce((sum, step) => sum + (step.feeTotal || 0), 0)
+})
+
+// 本方案增量 = 现金流（已扣费）+ (新持股 - 原持股) × 现价
 const simNetGain = computed(() => {
     const s = simulating.value
     if (!s) return null
@@ -93,29 +156,57 @@ const simNetGain = computed(() => {
     return simCashFlow.value + shareDelta * q.price
 })
 
+// 做T 收益：把所有 sell 与 buy 步按数量配对（取较小总量），算差价收益
+// shares 不变的纯T 场景下 = 本方案增量；混合场景下 = T 部分独立收益
+const simRoundTrip = computed(() => {
+    const s = simulating.value
+    if (!s || s.steps.length < 2) return null
+    let buyShares = 0, buyAmount = 0, sellShares = 0, sellAmount = 0
+    for (const step of s.steps) {
+        if (step.mode === 'buy') {
+            buyShares += step.shares
+            buyAmount += step.shares * step.price
+        } else {
+            sellShares += step.shares
+            sellAmount += step.shares * step.price
+        }
+    }
+    // 必须既有买又有卖才构成"做T"
+    if (buyShares === 0 || sellShares === 0) return null
+    const matched = Math.min(buyShares, sellShares)
+    const avgBuy  = buyAmount / buyShares
+    const avgSell = sellAmount / sellShares
+    return {
+        shares: matched,
+        avgBuy,
+        avgSell,
+        profit: matched * (avgSell - avgBuy),
+    }
+})
+
 // 把当前输入作为一步"提交"到模拟态（不写 DB），继续叠下一步
 function commitStep() {
     const res = simulationResult.value
     const s = simulating.value
     if (!s || !res || res.error) return
-    // 记录这步的描述（步骤列表展示用），costDelta 两种模式都有
     s.steps.push({
         mode: s.mode,
         price: parseFloat(s.price),
         shares: parseInt(s.shares, 10),
+        date: s.date,
         realizedDelta: res.mode === 'sell' ? res.realizedProfit : 0,
         costDelta: res.costDelta,
+        feeTotal: res.fees.total,             // 这步的总费用
+        feeBreakdown: { ...res.fees },        // 明细（佣金 / 过户 / 印花）
     })
-    // 叠加到模拟态：加仓 / 减仓 都更新 simCost（摊薄法）
     s.simShares = res.newShares
     s.simCost = res.newCost
-    // 清空输入准备下一步
     s.price = _defaultPriceFor(s.position.code, s.simCost)
     s.shares = ''
     simFormError.value = ''
 }
 
-// 撤销最后一步：从头重算，保证状态一致
+// 撤销最后一步：从头重算（与 simulationResult 同公式："费用减去"口径）
 function undoLastStep() {
     const s = simulating.value
     if (!s || !s.steps.length) return
@@ -123,15 +214,16 @@ function undoLastStep() {
     s.simShares = s.position.shares
     s.simCost = s.position.cost_price
     for (const step of s.steps) {
+        const amount = step.shares * step.price
+        const fee = step.feeTotal || 0
         if (step.mode === 'buy') {
             const newShares = s.simShares + step.shares
-            s.simCost = (s.simShares * s.simCost + step.shares * step.price) / newShares
+            s.simCost = (s.simShares * s.simCost + amount) / newShares  // 加仓不计费用进基础
             s.simShares = newShares
         } else {
-            // 减仓用摊薄法：回收资金从总投入里扣除后均摊到剩余股数
             const newShares = s.simShares - step.shares
             s.simCost = newShares > 0
-                ? (s.simShares * s.simCost - step.shares * step.price) / newShares
+                ? (s.simShares * s.simCost - amount - fee) / newShares  // 减仓减去费用
                 : 0
             s.simShares = newShares
         }
@@ -148,6 +240,7 @@ function resetSimulation() {
     s.mode = 'buy'
     s.price = _defaultPriceFor(s.position.code, s.position.cost_price)
     s.shares = ''
+    s.date = todayStr()
     simFormError.value = ''
 }
 
@@ -202,47 +295,60 @@ function cancelSimulate() {
 const simulationResult = computed(() => {
     const s = simulating.value
     if (!s) return null
-    const curShares = s.simShares           // ← 基于模拟态，不是原始持仓
+    const curShares = s.simShares
     const curCost = s.simCost
     const opPrice = parseFloat(s.price)
     const opShares = parseInt(s.shares, 10)
     if (isNaN(opPrice) || opPrice <= 0) return null
     if (isNaN(opShares) || opShares <= 0 || opShares % 100 !== 0) return null
 
+    const amount = opShares * opPrice              // 操作金额（不含费）
+    const fees = _computeFee(amount, s.mode)        // 手续费明细
+
     if (s.mode === 'buy') {
+        // 加仓：摊薄成本只算"投入本金"，费用作为沉没成本不进基础
         const newShares = curShares + opShares
-        const newCost = (curShares * curCost + opShares * opPrice) / newShares
+        const newCost = (curShares * curCost + amount) / newShares
         return {
             mode: 'buy',
             newShares,
             newCost,
             costDelta: newCost - curCost,
-            cashUsed: opShares * opPrice,
+            fees,
+            cashUsed: amount + fees.total,  // 实际现金流出（含费）
         }
     }
-    // 卖出
+    // 卖出：先做 T+1 校验，再做总持仓校验
     if (opShares > curShares) {
         return { error: `卖出数量 ${opShares.toLocaleString()} 超过当前持有 ${curShares.toLocaleString()}` }
     }
+    const availableT1 = _availableToSellOn(s.date)
+    if (opShares > availableT1) {
+        return {
+            error: `T+1 限制：${s.date} 当日最多可卖 ${availableT1.toLocaleString()} 股 ` +
+                   `（当日买入的部分要等下个交易日才能卖）`
+        }
+    }
     const newShares = curShares - opShares
-    const realizedProfit = opShares * (opPrice - curCost)
-    const realizedPct = (opPrice - curCost) / curCost * 100
-    // 摊薄成本法（同花顺 / 东财等券商标准）：
-    //   新成本 = (原总投入 − 本次回收) / 剩余股数
-    //         = (curShares × curCost − opShares × opPrice) / newShares
-    // 物理含义：剩余股份"还没被回收的那部分钱"均摊到每股。
-    // 亏损卖出 → 成本被摊高；盈利卖出 → 成本被摊低（甚至变负，表示已回本还有盈余）
+    // 已实现盈亏 = (卖出收入 - 费用) - 卖出股的成本（真实落袋损益）
+    //           = opShares×(opPrice-curCost) - fees
+    const realizedProfit = amount - fees.total - opShares * curCost
+    const realizedPct = curCost > 0 ? (realizedProfit / (opShares * curCost)) * 100 : null
+    // 摊薄新成本（费用作沉没成本，不进基础）：
+    //   newCost = (curShares × curCost − 操作金额 − 费用) / 剩余股
+    // 含义：剩余股的成本基础 = "本金净未回收"，费用是已确认的损失独立于成本基础
     const newCost = newShares > 0
-        ? (curShares * curCost - opShares * opPrice) / newShares
-        : 0  // 清仓无剩余，成本无意义
+        ? (curShares * curCost - amount - fees.total) / newShares
+        : 0
     return {
         mode: 'sell',
         newShares,
         newCost,
         costDelta: newCost - curCost,
+        fees,
         realizedProfit,
         realizedPct,
-        cashGained: opShares * opPrice,
+        cashGained: amount - fees.total,  // 实际现金流入（扣费）
         isFullClose: newShares === 0,
     }
 })
@@ -540,6 +646,101 @@ async function refreshQuotes() {
     if (res.ok) quotes.value = res.data || {}
 }
 
+// 批量拉 sparkline —— 渐进式加载（小批 + jitter 间隔，反爬友好）
+let _sparklineLoadToken = 0
+async function refreshSparklines() {
+    if (!positions.value.length) { sparklines.value = {}; return }
+    const myToken = ++_sparklineLoadToken
+    const codes = positions.value.map(p => p.code)
+    const BATCH_SIZE = 3
+    const MIN_GAP_MS = 700, MAX_GAP_MS = 1300
+    const merged = { ...sparklines.value }
+    for (let i = 0; i < codes.length; i += BATCH_SIZE) {
+        if (myToken !== _sparklineLoadToken) return
+        const batch = codes.slice(i, i + BATCH_SIZE)
+        const res = await api.getBatchSparklines(batch)
+        if (myToken !== _sparklineLoadToken) return
+        if (res.ok && res.data) {
+            Object.assign(merged, res.data)
+            sparklines.value = { ...merged }
+        }
+        if (i + BATCH_SIZE < codes.length) {
+            const gap = MIN_GAP_MS + Math.random() * (MAX_GAP_MS - MIN_GAP_MS)
+            await new Promise(r => setTimeout(r, gap))
+        }
+    }
+}
+
+// ---------- sparkline SVG 计算（与 Watchlist 共用一套规则）----------
+const SPARK_W = 140
+const SPARK_H = 50
+
+function computeYRange(sp) {
+    if (!sp || sp.preClose == null) return null
+    const baseline = sp.preClose
+    let yMin = baseline, yMax = baseline
+    for (const p of (sp.prices || [])) { if (p < yMin) yMin = p; if (p > yMax) yMax = p }
+    for (const p of (sp.avgPrices || [])) { if (p < yMin) yMin = p; if (p > yMax) yMax = p }
+    const minRange = baseline * 0.005
+    if (yMax - yMin < minRange) {
+        const center = (yMin + yMax) / 2
+        yMin = center - minRange / 2
+        yMax = center + minRange / 2
+    }
+    const padding = (yMax - yMin) * 0.08
+    return { yMin: yMin - padding, yMax: yMax + padding }
+}
+function yToSvg(value, range) { return SPARK_H - ((value - range.yMin) / (range.yMax - range.yMin)) * SPARK_H }
+function sparkPath(sp, key = 'prices') {
+    if (!sp || !sp[key] || !sp[key].length) return ''
+    const range = computeYRange(sp); if (!range) return ''
+    const arr = sp[key]; const n = arr.length
+    let path = ''
+    for (let i = 0; i < n; i++) {
+        const x = n > 1 ? (i / (n - 1)) * SPARK_W : SPARK_W / 2
+        const y = yToSvg(arr[i], range)
+        path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' '
+    }
+    return path
+}
+function baselineY(sp) {
+    if (!sp || sp.preClose == null) return SPARK_H / 2
+    const range = computeYRange(sp)
+    return range ? yToSvg(sp.preClose, range) : SPARK_H / 2
+}
+function sparkAreaPath(sp) {
+    if (!sp || !sp.prices || !sp.prices.length) return ''
+    const range = computeYRange(sp); if (!range) return ''
+    const arr = sp.prices; const n = arr.length
+    let path = ''
+    for (let i = 0; i < n; i++) {
+        const x = n > 1 ? (i / (n - 1)) * SPARK_W : SPARK_W / 2
+        const y = yToSvg(arr[i], range)
+        path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' '
+    }
+    const lastX = n > 1 ? SPARK_W : SPARK_W / 2
+    path += `L${lastX.toFixed(1)},${SPARK_H} L0,${SPARK_H} Z`
+    return path
+}
+function sparkColor(sp) {
+    if (!sp || !sp.prices || !sp.prices.length || sp.preClose == null) return '#cbd5e1'
+    const last = sp.prices[sp.prices.length - 1]
+    if (last > sp.preClose) return '#dc2626'
+    if (last < sp.preClose) return '#059669'
+    return '#94a3b8'
+}
+function endMarkerPath(sp) {
+    if (!sp || !sp.prices || !sp.prices.length || sp.preClose == null) return ''
+    const range = computeYRange(sp); if (!range) return ''
+    const baseline = sp.preClose
+    const last = sp.prices[sp.prices.length - 1]
+    const x = SPARK_W
+    const y = yToSvg(last, range)
+    if (last > baseline) return `M${x - 2.8},${y + 2.2} L${x},${y - 2.8} L${x + 2.8},${y + 2.2} Z`
+    if (last < baseline) return `M${x - 2.8},${y - 2.2} L${x},${y + 2.8} L${x + 2.8},${y - 2.2} Z`
+    return `M${x},${y - 2.2} L${x + 2.2},${y} L${x},${y + 2.2} L${x - 2.2},${y} Z`
+}
+
 async function selectAccount(accountId) {
     if (selectedAccountId.value === accountId) return
     selectedAccountId.value = accountId
@@ -794,14 +995,19 @@ async function handleRemovePosition(position) {
 }
 
 // ---------------- 生命周期 ----------------
-watch(positions, () => { refreshQuotes() }, { deep: false })
+watch(positions, () => {
+    refreshQuotes()
+    refreshSparklines()
+}, { deep: false })
 
-// 智能刷新：行情基础 10s，窗口隐藏 / 空闲时自动降频
-useSmartRefresh(refreshQuotes, { baseInterval: 10_000, immediate: false })
+// 智能刷新：行情基础 10s，sparkline 60s（变化慢，且每只独立缓存）
+useSmartRefresh(refreshQuotes,     { baseInterval: 10_000, immediate: false })
+useSmartRefresh(refreshSparklines, { baseInterval: 60_000, immediate: false })
 
 onMounted(async () => {
     await loadAccounts()
     await loadPositions()
+    loadTradeFees()  // 加载用户的交易费率配置（异步，不阻塞）
 })
 </script>
 
@@ -1010,6 +1216,7 @@ onMounted(async () => {
                 <thead class="sticky top-0 bg-[#fafafa] shadow-[0_1px_0_#eeeeee] text-[12px] text-[#888] z-10">
                     <tr>
                         <th class="px-[12px] py-[10px] font-normal w-[140px]">股票名称</th>
+                        <th class="px-[8px] py-[10px] font-normal text-center w-[150px]">今日走势</th>
                         <th class="px-[10px] py-[10px] font-normal text-right w-[90px]">
                             <div class="leading-tight">现价</div>
                             <div class="text-[10px] text-[#bbb] font-normal leading-tight mt-[1px]">成本</div>
@@ -1050,10 +1257,10 @@ onMounted(async () => {
                 </thead>
                 <tbody>
                     <tr v-if="loading && !positions.length">
-                        <td :colspan="isSummary ? 7 : 8" class="py-[60px] text-center text-[#aaa] text-[13px]">加载中...</td>
+                        <td :colspan="isSummary ? 8 : 9" class="py-[60px] text-center text-[#aaa] text-[13px]">加载中...</td>
                     </tr>
                     <tr v-else-if="!positions.length">
-                        <td :colspan="isSummary ? 7 : 8" class="py-[80px] text-center text-[#aaa] text-[13px]">
+                        <td :colspan="isSummary ? 8 : 9" class="py-[80px] text-center text-[#aaa] text-[13px]">
                             <template v-if="isSummary">
                                 还没有任何持仓，先切到账户 tab 添加持仓再来看汇总
                             </template>
@@ -1064,7 +1271,7 @@ onMounted(async () => {
                         </td>
                     </tr>
                     <tr v-else-if="!filteredPositions.length">
-                        <td :colspan="isSummary ? 7 : 8" class="py-[60px] text-center text-[#aaa] text-[13px]">
+                        <td :colspan="isSummary ? 8 : 9" class="py-[60px] text-center text-[#aaa] text-[13px]">
                             未匹配到"{{ searchQuery }}"，
                             <button @click="searchQuery = ''" class="text-[#dc2626] hover:underline">清空搜索</button>
                         </td>
@@ -1078,6 +1285,43 @@ onMounted(async () => {
                             <div class="text-[14px] font-bold text-[#111] leading-tight truncate">{{ p.name || quotes[p.code]?.name || '—' }}</div>
                             <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">
                                 {{ marketPrefix(p.code) }}{{ p.code }}
+                            </div>
+                        </td>
+
+                        <!-- 今日走势：迷你分时 SVG -->
+                        <td class="px-[8px] py-[6px] align-middle">
+                            <div class="flex items-center justify-center h-[50px]">
+                                <svg v-if="sparklines[p.code]?.prices?.length"
+                                     viewBox="0 0 140 50" preserveAspectRatio="none"
+                                     class="w-[140px] h-[50px]"
+                                     style="overflow: visible">
+                                    <defs>
+                                        <linearGradient :id="'pos-spark-fill-' + p.code" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="0%" :stop-color="sparkColor(sparklines[p.code])" stop-opacity="0.20"/>
+                                            <stop offset="100%" :stop-color="sparkColor(sparklines[p.code])" stop-opacity="0"/>
+                                        </linearGradient>
+                                    </defs>
+                                    <path :d="sparkAreaPath(sparklines[p.code])"
+                                          :fill="'url(#pos-spark-fill-' + p.code + ')'" stroke="none"/>
+                                    <line x1="0" :y1="baselineY(sparklines[p.code])"
+                                          x2="140" :y2="baselineY(sparklines[p.code])"
+                                          stroke="#94a3b8" stroke-width="0.6" stroke-dasharray="2.5,2.5"
+                                          opacity="0.7" vector-effect="non-scaling-stroke"/>
+                                    <path :d="sparkPath(sparklines[p.code], 'avgPrices')"
+                                          stroke="#ca8a04" stroke-width="1.2" fill="none"
+                                          stroke-linejoin="round" stroke-linecap="round"
+                                          vector-effect="non-scaling-stroke"/>
+                                    <path :d="sparkPath(sparklines[p.code])"
+                                          :stroke="sparkColor(sparklines[p.code])"
+                                          stroke-width="1.5" fill="none"
+                                          stroke-linejoin="round" stroke-linecap="round"
+                                          vector-effect="non-scaling-stroke"/>
+                                    <path :d="endMarkerPath(sparklines[p.code])"
+                                          :fill="sparkColor(sparklines[p.code])"
+                                          stroke="white" stroke-width="0.5"
+                                          vector-effect="non-scaling-stroke"/>
+                                </svg>
+                                <span v-else class="text-[11px] text-[#ccc]">—</span>
                             </div>
                         </td>
 
@@ -1247,7 +1491,7 @@ onMounted(async () => {
     <div v-if="simulating" class="fixed inset-0 bg-black/20 z-50 flex items-center justify-center"
          @mousedown="onSimOverlayMouseDown"
          @click="onSimOverlayClick">
-        <div class="bg-white rounded-[6px] w-[460px] shadow-[0_10px_40px_rgba(0,0,0,0.15)] overflow-hidden"
+        <div class="bg-white rounded-[6px] w-[540px] shadow-[0_10px_40px_rgba(0,0,0,0.15)] overflow-hidden"
              :style="{ transform: `translate(${simDragOffset.x}px, ${simDragOffset.y}px)` }">
             <!-- 可拖拽的标题栏（按住这里移动弹窗）-->
             <div class="px-[20px] pt-[16px] pb-[8px] cursor-grab active:cursor-grabbing select-none bg-gradient-to-b from-[#fafafa] to-white border-b border-[#f0f0f0]"
@@ -1326,16 +1570,32 @@ onMounted(async () => {
                         </div>
                     </div>
                     <div>
-                        <div class="text-[10px] text-[#999]" title="执行本方案 vs 什么都不做，按现价折算的净收益">本方案增量</div>
+                        <div class="text-[10px] text-[#999]" title="执行本方案 vs 什么都不做，按现价折算的净收益（已扣费）">本方案增量</div>
                         <div class="text-[13px] font-bold tabular-nums"
                              :class="colorClassOf(simNetGain)">
                             {{ simNetGain == null ? '—' : fmtSignedAmount(simNetGain) }}
                         </div>
-                        <div v-if="simCashFlow !== 0" class="text-[10px] text-[#999] tabular-nums">
-                            现金流 {{ simCashFlow > 0 ? '+' : '' }}{{ fmtAmount(simCashFlow) }}
+                        <div v-if="simulating.steps.length > 0" class="text-[10px] text-[#999] tabular-nums">
+                            费用 ¥{{ simTotalFees.toFixed(2) }}
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <!-- 做T 收益（混合 加+减 时浮现）-->
+            <div v-if="simRoundTrip"
+                 class="mb-[10px] flex items-center justify-between px-[12px] py-[8px] bg-gradient-to-r from-[#fffbeb] to-[#fff] border border-[#fde68a] rounded-[4px]">
+                <div class="flex items-center gap-[8px]">
+                    <span class="text-[10px] font-bold text-[#92400e] bg-[#fde68a] px-[6px] py-[1px] rounded-sm">做 T</span>
+                    <span class="text-[11px] text-[#888] tabular-nums">
+                        匹配 <b class="text-[#111]">{{ simRoundTrip.shares.toLocaleString() }}</b> 股 ·
+                        均卖 <b class="text-[#dc2626]">{{ simRoundTrip.avgSell.toFixed(3) }}</b> /
+                        均买 <b class="text-[#059669]">{{ simRoundTrip.avgBuy.toFixed(3) }}</b>
+                    </span>
+                </div>
+                <span class="text-[14px] font-bold tabular-nums" :class="colorClassOf(simRoundTrip.profit)">
+                    {{ fmtSignedAmount(simRoundTrip.profit) }}
+                </span>
             </div>
 
             <!-- 已规划步骤列表 -->
@@ -1348,35 +1608,44 @@ onMounted(async () => {
                 </div>
                 <div v-for="(step, i) in simulating.steps" :key="i"
                      class="flex items-center justify-between px-[10px] py-[5px] text-[11px] tabular-nums border-b border-[#f5f5f5] last:border-b-0">
-                    <span>
-                        <span class="text-[#999] mr-[6px]">#{{ i + 1 }}</span>
+                    <span class="flex items-center gap-[6px] min-w-0">
+                        <span class="text-[#999]">#{{ i + 1 }}</span>
+                        <span class="text-[#999] tabular-nums">{{ step.date ? step.date.slice(5) : '—' }}</span>
                         <span class="font-semibold" :class="step.mode === 'buy' ? 'text-[#dc2626]' : 'text-[#059669]'">
                             {{ step.mode === 'buy' ? '加仓' : '减仓' }}
                         </span>
-                        <span class="ml-[6px] text-[#111]">{{ step.shares.toLocaleString() }} 股 @ {{ step.price.toFixed(3) }}</span>
+                        <span class="text-[#111] truncate">{{ step.shares.toLocaleString() }} @ {{ step.price.toFixed(3) }}</span>
+                        <span v-if="step.feeTotal" class="text-[#aaa] text-[10px]" :title="`佣 ${step.feeBreakdown?.commission?.toFixed(2)} + 过户 ${step.feeBreakdown?.transfer?.toFixed(2)}${step.mode === 'sell' ? ' + 印花 ' + step.feeBreakdown?.stamp?.toFixed(2) : ''}`">
+                            费 {{ step.feeTotal.toFixed(2) }}
+                        </span>
                     </span>
-                    <span v-if="step.mode === 'sell'" :class="colorClassOf(step.realizedDelta)" class="font-semibold">
+                    <span v-if="step.mode === 'sell'" :class="colorClassOf(step.realizedDelta)" class="font-semibold shrink-0">
                         {{ fmtSignedAmount(step.realizedDelta) }}
                     </span>
-                    <span v-else class="text-[#999]">
+                    <span v-else class="text-[#999] shrink-0">
                         成本 {{ (step.costDelta >= 0 ? '+' : '') + step.costDelta.toFixed(3) }}
                     </span>
                 </div>
             </div>
 
             <!-- 操作输入 -->
-            <div class="flex gap-[10px] mb-[14px]">
-                <label class="flex flex-col gap-[4px] flex-1">
-                    <span class="text-[12px] text-[#666]">{{ simulating.mode === 'buy' ? '买入' : '卖出' }}价格</span>
-                    <input v-model="simulating.price" type="number" step="0.001"
-                           class="text-[13px] px-[10px] py-[6px] border border-[#e5e5e5] rounded-[4px] outline-none focus:border-[#dc2626] tabular-nums">
+            <div class="flex gap-[8px] mb-[14px]">
+                <label class="flex flex-col gap-[4px] w-[140px] shrink-0">
+                    <span class="text-[12px] text-[#666]">日期 (T+1 校验)</span>
+                    <input v-model="simulating.date" type="date"
+                           class="text-[13px] px-[8px] py-[6px] border border-[#e5e5e5] rounded-[4px] outline-none focus:border-[#dc2626] tabular-nums w-full">
                 </label>
-                <label class="flex flex-col gap-[4px] flex-1">
-                    <span class="text-[12px] text-[#666]">{{ simulating.mode === 'buy' ? '买入' : '卖出' }}数量（100 的倍数）</span>
+                <label class="flex flex-col gap-[4px] flex-1 min-w-0">
+                    <span class="text-[12px] text-[#666]">{{ simulating.mode === 'buy' ? '买入' : '卖出' }}价</span>
+                    <input v-model="simulating.price" type="number" step="0.001"
+                           class="text-[13px] px-[10px] py-[6px] border border-[#e5e5e5] rounded-[4px] outline-none focus:border-[#dc2626] tabular-nums w-full">
+                </label>
+                <label class="flex flex-col gap-[4px] flex-1 min-w-0">
+                    <span class="text-[12px] text-[#666]">{{ simulating.mode === 'buy' ? '买入' : '卖出' }}数量</span>
                     <input v-model="simulating.shares" type="number" step="100" min="100"
                            :max="simulating.mode === 'sell' ? simulating.position.shares : undefined"
-                           placeholder="如 500"
-                           class="text-[13px] px-[10px] py-[6px] border border-[#e5e5e5] rounded-[4px] outline-none focus:border-[#dc2626] tabular-nums">
+                           placeholder="100 倍数"
+                           class="text-[13px] px-[10px] py-[6px] border border-[#e5e5e5] rounded-[4px] outline-none focus:border-[#dc2626] tabular-nums w-full">
                 </label>
             </div>
 
@@ -1416,8 +1685,16 @@ onMounted(async () => {
                             </div>
                         </div>
                     </div>
-                    <div class="text-[11px] text-[#888] mt-[8px] text-right">
-                        投入资金：<span class="font-bold text-[#111] tabular-nums">{{ fmtAmount(simulationResult.cashUsed) }}</span>
+                    <div class="text-[11px] text-[#888] mt-[8px] flex justify-between">
+                        <span>
+                            手续费 <span class="font-bold text-[#dc2626] tabular-nums">¥{{ simulationResult.fees.total.toFixed(2) }}</span>
+                            <span class="text-[10px] text-[#aaa] ml-[4px]">
+                                （佣 {{ simulationResult.fees.commission.toFixed(2) }} + 过户 {{ simulationResult.fees.transfer.toFixed(2) }}）
+                            </span>
+                        </span>
+                        <span>
+                            投入资金 <span class="font-bold text-[#111] tabular-nums">{{ fmtAmount(simulationResult.cashUsed) }}</span>
+                        </span>
                     </div>
                 </template>
 
@@ -1444,13 +1721,23 @@ onMounted(async () => {
                             </div>
                         </div>
                     </div>
-                    <div class="text-[11px] mt-[8px] flex justify-between">
-                        <span class="text-[#888]">
-                            回收资金：<span class="font-bold text-[#111] tabular-nums">{{ fmtAmount(simulationResult.cashGained) }}</span>
-                        </span>
-                        <span :class="colorClassOf(simulationResult.realizedPct)" class="font-semibold tabular-nums">
-                            收益率 {{ fmtPercent(simulationResult.realizedPct) }}
-                        </span>
+                    <div class="text-[11px] mt-[8px] flex flex-col gap-[3px]">
+                        <div class="flex justify-between">
+                            <span class="text-[#888]">
+                                手续费 <span class="font-bold text-[#dc2626] tabular-nums">¥{{ simulationResult.fees.total.toFixed(2) }}</span>
+                                <span class="text-[10px] text-[#aaa] ml-[4px]">
+                                    （佣 {{ simulationResult.fees.commission.toFixed(2) }} + 过户 {{ simulationResult.fees.transfer.toFixed(2) }} + 印花 {{ simulationResult.fees.stamp.toFixed(2) }}）
+                                </span>
+                            </span>
+                            <span class="text-[#888]">
+                                回收资金 <span class="font-bold text-[#111] tabular-nums">{{ fmtAmount(simulationResult.cashGained) }}</span>
+                            </span>
+                        </div>
+                        <div class="text-right">
+                            <span :class="colorClassOf(simulationResult.realizedPct)" class="font-semibold tabular-nums">
+                                收益率 {{ fmtPercent(simulationResult.realizedPct) }}（已扣费）
+                            </span>
+                        </div>
                     </div>
                 </template>
             </div>
@@ -1460,6 +1747,54 @@ onMounted(async () => {
             </div>
 
             <div v-if="simFormError" class="text-[12px] text-[#dc2626] mb-[10px]">{{ simFormError }}</div>
+
+            <!-- 费率设置（折叠）-->
+            <div class="mb-[12px] border-t border-[#f0f0f0] pt-[10px]">
+                <div class="flex items-center justify-between text-[11px]">
+                    <button @click="showFeesEditor = !showFeesEditor"
+                            class="text-[#2563eb] hover:underline">
+                        {{ showFeesEditor ? '▾' : '▸' }} 费率设置
+                    </button>
+                    <span class="text-[#999] text-[10px]" v-if="!showFeesEditor">
+                        佣金 万{{ (tradeFees.commission * 10000).toFixed(3) }} ·
+                        过户 万{{ (tradeFees.transfer * 10000).toFixed(3) }} ·
+                        印花 万{{ (tradeFees.stamp * 10000).toFixed(3) }}
+                    </span>
+                    <span v-if="feesSaveStatus" class="text-[#059669] text-[10px]">{{ feesSaveStatus }}</span>
+                </div>
+                <div v-if="showFeesEditor" class="mt-[8px] bg-[#fafafa] border border-[#eeeeee] rounded p-[10px]">
+                    <div class="grid grid-cols-3 gap-[8px]">
+                        <label class="flex flex-col gap-[2px]">
+                            <span class="text-[10px] text-[#666]">佣金率（双向）</span>
+                            <input v-model.number="tradeFees.commission" type="number" step="0.0000001" min="0"
+                                   class="text-[12px] px-[6px] py-[4px] border border-[#e5e5e5] rounded outline-none focus:border-[#dc2626] tabular-nums">
+                        </label>
+                        <label class="flex flex-col gap-[2px]">
+                            <span class="text-[10px] text-[#666]">过户费率（双向）</span>
+                            <input v-model.number="tradeFees.transfer" type="number" step="0.0000001" min="0"
+                                   class="text-[12px] px-[6px] py-[4px] border border-[#e5e5e5] rounded outline-none focus:border-[#dc2626] tabular-nums">
+                        </label>
+                        <label class="flex flex-col gap-[2px]">
+                            <span class="text-[10px] text-[#666]">印花税（仅卖出）</span>
+                            <input v-model.number="tradeFees.stamp" type="number" step="0.0000001" min="0"
+                                   class="text-[12px] px-[6px] py-[4px] border border-[#e5e5e5] rounded outline-none focus:border-[#dc2626] tabular-nums">
+                        </label>
+                    </div>
+                    <div class="flex items-center justify-between mt-[8px]">
+                        <div class="text-[10px] text-[#999]">
+                            填小数。示例：0.0000869 = 万分之 0.869
+                        </div>
+                        <div class="flex gap-[6px]">
+                            <button @click="resetFeesToDefault"
+                                    class="text-[10px] text-[#999] hover:text-[#dc2626]">恢复默认</button>
+                            <button @click="saveTradeFees"
+                                    class="text-[10px] font-bold text-white bg-[#dc2626] px-[8px] py-[3px] rounded hover:bg-[#991b1b]">
+                                保存
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
             <div class="flex items-center justify-end gap-[8px]">
                 <button @click="cancelSimulate"

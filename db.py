@@ -169,7 +169,7 @@ def is_trading_day(d):
         return d.weekday() < 5
 
 
-def _current_trading_day(t):
+def current_trading_day(t):
     """
     把任意时刻归属到一个"交易日"。
     规则：
@@ -211,13 +211,13 @@ def is_market_cache_stale(updated_at_str, trading_ttl=60, offhours_ttl=24*3600):
         now = datetime.now()
 
         # 规则 1: 跨交易日 → 必然失效
-        if _current_trading_day(updated_at) != _current_trading_day(now):
+        if current_trading_day(updated_at) != current_trading_day(now):
             return True
 
         # 规则 2: 同一交易日内的"盘中 → 收盘"转换
         # 缓存写于本交易日 15:00 之前，而现在已过 15:00 → 强制刷新一次拿收盘价
         # 否则 16:00 打开 app 会一直看着今天 10:00 的盘中价
-        trading_day_of_cache = _current_trading_day(updated_at)
+        trading_day_of_cache = current_trading_day(updated_at)
         session_close = datetime.combine(trading_day_of_cache, dtime(15, 0))
         if updated_at < session_close <= now:
             return True

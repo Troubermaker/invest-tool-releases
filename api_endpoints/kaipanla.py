@@ -44,7 +44,7 @@ def _auth_params():
 # ---------------- 精选板块 ---------------- #
 
 def raw_kpl_real_ranking():
-    """精选板块实时榜（ZSType=7）"""
+    """精选板块实时榜（ZSType=7）。当前交易日实时数据，走 apphq。"""
     url = 'https://apphq.longhuvip.com/w1/api/index.php'
     params = {
         'Order': '1',
@@ -57,9 +57,30 @@ def raw_kpl_real_ranking():
     return fetch_json(url, params=params, headers={**BASE_HEADERS, 'Host': 'apphq.longhuvip.com'})
 
 
+def raw_kpl_real_ranking_historical(date):
+    """
+    精选板块榜 - 历史日期版（apphis 域名）。
+    Args:
+        date: 'YYYY-MM-DD' 格式（KPL 历史接口要求带短横线）
+    """
+    url = 'https://apphis.longhuvip.com/w1/api/index.php'
+    params = {
+        'Order': '1',
+        'a': 'RealRankingInfo',
+        'st': '60',
+        'c': 'ZhiShuRanking',
+        'PhoneOSNew': '1',
+        'Index': '0',
+        'Date': date,
+        'Type': '1',
+        'ZSType': '7',
+    }
+    return fetch_json(url, params=params, headers={**BASE_HEADERS, 'Host': 'apphis.longhuvip.com'})
+
+
 def raw_kpl_plate_stocks(plate_id='801001'):
     """
-    精选板块联动个股（ZhiShuStockList_W8）
+    精选板块联动个股（ZhiShuStockList_W8）—— 当前交易日实时，走 apphq。
     注：2026-04 重抓后发现接口迁到 apphq.longhuvip.com 并强制要求 UserID
     参数顺序严格按原 app 抓包复刻（KPL 的 PHP 后端疑似对顺序敏感）
     """
@@ -88,6 +109,36 @@ def raw_kpl_plate_stocks(plate_id='801001'):
         'UserID': KPL_USER_ID,
     }
     return fetch_json(url, params=params, headers={**BASE_HEADERS, 'Host': 'apphq.longhuvip.com'})
+
+
+def raw_kpl_plate_stocks_historical(plate_id, date):
+    """
+    精选板块联动股 - 历史日期版（apphis 域名）。
+    历史接口比实时少了一堆 Filter/Ratio/UserID 参数，多了 TSZB 系列；
+    每页 30 只（实时是 60）。
+    Args:
+        plate_id: 板块 id（如 '801001'）
+        date:     'YYYY-MM-DD' 格式
+    """
+    url = 'https://apphis.longhuvip.com/w1/api/index.php'
+    params = {
+        'Order': '1',
+        'TSZB': '0',
+        'a': 'ZhiShuStockList_W8',
+        'st': '30',
+        'c': 'ZhiShuRanking',
+        'PhoneOSNew': '1',
+        'old': '1',
+        'IsZZ': '0',
+        'Index': '0',
+        'Date': date,
+        'Type': '6',
+        'IsKZZType': '0',
+        'PlateID': plate_id,
+        'TSZB_Type': '0',
+        'filterType': '0',
+    }
+    return fetch_json(url, params=params, headers={**BASE_HEADERS, 'Host': 'apphis.longhuvip.com'})
 
 
 # ---------------- 竞价 / 异动 ---------------- #

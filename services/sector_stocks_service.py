@@ -14,59 +14,82 @@ logger = logging.getLogger(__name__)
 CACHE_PREFIX = "sector_stocks:"
 
 
-def get_sector_stocks(plate_id, force=False):
+def get_sector_stocks(plate_id, date=None, force=False):
     """
-    返回 [{code, name, price, change, changeVal, turnover, up}, ...]
-    按 KPL 精选顺序（通常是资金+动量排序）返回前 60 只。
-    force=True 跳过缓存直接抓取最新数据。
+    返回 [{code, name, price, change, ..., leader, streak, theme}, ...]
+    Args:
+        plate_id: 板块 id（如 '801001'）
+        date:     'YYYY-MM-DD' 历史日期；None 表示当前交易日
+        force:    跳过缓存
     """
     if not plate_id:
         return []
 
-    cache_key = f"{CACHE_PREFIX}{plate_id}"
-    cached, updated_at = db.get_cache(cache_key)
-    if not force and cached and not db.is_market_cache_stale(updated_at):
-        return cached
+    # 缓存 key：实时 = 'sector_stocks:801001'；历史 = 'sector_stocks:801001:20260422'
+    if date:
+        cache_key = f"{CACHE_PREFIX}{plate_id}:{date.replace('-', '')}"
+    else:
+        cache_key = f"{CACHE_PREFIX}{plate_id}"
 
-    raw = kaipanla.raw_kpl_plate_stocks(plate_id)
+    if not force:
+        cached, updated_at = db.get_cache(cache_key)
+        # 历史缓存永久新鲜；实时按 TTL 判
+        if cached and (date or not db.is_market_cache_stale(updated_at)):
+            return cached
 
-    # KPL 常见错误码：1020 参数错误、其它见实测。errcode=0 视为成功
-    # 注：KPL 有时返 int 有时返 str，做兼容判断
+    # 抓取：历史走 apphis，实时走 apphq
+    if date:
+        raw = kaipanla.raw_kpl_plate_stocks_historical(plate_id, date)
+    else:
+        raw = kaipanla.raw_kpl_plate_stocks(plate_id)
+
     errcode = raw.get('errcode')
     if errcode is not None and str(errcode) != '0':
         raise RuntimeError(f"KPL 板块股票接口返回错误 errcode={errcode} msg={raw.get('errmsg')}")
 
     lst = raw.get('list') or []
+    results = _parse_stock_list(lst)
+
+    # 按龙头排名排序：龙一→龙二→...→非龙头
+    results.sort(key=lambda s: _leader_rank(s['leader']))
+
+    if not results:
+        # 空不写缓存（避免污染历史 key）
+        return []
+    db.set_cache(cache_key, results)
+    return results
+
+
+def _parse_stock_list(lst):
+    """KPL ZhiShuStockList_W8 字段解析。实时和历史返回结构一致，复用。"""
     results = []
     for item in lst:
         if not isinstance(item, list) or len(item) < 40:
             continue
         # 字段索引（KPL ZhiShuStockList_W8 协议）:
-        # [0] 代码 [1] 名称 [2] 主力类型（"游资"/空）[4] 所有题材
-        # [5] 最新价 [7] 成交额(元) [8] 涨跌幅%
+        # [0] 代码 [1] 名称 [2] 主力类型 [4] 所有题材
+        # [5] 最新价 [6] 涨跌幅% [7] 成交额(元)
         # [11] 主力买(元) [12] 主力卖(元,负) [13] 主力净额(元)
-        # [23] 连板("10天6板") [24] 龙头排名("龙一") [39] 主打题材
-        # 验算: [11] + [12] = [13]（实测沃格光电/云南锗业等多只股票恒等成立）
+        # [23] 连板 [24] 龙头排名 [39] 主打题材
         code = str(item[0])
         name = item[1]
         main_force = str(item[2] or '')
         themes_all = str(item[4] or '')
         price = float(item[5])
-        change_pct = float(item[6])             # 当日涨跌幅%（实测 [6] 才是合规日幅，[8] 是其它累计指标）
-        turnover_yuan = float(item[7])          # 成交额
-        main_buy_yuan = float(item[11])         # 主力买入
-        main_sell_yuan = abs(float(item[12]))   # 主力卖出（原始为负，取绝对值）
-        main_net_yuan = float(item[13])         # 主力净额（带符号）
+        change_pct = float(item[6])
+        turnover_yuan = float(item[7])
+        main_buy_yuan = float(item[11])
+        main_sell_yuan = abs(float(item[12]))
+        main_net_yuan = float(item[13])
         streak = str(item[23] or '')
         leader = str(item[24] or '')
         theme = str(item[39] or '')
         up = change_pct >= 0
 
         results.append({
-            "code": code,
-            "name": name,
+            "code": code, "name": name,
             "price": f"{price:.2f}",
-            "change": f"{'+' if up else ''}{change_pct:.2f}%",            # 始终 2 位小数 + %
+            "change": f"{'+' if up else ''}{change_pct:.2f}%",
             "turnover": _format_turnover(turnover_yuan),
             "mainBuy": _format_turnover(main_buy_yuan),
             "mainSell": _format_turnover(main_sell_yuan),
@@ -74,17 +97,10 @@ def get_sector_stocks(plate_id, force=False):
             "mainNetUp": main_net_yuan >= 0,
             "up": up,
             "isLimitUp": _is_limit_up(code, change_pct, name),
-            "leader": leader,
-            "streak": streak,
-            "theme": theme,
-            "themesAll": themes_all,
+            "leader": leader, "streak": streak,
+            "theme": theme, "themesAll": themes_all,
             "mainForce": main_force,
         })
-
-    # 按龙头排名排序：龙一→龙二→...→非龙头。Python 稳定排序，同级保持 KPL 原序
-    results.sort(key=lambda s: _leader_rank(s['leader']))
-
-    db.set_cache(cache_key, results)
     return results
 
 

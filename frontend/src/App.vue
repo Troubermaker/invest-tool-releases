@@ -5,6 +5,7 @@ import RightDrawer from './components/RightDrawer.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
+import Review from './views/Review.vue'
 import Settings from './views/Settings.vue'
 
 const currentTab = ref('market')
@@ -12,9 +13,6 @@ const isAIDrawerOpen = ref(false)
 
 function handleNavigate(tabId) {
     currentTab.value = tabId
-    if (tabId === 'review') {
-        isAIDrawerOpen.value = true
-    }
 }
 </script>
 
@@ -30,6 +28,7 @@ function handleNavigate(tabId) {
         <Market v-if="currentTab === 'market'" @openAI="isAIDrawerOpen = true"/>
         <Watchlist v-else-if="currentTab === 'watchlist'" />
         <Positions v-else-if="currentTab === 'positions'" />
+        <Review v-else-if="currentTab === 'review'" />
         <Settings v-else-if="currentTab === 'settings'" />
 
         <!-- Placeholders for other tabs for now -->

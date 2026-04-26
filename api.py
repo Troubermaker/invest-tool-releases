@@ -107,13 +107,16 @@ class Api:
         return {"status": "online", "message": "Desktop Backend (Python) connected!"}
 
     @api_endpoint
-    def get_market_data(self):
-        """一次性返回首页需要的概览数据。"""
-        overview = market_service.get_market_indices()
-        sectors = sector_service.get_hot_sectors()
+    def get_market_data(self, date=None):
+        """
+        一次性返回 Market 页概览数据。
+        date='YYYY-MM-DD' 历史模式：indices 返回 None（前端隐藏），sectors 走 KPL 历史接口。
+        """
+        overview = market_service.get_market_indices(date=date)
+        sectors = sector_service.get_hot_sectors(date=date)
         return {
-            "indices": overview.get("indices", []),
-            "total_turnover": overview.get("total_turnover", 0),
+            "indices": (overview or {}).get("indices") if overview else None,
+            "total_turnover": (overview or {}).get("total_turnover", 0) if overview else 0,
             "hotSectors": sectors,
         }
 
@@ -122,19 +125,36 @@ class Api:
         return kline_service.get_kline(name, timeframe)
 
     @api_endpoint
-    def get_sector_stocks(self, plate_id):
-        """根据 KPL 板块 ID 返回该板块精选联动股票列表"""
-        return sector_stocks_service.get_sector_stocks(plate_id)
+    def get_sector_stocks(self, plate_id, date=None):
+        """根据 KPL 板块 ID 返回该板块精选联动股票列表。date 历史日期 'YYYY-MM-DD'。"""
+        return sector_stocks_service.get_sector_stocks(plate_id, date=date)
 
     @api_endpoint
-    def get_limit_up_ladder(self):
-        """连板天梯：按连板高度降序分组的股票列表"""
-        return limit_up_ladder_service.get_ladder()
+    def get_limit_up_ladder(self, date=None):
+        """连板天梯：按连板高度降序分组的股票列表。date 历史日期 'YYYY-MM-DD'。"""
+        return limit_up_ladder_service.get_ladder(date=date)
 
     @api_endpoint
-    def get_market_sentiment(self):
-        """市场情绪：全市场成交额（较昨日）+ 涨跌家数 + 涨停跌停"""
-        return market_sentiment_service.get_sentiment()
+    def get_market_sentiment(self, date=None):
+        """市场情绪：成交额 + 涨跌家数 + 涨停。date 传了直接返回 None（历史不支持）。"""
+        return market_sentiment_service.get_sentiment(date=date)
+
+    @api_endpoint
+    def get_trading_days(self, start_date=None, end_date=None):
+        """
+        返回 [start, end] 区间内所有 A 股交易日，'YYYY-MM-DD' 字符串列表。
+        默认 end=今天，start=今天往前 2 年（够日期选择器 disabled 判定用了）。
+        """
+        from datetime import date as _date, timedelta
+        end = _date.fromisoformat(end_date) if end_date else _date.today()
+        start = _date.fromisoformat(start_date) if start_date else (end - timedelta(days=730))
+        days = []
+        cur = start
+        while cur <= end:
+            if db.is_trading_day(cur):
+                days.append(cur.isoformat())
+            cur += timedelta(days=1)
+        return days
 
     # =========== 自选股 Watchlist =========== #
 

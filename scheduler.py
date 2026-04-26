@@ -16,7 +16,7 @@
 """
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, time as dtime
 
 import schedule
 
@@ -29,6 +29,9 @@ from services import (
     market_sentiment_service,
 )
 
+# 关键缓存 key：启动预热时检测哪些需要补
+_KEY_CACHES = ['market_indices', 'hot_sectors_kpl', 'limit_up_ladder', 'market_sentiment']
+
 # 前 N 个热门板块的"联动股票列表"也做快照（按 KPL rank 顺序）
 SECTOR_STOCKS_SNAPSHOT_TOP_N = 15
 
@@ -37,14 +40,12 @@ def _log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Scheduler] {msg}")
 
 
-def job_eod_snapshot():
-    """每个交易日 15:05 执行的 EOD 快照任务。节假日 / 周末 / 调休不开市日自动跳过。"""
-    today = datetime.now().date()
-    if not db.is_trading_day(today):
-        _log(f"Skip EOD snapshot ({today} 非交易日)")
-        return
-
-    _log("EOD snapshot starting...")
+def _run_full_fetch(label):
+    """
+    实际的 force 抓取逻辑（无交易日校验）。
+    EOD 任务和启动预热都复用这个。失败不破坏旧缓存（service 层 force=True + 空不写）。
+    """
+    _log(f"{label} 开始...")
 
     # ① 固定项：指数 / 天梯 / 市场情绪
     tasks = [
@@ -77,7 +78,57 @@ def job_eod_snapshot():
     except Exception as e:
         _log(f"  ✗ 热门板块: {e}")
 
-    _log("EOD snapshot done.")
+    _log(f"{label} 完成。")
+
+
+def job_eod_snapshot():
+    """每个交易日 15:05 执行的 EOD 快照任务。非交易日自动跳过。"""
+    today = datetime.now().date()
+    if not db.is_trading_day(today):
+        _log(f"Skip EOD snapshot ({today} 非交易日)")
+        return
+    _run_full_fetch("EOD snapshot")
+
+
+def warm_cache_on_startup_async():
+    """
+    启动时按需预热缓存（在后台线程跑，不阻塞窗口启动）。
+    策略：
+      - 盘中 (9:30-11:35 / 13:00-15:00 工作日) → 不主动预热（实时抓取够用）
+      - 其它时段（盘前 / 盘后 / 周末 / 节假日）：检查关键缓存是否需要补
+        - 缺失或已过期 → 后台触发完整抓取
+        - 全部新鲜 → 跳过
+
+    非交易日也会跑：因为新浪 / KPL 在周末会返回最近交易日数据（Friday 收盘）；
+    THS 的天梯 / 情绪在周末返回空，但 service 已做"空不写缓存"保护，不会污染历史数据。
+    """
+    threading.Thread(target=_warm_cache_check_and_fire, daemon=True).start()
+
+
+def _warm_cache_check_and_fire():
+    now = datetime.now()
+    is_td = db.is_trading_day(now.date())
+    is_intraday = is_td and (
+        (dtime(9, 30) <= now.time() <= dtime(11, 35)) or
+        (dtime(13, 0) <= now.time() <= dtime(15, 0))
+    )
+    if is_intraday:
+        _log("启动预热：盘中跳过（实时抓取够用）")
+        return
+
+    needs_warm = False
+    for key in _KEY_CACHES:
+        cached, ts = db.get_cache(key)
+        if not cached or db.is_market_cache_stale(ts):
+            needs_warm = True
+            break
+
+    if not needs_warm:
+        _log("启动预热：关键缓存已就绪，跳过")
+        return
+
+    label = '启动预热（交易日盘后）' if is_td else '启动预热（非交易日，抓取最近交易日数据）'
+    _run_full_fetch(label)
 
 
 def run_scheduler():

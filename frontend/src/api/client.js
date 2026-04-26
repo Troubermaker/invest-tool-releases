@@ -68,20 +68,23 @@ export function isPywebviewReady() {
 // 命名约定：后端 snake_case → 前端 camelCase。
 
 export const api = {
-  /** 首页概览：指数 + 全市场成交额 + 热门板块 */
-  getMarketData: () => call('get_market_data'),
+  /** 首页概览。date='YYYY-MM-DD' 时返回历史数据（indices 会变成 null，前端需隐藏指数面板）*/
+  getMarketData: (date = null) => call('get_market_data', date),
 
   /** K 线 / 分时。timeframe: '分时'|'5日'|'日K'|'周K'|'月K'|'年K' */
   getKline: (name, timeframe) => call('get_kline', name, timeframe),
 
-  /** 板块联动个股。plateId: KPL 板块代码如 '801001' */
-  getSectorStocks: (plateId) => call('get_sector_stocks', plateId),
+  /** 板块联动个股。plateId: KPL 板块代码；date='YYYY-MM-DD' 切历史 */
+  getSectorStocks: (plateId, date = null) => call('get_sector_stocks', plateId, date),
 
-  /** 连板天梯：按连板高度分组的股票列表 */
-  getLimitUpLadder: () => call('get_limit_up_ladder'),
+  /** 连板天梯。date='YYYY-MM-DD' 切历史 */
+  getLimitUpLadder: (date = null) => call('get_limit_up_ladder', date),
 
-  /** 市场情绪：成交额 + 涨跌家数 + 涨停跌停 */
-  getMarketSentiment: () => call('get_market_sentiment'),
+  /** 市场情绪。date 传了返回 null（THS 该接口无历史版）*/
+  getMarketSentiment: (date = null) => call('get_market_sentiment', date),
+
+  /** A 股交易日列表（'YYYY-MM-DD' 字符串数组），区间默认近两年到今天 */
+  getTradingDays: (startDate = null, endDate = null) => call('get_trading_days', startDate, endDate),
 
   /** AI 复盘问答 */
   analyzeMarketQuery: (query) => call('analyze_market_query', query),
