@@ -207,6 +207,7 @@ def raw_em_fast_news():
         'client': 'web',
         'biz': 'web_724',
         'fastColumn': '102',
+        'sortEnd': '',          # 2026-04 后接口强制要求该参数，空字符串表示从最新开始
         'pageSize': '50',
         'req_trace': _ts_ms(),
         '_': _ts_ms(),

@@ -83,6 +83,17 @@ export const api = {
   /** 市场情绪。date 传了返回 null（THS 该接口无历史版）*/
   getMarketSentiment: (date = null) => call('get_market_sentiment', date),
 
+  /** 同花顺热榜。period: 'hour' (1 小时) | 'day' (24 小时) */
+  getThsHotList: (period = 'hour') => call('get_ths_hot_list', period),
+
+  /** 快讯。source: 'ths' (同花顺) | 'em' (东方财富) */
+  getFastNews: (source = 'ths') => call('get_fast_news', source),
+
+  /** 涨跌池聚合：连板/涨停/炸板/冲刺涨停/跌停 5 个池子。date='YYYY-MM-DD' 切历史 */
+  getLimitPools: (date = null) => call('get_limit_pools', date),
+  /** 单池查询（按需加载）。poolKey: continuous|limitUp|broken|sprint|limitDown */
+  getLimitPool: (poolKey, date = null) => call('get_limit_pool', poolKey, date),
+
   /** A 股交易日列表（'YYYY-MM-DD' 字符串数组），区间默认近两年到今天 */
   getTradingDays: (startDate = null, endDate = null) => call('get_trading_days', startDate, endDate),
 

@@ -1,9 +1,60 @@
 <script setup>
-import { onMounted, ref, nextTick, watch, computed } from 'vue'
+import { onMounted, onUnmounted, ref, nextTick, watch, computed } from 'vue'
+import Sortable from 'sortablejs'
 import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
+import RefreshCountdown from '../components/RefreshCountdown.vue'
 
 const emit = defineEmits(['openAI'])
+
+// ---------------- Sub-tab 子模块（可拖拽重排序）----------------
+// 加新 tab 只需要：① 在 ALL_SUB_TABS 里加一项 ② 模板里加 v-if 分支
+const ALL_SUB_TABS = [
+    { id: 'main',     name: '行情页面' },
+    { id: 'hotlist',  name: '同花顺热榜' },
+    { id: 'news',     name: '快讯' },
+    { id: 'pools',    name: '涨跌对比' },
+    { id: 'capital',  name: '资金流向' },
+    { id: 'abnormal', name: '异动监控' },
+]
+const subTabs = ref([...ALL_SUB_TABS])  // 当前显示顺序，可被拖拽
+const activeTab = ref('main')
+
+const tabBarRef = ref(null)
+let _subTabSortable = null
+const TAB_ORDER_PREF_KEY = 'market_subtab_order'
+
+async function loadSubTabOrder() {
+    const res = await api.getUserPreference(TAB_ORDER_PREF_KEY)
+    if (res.ok && Array.isArray(res.data) && res.data.length) {
+        const idMap = new Map(ALL_SUB_TABS.map(t => [t.id, t]))
+        const ordered = res.data.filter(id => idMap.has(id)).map(id => idMap.get(id))
+        const missing = ALL_SUB_TABS.filter(t => !res.data.includes(t.id))
+        subTabs.value = [...ordered, ...missing]  // 旧顺序 + 新增 tab 追加到末尾
+    }
+}
+
+async function saveSubTabOrder() {
+    await api.setUserPreference(TAB_ORDER_PREF_KEY, subTabs.value.map(t => t.id))
+}
+
+function initSubTabSortable() {
+    if (!tabBarRef.value) return
+    if (_subTabSortable) _subTabSortable.destroy()
+    _subTabSortable = Sortable.create(tabBarRef.value, {
+        animation: 200,
+        delay: 150,                  // 长按 150ms 才进入拖动，保留正常点击体验
+        delayOnTouchOnly: true,
+        ghostClass: 'tab-drag-ghost',
+        chosenClass: 'tab-drag-chosen',
+        onEnd: () => {
+            const tabs = tabBarRef.value.querySelectorAll('[data-tab-id]')
+            const idMap = new Map(subTabs.value.map(t => [t.id, t]))
+            subTabs.value = Array.from(tabs).map(el => idMap.get(el.dataset.tabId))
+            saveSubTabOrder()
+        },
+    })
+}
 
 const marketIndices = ref([])
 const totalTurnover = ref(0)
@@ -444,9 +495,15 @@ async function renderChartData() {
     chartInstance.timeScale().fitContent();
 }
 
-// 指数 + 板块榜：基础 15s
-useSmartRefresh(api.getMarketData, {
+// 指数 + 板块榜：基础 15s（用户可在 RefreshCountdown 改）
+const {
+    secondsUntilNext: marketCountdown,
+    currentInterval:  marketInterval,
+    setRefreshInterval: setMarketInterval,
+    refresh: refreshMarket,
+} = useSmartRefresh(api.getMarketData, {
     baseInterval: 15_000,
+    prefKey: 'refresh.market_data',
     onData: (data) => {
         marketIndices.value = data.indices
         totalTurnover.value = data.total_turnover
@@ -460,20 +517,285 @@ useSmartRefresh(api.getMarketData, {
 })
 
 // 连板天梯：基础 30s
-useSmartRefresh(api.getLimitUpLadder, {
+const {
+    secondsUntilNext: ladderCountdown,
+    currentInterval:  ladderInterval,
+    setRefreshInterval: setLadderInterval,
+    refresh: refreshLadder,
+} = useSmartRefresh(api.getLimitUpLadder, {
     baseInterval: 30_000,
+    prefKey: 'refresh.limit_up_ladder',
     onData: (data) => { ladderTiers.value = data || [] },
     onError: (err) => console.error("连板天梯拉取失败:", err),
 })
 
 // 市场情绪：基础 15s
-useSmartRefresh(api.getMarketSentiment, {
+const {
+    secondsUntilNext: sentimentCountdown,
+    currentInterval:  sentimentInterval,
+    setRefreshInterval: setSentimentInterval,
+    refresh: refreshSentiment,
+} = useSmartRefresh(api.getMarketSentiment, {
     baseInterval: 15_000,
+    prefKey: 'refresh.market_sentiment',
     onData: (data) => { marketSentiment.value = data },
     onError: (err) => console.error("市场情绪拉取失败:", err),
 })
 
-onMounted(() => {
+// ---------------- 同花顺热榜 ----------------
+const hotListPeriod = ref('hour')        // 'hour' | 'day'
+const hotListData = ref([])
+const hotListLoading = ref(false)
+
+// 热度值格式化：> 1 亿 / > 1 万 / 原值
+function fmtHotScore(v) {
+    if (v == null) return '—'
+    if (v >= 100000000) return (v / 100000000).toFixed(2) + '亿'
+    if (v >= 10000) return (v / 10000).toFixed(1) + '万'
+    return Math.round(v).toLocaleString()
+}
+
+// 热榜题材出现频率 Top 5
+const topConcepts = computed(() => {
+    const counter = new Map()
+    for (const s of hotListData.value) {
+        for (const c of (s.concepts || [])) {
+            counter.set(c, (counter.get(c) || 0) + 1)
+        }
+    }
+    return [...counter.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([name, count]) => ({ name, count }))
+})
+
+// 后台预拉热榜（Market 页一打开就拉 + 周期刷新，
+// 这样用户点到 hotlist tab 时数据已经在内存里，不会卡 2-3 秒）
+// 后端 60s TTL，更短间隔时多余调用走缓存不打 THS。
+const {
+    secondsUntilNext: hotListCountdown,
+    currentInterval:  hotListInterval,
+    setRefreshInterval: setHotListInterval,
+    refresh: refreshHotList,
+} = useSmartRefresh(
+    () => api.getThsHotList(hotListPeriod.value),
+    {
+        baseInterval: 60_000,
+        prefKey: 'refresh.ths_hot_list',
+        onData: (data) => { hotListData.value = data || [] },
+    }
+)
+
+// 切换 1小时/24小时 → 立即重拉（显示 loading 区分用户操作）
+async function loadHotList() {
+    hotListLoading.value = true
+    try {
+        const res = await api.getThsHotList(hotListPeriod.value)
+        if (res.ok) hotListData.value = res.data || []
+    } finally {
+        hotListLoading.value = false
+    }
+}
+watch(hotListPeriod, () => loadHotList())
+
+// ---------------- 快讯 ----------------
+const newsSource = ref('ths')         // 'ths' | 'em'
+const newsData = ref([])
+const newsLoading = ref(false)
+
+// 未读跟踪：记录"上次查看快讯时最新一条的 timestamp"，新到的条目超过这个值就算未读
+const newsLastSeenTs = ref(0)
+let _newsSeeded = false               // 首次拿到数据时不当作未读（避免开屏就显示 50）
+
+// 后台预拉 + 周期刷新（用户可在 RefreshCountdown 改间隔）
+const {
+    secondsUntilNext: newsCountdown,
+    currentInterval:  newsInterval,
+    setRefreshInterval: setNewsInterval,
+    refresh: refreshNewsAuto,
+} = useSmartRefresh(
+    () => api.getFastNews(newsSource.value),
+    {
+        baseInterval: 60_000,
+        prefKey: 'refresh.fast_news',
+        onData: (data) => {
+            newsData.value = data || []
+            // 首次填充 / 用户已经在看快讯 → 直接标记为已读
+            if (!_newsSeeded || activeTab.value === 'news') {
+                newsLastSeenTs.value = (data && data[0] && data[0].timestamp) || 0
+                _newsSeeded = true
+            }
+        },
+    }
+)
+
+const newsUnreadCount = computed(() => {
+    if (!newsData.value.length) return 0
+    return newsData.value.filter(n => (n.timestamp || 0) > newsLastSeenTs.value).length
+})
+
+async function loadNews() {
+    newsLoading.value = true
+    try {
+        const res = await api.getFastNews(newsSource.value)
+        if (res.ok) {
+            newsData.value = res.data || []
+            // 切源后立即基于新源置基线，否则会瞬间显示一堆"未读"
+            newsLastSeenTs.value = (res.data && res.data[0] && res.data[0].timestamp) || 0
+            _newsSeeded = true
+        }
+    } finally {
+        newsLoading.value = false
+    }
+}
+watch(newsSource, () => { _newsSeeded = false; loadNews() })
+
+// 切到快讯 tab 即清零未读（标记当前最新条为已读基线）
+watch(activeTab, (v) => {
+    if (v === 'news' && newsData.value.length) {
+        newsLastSeenTs.value = newsData.value[0].timestamp || 0
+    }
+})
+
+// 时间显示：今天的只显示 HH:MM，非今天加 MM-DD 前缀
+function fmtNewsTime(timeStr) {
+    if (!timeStr) return ''
+    // 'YYYY-MM-DD HH:MM:SS' → 取需要的部分
+    const todayPrefix = new Date().toISOString().slice(0, 10)
+    if (timeStr.startsWith(todayPrefix)) return timeStr.slice(11, 16)
+    return timeStr.slice(5, 16).replace(' ', ' ')
+}
+
+// ---------------- 涨跌对比（5 池：连板/涨停/炸板/冲刺/跌停）----------------
+// 静态池定义（先渲染按钮，数据按需加载）
+const POOL_DEFS = [
+    { key: 'continuous', label: '连板池' },
+    { key: 'limitUp',    label: '涨停池' },
+    { key: 'broken',     label: '炸板池' },
+    { key: 'sprint',     label: '冲刺涨停' },
+    { key: 'limitDown',  label: '跌停池' },
+]
+const poolsLoaded = ref({})              // { [key]: { key, label, count, stocks } }
+const poolsLoading = ref({})             // { [key]: bool }
+const activePoolKey = ref('continuous')
+
+const activePool = computed(() => poolsLoaded.value[activePoolKey.value] || null)
+const activePoolLoading = computed(() => !!poolsLoading.value[activePoolKey.value])
+
+// 池内搜索（按名称或代码模糊匹配）。切池子时清空。
+const poolFilter = ref('')
+watch(activePoolKey, () => { poolFilter.value = '' })
+
+const filteredPoolStocks = computed(() => {
+    if (!activePool.value) return []
+    const q = poolFilter.value.trim().toLowerCase()
+    if (!q) return activePool.value.stocks
+    return activePool.value.stocks.filter(s =>
+        (s.code || '').toLowerCase().includes(q) ||
+        (s.name || '').toLowerCase().includes(q)
+    )
+})
+
+// 整列没有任何一行有值的列应该隐藏（接口在某些池子不返回该字段时避免出现空列）
+const colHas = computed(() => {
+    const stocks = activePool.value?.stocks || []
+    const has = (getter) => stocks.some(s => {
+        const v = getter(s)
+        return v !== null && v !== undefined && v !== ''
+    })
+    return {
+        price:            has(s => s.price),
+        turnover:         has(s => s.turnoverRate),
+        circulationValue: has(s => s.circulationValue),
+        reason:           has(s => s.reason),
+        limitType:        has(s => s.limitType),
+        highDays:         has(s => s.highDays),
+        firstLimitTime:   has(s => s.firstLimitTime),
+        brokenTime:       has(s => s.brokenTime || s.lastLimitTime),
+        orderAmount:      has(s => s.orderAmount),
+        openNum:          has(s => s.openNum != null),
+    }
+})
+
+async function loadPool(key, force = false) {
+    if (!force && poolsLoaded.value[key]) return        // 已加载过
+    if (poolsLoading.value[key]) return                  // 正在加载（防止重复）
+    poolsLoading.value = { ...poolsLoading.value, [key]: true }
+    try {
+        const res = await api.getLimitPool(key)
+        if (res.ok && res.data) {
+            poolsLoaded.value = { ...poolsLoaded.value, [key]: res.data }
+        }
+    } finally {
+        poolsLoading.value = { ...poolsLoading.value, [key]: false }
+    }
+}
+
+// 连板加载完后，顺次后台加载其余 4 个池（用户切到任意 tab 都已有数据）
+let _poolsSequentialStarted = false
+async function loadPoolsSequential() {
+    if (_poolsSequentialStarted) return
+    _poolsSequentialStarted = true
+    for (const def of POOL_DEFS) {
+        await loadPool(def.key)  // 串行：一个完成再发下一个，避免对 THS 同时打 5 个请求
+    }
+}
+
+// 切到 pools tab → 启动顺次加载（首个就是连板）
+watch(activeTab, (v) => {
+    if (v === 'pools') loadPoolsSequential()
+})
+// 点击池子按钮 → 立即拉它（如果还没轮到）
+watch(activePoolKey, (key) => loadPool(key))
+
+// 当前选中池的周期刷新（只在 pools tab 激活时生效，避免无谓的接口调用）
+const {
+    secondsUntilNext: poolsCountdown,
+    currentInterval:  poolsInterval,
+    setRefreshInterval: setPoolsInterval,
+    refresh:          refreshActivePool,
+} = useSmartRefresh(
+    () => activeTab.value === 'pools'
+        ? api.getLimitPool(activePoolKey.value)
+        : Promise.resolve({ ok: true, data: null }),
+    {
+        baseInterval: 30_000,
+        prefKey: 'refresh.limit_pool',
+        immediate: false,           // 首次加载交给 loadPoolsSequential
+        onData: (data) => {
+            if (data && data.key) {
+                poolsLoaded.value = { ...poolsLoaded.value, [data.key]: data }
+            }
+        },
+    }
+)
+
+// 涨/跌色（用户红绿辨识困难，颜色之外加 ▲▼ 形状辅助）
+function poolColor(key) {
+    return key === 'limitDown' ? '#059669' : '#dc2626'  // 跌停绿，其他红
+}
+function poolArrow(key) {
+    return key === 'limitDown' ? '▼' : '▲'
+}
+
+function fmtMoney(v) {
+    if (v == null) return '—'
+    if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿'
+    if (v >= 1e4) return (v / 1e4).toFixed(2) + '万'
+    return v.toFixed(0)
+}
+function fmtPct(v) {
+    if (v == null) return '—'
+    return (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+}
+function concepts(reason) {
+    return reason ? reason.split('+').map(c => c.trim()).filter(Boolean) : []
+}
+
+onMounted(async () => {
+    await loadSubTabOrder()
+    await nextTick()
+    initSubTabSortable()
     // Fallback dummy
     setTimeout(() => {
         if (marketIndices.value.length === 0) {
@@ -499,10 +821,38 @@ onMounted(() => {
         }
     }, 1500)
 })
+
+onUnmounted(() => {
+    if (_subTabSortable) { _subTabSortable.destroy(); _subTabSortable = null }
+})
 </script>
 
 <template>
   <div class="flex flex-col h-full bg-[#fcfcfc] relative overflow-hidden">
+
+    <!-- Sub-tab 栏（跟自选/持仓/复盘同风格，可拖拽重排序）-->
+    <div class="h-[44px] bg-[#fafafa] border-b border-[#e5e5e5] flex items-center shrink-0">
+        <div ref="tabBarRef"
+             class="flex-1 flex items-center gap-[2px] px-[12px] overflow-x-auto custom-scrollbar min-w-0">
+            <div v-for="t in subTabs" :key="t.id"
+                 :data-tab-id="t.id"
+                 @click="activeTab = t.id"
+                 class="px-[14px] py-[8px] text-[13px] cursor-pointer transition-colors border-b-2 shrink-0 select-none flex items-center gap-[5px]"
+                 :class="activeTab === t.id
+                    ? 'border-[#dc2626] text-[#dc2626] font-bold bg-white'
+                    : 'border-transparent text-[#666] hover:text-[#111] hover:bg-white/60'">
+                <span>{{ t.name }}</span>
+                <!-- 快讯未读小红点 -->
+                <span v-if="t.id === 'news' && newsUnreadCount > 0 && activeTab !== 'news'"
+                      class="text-[10px] font-bold bg-[#dc2626] text-white px-[5px] min-w-[16px] h-[16px] inline-flex items-center justify-center rounded-full tabular-nums leading-none">
+                    {{ newsUnreadCount > 99 ? '99+' : newsUnreadCount }}
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ 行情页面（主 sub-tab，原有内容）============ -->
+    <template v-if="activeTab === 'main'">
 
     <!-- TOP HORIZONTAL STRIP: INDICES -->
     <div class="bg-[#fafafa] border-b border-[#e5e5e5] px-4 py-2 flex flex-wrap xl:flex-nowrap items-stretch w-full gap-4 z-10 shrink-0">
@@ -529,7 +879,13 @@ onMounted(() => {
             <div class="bg-white border border-[#e8e8e8] rounded-[4px] py-[4px] px-[10px] flex items-center gap-[10px] w-full h-full cursor-default">
                 <!-- Left: Turnover value -->
                 <div class="flex-[4] basis-0 min-w-0 flex flex-col justify-center border-r border-[#f0f0f0] pr-[12px]">
-                    <span class="text-[#999] text-[11px] font-medium leading-none tracking-[0.12em] mb-[7px]">全市场成交额</span>
+                    <div class="flex items-center justify-between mb-[7px]">
+                        <span class="text-[#999] text-[11px] font-medium leading-none tracking-[0.12em]">全市场成交额</span>
+                        <RefreshCountdown :seconds="sentimentCountdown"
+                                          :current-interval="sentimentInterval"
+                                          @pick="setSentimentInterval"
+                                          @refresh-now="refreshSentiment" />
+                    </div>
                     <span class="text-[#222] text-[18px] font-bold leading-none"
                           v-html="marketSentiment ? formatAmt(marketSentiment.turnover.today / 1e8) : '--'"></span>
                     <span v-if="turnoverCompare"
@@ -568,6 +924,10 @@ onMounted(() => {
       <div class="w-[220px] bg-white border-r border-[#e5e5e5] flex flex-col flex-shrink-0 z-0 relative">
         <div class="h-[44px] bg-[#fff5f5] text-[#dc2626] border-b border-[#ffe5e5] flex items-center justify-between px-[12px] font-semibold text-[13px]">
           <span>精选板块</span>
+          <RefreshCountdown :seconds="marketCountdown"
+                            :current-interval="marketInterval"
+                            @pick="setMarketInterval"
+                            @refresh-now="refreshMarket" />
         </div>
 
         <div class="flex-1 overflow-y-auto w-full custom-scrollbar">
@@ -724,7 +1084,13 @@ onMounted(() => {
             </svg>
             <span class="font-semibold text-[13px]">连板天梯</span>
           </div>
-          <span class="text-[11px] text-[#dc2626]/70 font-medium">{{ ladderTotalCount }} 只</span>
+          <div class="flex items-center gap-[6px]">
+            <span class="text-[11px] text-[#dc2626]/70 font-medium">{{ ladderTotalCount }} 只</span>
+            <RefreshCountdown :seconds="ladderCountdown"
+                              :current-interval="ladderInterval"
+                              @pick="setLadderInterval"
+                              @refresh-now="refreshLadder" />
+          </div>
         </div>
 
         <div class="flex-1 overflow-y-auto custom-scrollbar">
@@ -776,7 +1142,398 @@ onMounted(() => {
         </div>
       </div>
     </div>
-    
+
+    </template>
+    <!-- /行情页面 -->
+
+    <!-- ============ 同花顺热榜 ============ -->
+    <div v-else-if="activeTab === 'hotlist'" class="flex-1 flex flex-col overflow-hidden bg-white">
+        <!-- 工具栏：1 小时 / 24 小时 切换 -->
+        <div class="h-[44px] px-[14px] border-b border-[#f0f0f0] flex items-center justify-between bg-white shrink-0">
+            <div class="flex items-center">
+                <div class="flex bg-[#f5f5f5] rounded-[4px] p-[2px]">
+                    <button @click="hotListPeriod = 'hour'"
+                            class="text-[12px] px-[12px] py-[4px] rounded-[3px] font-semibold transition"
+                            :class="hotListPeriod === 'hour'
+                                ? 'bg-white text-[#dc2626] shadow-sm'
+                                : 'text-[#666] hover:text-[#111]'">
+                        1 小时
+                    </button>
+                    <button @click="hotListPeriod = 'day'"
+                            class="text-[12px] px-[12px] py-[4px] rounded-[3px] font-semibold transition"
+                            :class="hotListPeriod === 'day'
+                                ? 'bg-white text-[#dc2626] shadow-sm'
+                                : 'text-[#666] hover:text-[#111]'">
+                        24 小时
+                    </button>
+                </div>
+            </div>
+            <div class="flex items-center gap-[10px]">
+                <span class="text-[11px] text-[#999]">{{ hotListData.length }} 只</span>
+                <RefreshCountdown :seconds="hotListCountdown"
+                                  :current-interval="hotListInterval"
+                                  @pick="setHotListInterval"
+                                  @refresh-now="refreshHotList" />
+            </div>
+        </div>
+
+        <!-- 热门题材 Top 5（按热榜里出现频次统计）-->
+        <div v-if="topConcepts.length"
+             class="px-[14px] py-[8px] border-b border-[#f5f5f5] bg-[#fafafa] flex items-center gap-[8px] flex-wrap shrink-0">
+            <span class="text-[11px] text-[#92400e] font-semibold tracking-wide">🔥 热门题材</span>
+            <span v-for="(c, i) in topConcepts" :key="c.name"
+                  class="text-[12px] flex items-center gap-[4px] bg-white border border-[#fecaca] pl-[8px] pr-[6px] py-[2px] rounded-full"
+                  :class="i === 0 ? 'shadow-[0_1px_3px_rgba(220,38,38,0.15)]' : ''">
+                <span v-if="i < 3" class="text-[10px] font-bold tabular-nums"
+                      :class="i === 0 ? 'text-[#dc2626]' : (i === 1 ? 'text-[#ea580c]' : 'text-[#f59e0b]')">
+                    #{{ i + 1 }}
+                </span>
+                <span class="text-[#dc2626] font-semibold">{{ c.name }}</span>
+                <span class="text-[10px] text-white bg-[#dc2626] tabular-nums px-[5px] py-[1px] rounded-full font-bold">
+                    {{ c.count }}
+                </span>
+            </span>
+        </div>
+
+        <!-- 热榜列表 -->
+        <div class="flex-1 overflow-auto custom-scrollbar bg-white">
+            <table class="w-full text-left border-collapse whitespace-nowrap">
+                <thead class="sticky top-0 bg-[#fafafa] shadow-[0_1px_0_#eeeeee] z-10 text-[12px] text-[#888]">
+                    <tr>
+                        <th class="px-[14px] py-[10px] font-normal text-center w-[60px]">排名</th>
+                        <th class="px-[12px] py-[10px] font-normal w-[150px]">名称 / 代码</th>
+                        <th class="px-[10px] py-[10px] font-normal text-right w-[80px]">涨跌</th>
+                        <th class="px-[10px] py-[10px] font-normal text-right w-[90px]">热度值</th>
+                        <th class="px-[10px] py-[10px] font-normal text-center w-[90px]">热度变动</th>
+                        <th class="px-[10px] py-[10px] font-normal text-left w-[100px]">连板/标签</th>
+                        <th class="px-[12px] py-[10px] font-normal text-left">题材概念</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-if="hotListLoading && !hotListData.length">
+                        <td colspan="7" class="py-[60px] text-center text-[#aaa] text-[13px]">加载中...</td>
+                    </tr>
+                    <tr v-else-if="!hotListData.length">
+                        <td colspan="7" class="py-[60px] text-center text-[#aaa] text-[13px]">暂无热榜数据</td>
+                    </tr>
+                    <tr v-for="s in hotListData" :key="s.code"
+                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors">
+                        <td class="px-[14px] py-[8px] text-center">
+                            <span class="inline-flex items-center justify-center w-[26px] h-[26px] rounded-[4px] text-[12px] font-bold tabular-nums"
+                                  :class="s.rank <= 3
+                                    ? 'bg-[#dc2626] text-white'
+                                    : (s.rank <= 10 ? 'bg-[#fff0f0] text-[#dc2626]' : 'bg-[#f0f0f0] text-[#777]')">
+                                {{ s.rank }}
+                            </span>
+                        </td>
+                        <td class="px-[12px] py-[8px]">
+                            <div class="text-[14px] font-bold text-[#111] leading-tight">{{ s.name }}</div>
+                            <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">{{ s.code }}</div>
+                        </td>
+                        <td class="px-[10px] py-[8px] text-right tabular-nums">
+                            <span class="text-[13px] font-bold"
+                                  :class="s.changePct > 0 ? 'text-[#dc2626]' : (s.changePct < 0 ? 'text-[#059669]' : 'text-[#666]')">
+                                {{ (s.changePct >= 0 ? '+' : '') + s.changePct.toFixed(2) }}%
+                            </span>
+                        </td>
+                        <td class="px-[10px] py-[8px] text-right text-[12px] text-[#475569] tabular-nums"
+                            :title="s.hotScore.toLocaleString()">
+                            {{ fmtHotScore(s.hotScore) }}
+                        </td>
+                        <td class="px-[10px] py-[8px] text-center text-[12px] tabular-nums">
+                            <span v-if="s.rankChange > 0" class="text-[#dc2626]">↑ {{ s.rankChange }}</span>
+                            <span v-else-if="s.rankChange < 0" class="text-[#059669]">↓ {{ Math.abs(s.rankChange) }}</span>
+                            <span v-else class="text-[#bbb]">—</span>
+                        </td>
+                        <td class="px-[10px] py-[8px]">
+                            <span v-if="s.popularityTag"
+                                  class="text-[11px] font-semibold text-[#dc2626] bg-[#fff0f0] border border-[#fecaca] px-[6px] py-[1px] rounded-sm">
+                                {{ s.popularityTag }}
+                            </span>
+                        </td>
+                        <td class="px-[12px] py-[8px]">
+                            <div class="flex flex-wrap gap-[4px]">
+                                <span v-for="(c, i) in s.concepts.slice(0, 4)" :key="i"
+                                      class="text-[11px] text-[#475569] bg-[#f1f5f9] px-[6px] py-[1px] rounded-sm">
+                                    {{ c }}
+                                </span>
+                                <span v-if="s.concepts.length > 4" class="text-[11px] text-[#999] self-center">
+                                    +{{ s.concepts.length - 4 }}
+                                </span>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ============ 快讯 ============ -->
+    <div v-else-if="activeTab === 'news'" class="flex-1 flex flex-col overflow-hidden bg-white">
+        <!-- 工具栏：同花顺 / 东方财富 切换 -->
+        <div class="h-[44px] px-[14px] border-b border-[#f0f0f0] flex items-center justify-between bg-white shrink-0">
+            <div class="flex bg-[#f5f5f5] rounded-[4px] p-[2px]">
+                <button @click="newsSource = 'ths'"
+                        class="text-[12px] px-[12px] py-[4px] rounded-[3px] font-semibold transition"
+                        :class="newsSource === 'ths' ? 'bg-white text-[#dc2626] shadow-sm' : 'text-[#666] hover:text-[#111]'">
+                    同花顺
+                </button>
+                <button @click="newsSource = 'em'"
+                        class="text-[12px] px-[12px] py-[4px] rounded-[3px] font-semibold transition"
+                        :class="newsSource === 'em' ? 'bg-white text-[#dc2626] shadow-sm' : 'text-[#666] hover:text-[#111]'">
+                    东方财富
+                </button>
+            </div>
+            <div class="flex items-center gap-[10px]">
+                <span class="text-[11px] text-[#999]">{{ newsData.length }} 条</span>
+                <RefreshCountdown :seconds="newsCountdown"
+                                  :current-interval="newsInterval"
+                                  @pick="setNewsInterval"
+                                  @refresh-now="refreshNewsAuto" />
+            </div>
+        </div>
+
+        <!-- 快讯流（feed 风格）-->
+        <div class="flex-1 overflow-auto custom-scrollbar">
+            <div v-if="newsLoading && !newsData.length" class="text-center text-[#aaa] text-[13px] py-[60px]">
+                加载中...
+            </div>
+            <div v-else-if="!newsData.length" class="text-center text-[#aaa] text-[13px] py-[60px]">
+                暂无快讯
+            </div>
+            <div v-for="n in newsData" :key="n.source + n.id"
+                 class="flex gap-[12px] px-[16px] py-[12px] border-b border-[#f5f5f5] hover:bg-[#fafafa] transition">
+                <!-- 时间 -->
+                <div class="shrink-0 w-[52px] text-[11px] text-[#999] tabular-nums leading-tight pt-[2px]"
+                     :title="n.time">
+                    {{ fmtNewsTime(n.time) }}
+                </div>
+                <!-- 主体 -->
+                <div class="flex-1 min-w-0">
+                    <div class="text-[13px] leading-snug"
+                         :class="n.important ? 'font-bold text-[#dc2626]' : 'font-semibold text-[#111]'">
+                        {{ n.title }}
+                    </div>
+                    <div v-if="n.summary && n.summary !== n.title"
+                         class="text-[12px] text-[#666] leading-relaxed mt-[4px]">
+                        {{ n.summary }}
+                    </div>
+                    <div v-if="n.tags && n.tags.length"
+                         class="flex flex-wrap gap-[4px] mt-[6px]">
+                        <span v-for="(t, i) in n.tags" :key="i"
+                              class="text-[10px] text-[#475569] bg-[#f1f5f9] px-[5px] py-[1px] rounded-sm">
+                            {{ t }}
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ 涨跌对比（5 池）============ -->
+    <div v-else-if="activeTab === 'pools'" class="flex-1 flex flex-col overflow-hidden bg-white">
+        <!-- 工具栏：5 池切换 + 名称/代码筛选 -->
+        <div class="h-[44px] px-[14px] border-b border-[#f0f0f0] flex items-center justify-between bg-white shrink-0 gap-[12px]">
+            <div class="flex bg-[#f5f5f5] rounded-[4px] p-[2px] shrink-0">
+                <button v-for="p in POOL_DEFS" :key="p.key"
+                        @click="activePoolKey = p.key"
+                        class="text-[12px] px-[12px] py-[4px] rounded-[3px] font-semibold transition flex items-center gap-[4px]"
+                        :class="activePoolKey === p.key
+                                  ? 'bg-white shadow-sm'
+                                  : 'text-[#666] hover:text-[#111]'"
+                        :style="activePoolKey === p.key ? { color: poolColor(p.key) } : {}">
+                    <span>{{ poolArrow(p.key) }}</span>
+                    <span>{{ p.label }}</span>
+                    <span v-if="poolsLoaded[p.key]" class="text-[11px] tabular-nums opacity-80">
+                        {{ poolsLoaded[p.key].count }}
+                    </span>
+                </button>
+            </div>
+
+            <div class="flex items-center gap-[10px] shrink-0">
+                <span v-if="activePool" class="text-[11px] text-[#999] tabular-nums">
+                    <template v-if="poolFilter">{{ filteredPoolStocks.length }} / {{ activePool.count }}</template>
+                    <template v-else>{{ activePool.count }} 只</template>
+                </span>
+                <span v-else-if="activePoolLoading" class="text-[11px] text-[#999]">加载中...</span>
+                <RefreshCountdown :seconds="poolsCountdown"
+                                  :current-interval="poolsInterval"
+                                  @pick="setPoolsInterval"
+                                  @refresh-now="refreshActivePool" />
+                <div class="relative">
+                    <input v-model="poolFilter"
+                           type="text"
+                           placeholder="筛选 名称 / 代码..."
+                           class="bg-[#f9fafb] border border-[#e5e5e5] rounded-[4px] pl-[10px] pr-[26px] py-[4px] text-[12px] outline-none focus:border-[#ff6b6b] focus:bg-white w-[180px] transition placeholder:text-[#ccc]">
+                    <button v-if="poolFilter"
+                            @click="poolFilter = ''"
+                            class="absolute right-[6px] top-1/2 -translate-y-1/2 w-[16px] h-[16px] flex items-center justify-center rounded-full text-[#aaa] hover:text-[#666] hover:bg-[#f0f0f0] transition"
+                            title="清空筛选">
+                        <svg class="w-[10px] h-[10px]" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 明细表（跟热榜 / 自选 / 持仓同款表格风格） -->
+        <div class="flex-1 overflow-auto custom-scrollbar">
+            <table class="w-full text-[12px]">
+                <thead class="bg-[#fafafa] text-[#666] sticky top-0 z-[1]">
+                    <tr class="border-b border-[#eee]">
+                        <th class="text-left px-[14px] py-[8px] font-medium">股票</th>
+                        <th v-if="colHas.price"
+                            class="text-right px-[10px] py-[8px] font-medium tabular-nums">现价</th>
+                        <th class="text-right px-[10px] py-[8px] font-medium tabular-nums">涨跌幅</th>
+                        <th v-if="colHas.turnover"
+                            class="text-right px-[10px] py-[8px] font-medium tabular-nums">换手</th>
+                        <th v-if="activePool && activePool.key === 'continuous' && colHas.limitType"
+                            class="text-center px-[10px] py-[8px] font-medium">涨停形态</th>
+                        <th v-if="activePool && (activePool.key === 'limitUp' || activePool.key === 'continuous') && colHas.highDays"
+                            class="text-right px-[10px] py-[8px] font-medium tabular-nums">几天几板</th>
+                        <th v-if="activePool && activePool.key === 'limitUp' && colHas.firstLimitTime"
+                            class="text-right px-[10px] py-[8px] font-medium tabular-nums">封板时间</th>
+                        <th v-if="activePool && activePool.key === 'broken' && colHas.brokenTime"
+                            class="text-right px-[10px] py-[8px] font-medium tabular-nums">炸板时间</th>
+                        <th v-if="activePool && (activePool.key === 'limitUp' || activePool.key === 'continuous') && colHas.orderAmount"
+                            class="text-right px-[10px] py-[8px] font-medium tabular-nums">封单额</th>
+                        <th v-if="activePool && activePool.key === 'broken' && colHas.openNum"
+                            class="text-right px-[10px] py-[8px] font-medium tabular-nums">开板次数</th>
+                        <th v-if="colHas.circulationValue"
+                            class="text-right px-[10px] py-[8px] font-medium tabular-nums">流通市值</th>
+                        <th v-if="colHas.reason"
+                            class="text-left px-[12px] py-[8px] font-medium">题材</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-if="activePoolLoading && !activePool">
+                        <td colspan="20" class="py-[60px] text-center text-[#aaa] text-[13px]">加载中...</td>
+                    </tr>
+                    <tr v-else-if="!activePool || !activePool.stocks.length">
+                        <td colspan="20" class="py-[60px] text-center text-[#aaa] text-[13px]">
+                            {{ activePool ? '该池子暂无数据' : '点击上方按钮加载' }}
+                        </td>
+                    </tr>
+                    <tr v-else-if="!filteredPoolStocks.length">
+                        <td colspan="20" class="py-[60px] text-center text-[#aaa] text-[13px]">
+                            未匹配到"{{ poolFilter }}"，
+                            <button @click="poolFilter = ''" class="text-[#dc2626] hover:underline">清空筛选</button>
+                        </td>
+                    </tr>
+                    <tr v-for="s in filteredPoolStocks" :key="s.code"
+                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors">
+                        <!-- 股票（名字大字 + 代码小字，垂直堆叠，跟热榜一致）-->
+                        <td class="px-[14px] py-[8px]">
+                            <div class="text-[14px] font-bold text-[#111] leading-tight truncate max-w-[140px]">{{ s.name }}</div>
+                            <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">{{ s.code }}</div>
+                        </td>
+                        <td v-if="colHas.price"
+                            class="px-[10px] py-[8px] text-right tabular-nums text-[13px] font-semibold text-[#111]">
+                            {{ s.price != null ? s.price.toFixed(2) : '—' }}
+                        </td>
+                        <td class="px-[10px] py-[8px] text-right tabular-nums">
+                            <span class="text-[13px] font-bold"
+                                  :class="s.changePct == null
+                                            ? 'text-[#999]'
+                                            : (s.changePct >= 0 ? 'text-[#dc2626]' : 'text-[#059669]')">
+                                {{ fmtPct(s.changePct) }}
+                            </span>
+                        </td>
+                        <td v-if="colHas.turnover"
+                            class="px-[10px] py-[8px] text-right tabular-nums text-[12px] text-[#475569]">
+                            {{ s.turnoverRate != null ? s.turnoverRate.toFixed(2) + '%' : '—' }}
+                        </td>
+                        <td v-if="activePool.key === 'continuous' && colHas.limitType"
+                            class="px-[10px] py-[8px] text-center">
+                            <span v-if="s.limitType"
+                                  class="text-[11px] font-semibold px-[6px] py-[1px] rounded-sm bg-[#fff0f0] text-[#dc2626] border border-[#fecaca]">
+                                {{ s.limitType }}
+                            </span>
+                            <span v-else class="text-[#bbb]">—</span>
+                        </td>
+                        <td v-if="(activePool.key === 'limitUp' || activePool.key === 'continuous') && colHas.highDays"
+                            class="px-[10px] py-[8px] text-right tabular-nums text-[12px] text-[#475569]">
+                            <span v-if="s.highDays" class="font-semibold text-[#dc2626]">{{ s.highDays }}</span>
+                            <span v-else class="text-[#bbb]">—</span>
+                        </td>
+                        <td v-if="activePool.key === 'limitUp' && colHas.firstLimitTime"
+                            class="px-[10px] py-[8px] text-right tabular-nums text-[12px] text-[#475569]">
+                            {{ s.firstLimitTime || '—' }}
+                        </td>
+                        <td v-if="activePool.key === 'broken' && colHas.brokenTime"
+                            class="px-[10px] py-[8px] text-right tabular-nums text-[12px] text-[#475569]">
+                            {{ s.brokenTime || s.lastLimitTime || '—' }}
+                        </td>
+                        <td v-if="(activePool.key === 'limitUp' || activePool.key === 'continuous') && colHas.orderAmount"
+                            class="px-[10px] py-[8px] text-right tabular-nums text-[12px] text-[#475569]">
+                            {{ fmtMoney(s.orderAmount) }}
+                        </td>
+                        <td v-if="activePool.key === 'broken' && colHas.openNum"
+                            class="px-[10px] py-[8px] text-right tabular-nums text-[12px] text-[#475569]">
+                            {{ s.openNum != null ? s.openNum : '—' }}
+                        </td>
+                        <td v-if="colHas.circulationValue"
+                            class="px-[10px] py-[8px] text-right tabular-nums text-[12px] text-[#475569]">
+                            {{ fmtMoney(s.circulationValue) }}
+                        </td>
+                        <td v-if="colHas.reason" class="px-[12px] py-[8px]">
+                            <div class="flex flex-wrap gap-[4px] max-w-[260px]" :title="s.reason">
+                                <span v-for="(c, i) in concepts(s.reason).slice(0, 4)" :key="i"
+                                      class="text-[11px] text-[#475569] bg-[#f1f5f9] px-[6px] py-[1px] rounded-sm">
+                                    {{ c }}
+                                </span>
+                                <span v-if="concepts(s.reason).length > 4"
+                                      class="text-[11px] text-[#999] self-center">
+                                    +{{ concepts(s.reason).length - 4 }}
+                                </span>
+                                <span v-if="!concepts(s.reason).length" class="text-[#bbb] text-[11px]">—</span>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ============ 占位 sub-tab ============ -->
+    <div v-else class="flex-1 overflow-auto custom-scrollbar bg-white px-[24px] py-[24px]">
+        <div class="max-w-[640px] mx-auto bg-[#fafafa] border border-[#eeeeee] rounded-[8px] p-[24px]">
+            <template v-if="activeTab === 'capital'">
+                <div class="flex items-baseline gap-[10px]">
+                    <div class="text-[15px] font-bold text-[#111]">资金流向</div>
+                    <span class="text-[10px] font-normal text-[#dc2626] bg-[#fff0f0] border border-[#fecaca] px-[6px] py-[1px] rounded-sm">规划中</span>
+                </div>
+                <div class="text-[12px] text-[#888] mt-[4px]">主力 / 北向 / 大单实时资金流</div>
+                <div class="text-[12px] text-[#666] leading-relaxed mt-[16px] space-y-[8px]">
+                    <div>计划展示：</div>
+                    <ul class="list-disc list-inside text-[#888] space-y-[4px] ml-[4px]">
+                        <li>沪深主力资金净流入排名</li>
+                        <li>北向资金当日累计 / 单日变动</li>
+                        <li>大单 / 超大单成交净额</li>
+                        <li>板块资金流入榜</li>
+                    </ul>
+                </div>
+            </template>
+            <template v-else-if="activeTab === 'abnormal'">
+                <div class="flex items-baseline gap-[10px]">
+                    <div class="text-[15px] font-bold text-[#111]">异动监控</div>
+                    <span class="text-[10px] font-normal text-[#dc2626] bg-[#fff0f0] border border-[#fecaca] px-[6px] py-[1px] rounded-sm">规划中</span>
+                </div>
+                <div class="text-[12px] text-[#888] mt-[4px]">盘中实时异动 / 涨跌速 / 突破信号</div>
+                <div class="text-[12px] text-[#666] leading-relaxed mt-[16px] space-y-[8px]">
+                    <div>计划展示：</div>
+                    <ul class="list-disc list-inside text-[#888] space-y-[4px] ml-[4px]">
+                        <li>快速拉升 / 急跌股票（涨速排序）</li>
+                        <li>板块异动（突然资金涌入）</li>
+                        <li>涨停 / 炸板 / 跌停实时事件流</li>
+                        <li>关键技术位突破提示</li>
+                    </ul>
+                </div>
+            </template>
+        </div>
+    </div>
+
     <!-- OVERLAY DRAWER FOR MARKET INDEX CHART -->
     <Transition name="drawer">
         <div v-if="showIndexDrawer" class="absolute bottom-0 left-0 right-0 h-[85%] bg-white shadow-[0_-10px_40px_rgba(0,0,0,0.15)] z-50 flex flex-col border-t border-[#e5e5e5] rounded-t-xl">
@@ -845,6 +1602,15 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* sub-tab 拖拽反馈 */
+.tab-drag-ghost {
+    opacity: 0.4;
+    background: #fff0f0 !important;
+}
+.tab-drag-chosen {
+    cursor: grabbing !important;
+}
+
 .scrollbar-hide::-webkit-scrollbar {
     display: none;
 }

@@ -35,6 +35,9 @@ from services import stock_search_service
 from services import sparkline_service
 from services import backup_service
 from services import boss_key_service
+from services import hot_list_service
+from services import news_service
+from services import limit_pool_service
 import ai_service
 
 
@@ -138,6 +141,26 @@ class Api:
     def get_market_sentiment(self, date=None):
         """市场情绪：成交额 + 涨跌家数 + 涨停。date 传了直接返回 None（历史不支持）。"""
         return market_sentiment_service.get_sentiment(date=date)
+
+    @api_endpoint
+    def get_ths_hot_list(self, period='hour'):
+        """同花顺热榜。period: 'hour' (1 小时) | 'day' (24 小时)"""
+        return hot_list_service.get_hot_list(period=period)
+
+    @api_endpoint
+    def get_fast_news(self, source='ths'):
+        """快讯。source: 'ths' (同花顺) | 'em' (东方财富)"""
+        return news_service.get_fast_news(source=source)
+
+    @api_endpoint
+    def get_limit_pools(self, date=None):
+        """涨跌池聚合：连板/涨停/炸板/冲刺涨停/跌停 五个 THS 池子，固定顺序。"""
+        return limit_pool_service.get_pools(date=date)
+
+    @api_endpoint
+    def get_limit_pool(self, pool_key, date=None):
+        """单池查询（前端按需加载）。pool_key: continuous/limitUp/broken/sprint/limitDown"""
+        return limit_pool_service.get_pool(pool_key, date=date)
 
     @api_endpoint
     def get_trading_days(self, start_date=None, end_date=None):
