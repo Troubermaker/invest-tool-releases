@@ -38,6 +38,7 @@ from services import boss_key_service
 from services import hot_list_service
 from services import news_service
 from services import limit_pool_service
+from services import license_service
 import ai_service
 
 
@@ -83,10 +84,17 @@ def _build_default_filename(sections):
     return f"sections_{'_'.join(sorted(sections))}_{today}.json"
 
 
+# 未激活时仍可调用的方法（激活检测 / 激活码提交 / 心跳）
+_LICENSE_EXEMPT = {'is_activated', 'activate_license', 'get_system_status'}
+
+
 def api_endpoint(func):
-    """统一 try/except + 响应信封封装。"""
+    """统一 try/except + 响应信封封装 + 激活门禁。"""
     @wraps(func)
     def wrapper(self, *args, **kwargs):
+        # 激活门禁：未激活的所有非白名单方法直接拒绝
+        if func.__name__ not in _LICENSE_EXEMPT and not license_service.is_activated():
+            return {"ok": False, "error": "未激活，请先输入激活码", "code": "NOT_ACTIVATED"}
         try:
             data = func(self, *args, **kwargs)
             return {"ok": True, "data": data}
@@ -108,6 +116,17 @@ class Api:
     @api_endpoint
     def get_system_status(self):
         return {"status": "online", "message": "Desktop Backend (Python) connected!"}
+
+    # ============ 激活 / 授权 ============
+    @api_endpoint
+    def is_activated(self):
+        """是否已激活。前端用此判断要不要拦在激活页。"""
+        return license_service.is_activated()
+
+    @api_endpoint
+    def activate_license(self, code):
+        """提交激活码。成功返回 True；签名错误返回 False。"""
+        return license_service.activate(code)
 
     @api_endpoint
     def get_market_data(self, date=None):

@@ -10,12 +10,10 @@ const emit = defineEmits(['openAI'])
 // ---------------- Sub-tab 子模块（可拖拽重排序）----------------
 // 加新 tab 只需要：① 在 ALL_SUB_TABS 里加一项 ② 模板里加 v-if 分支
 const ALL_SUB_TABS = [
-    { id: 'main',     name: '行情页面' },
-    { id: 'hotlist',  name: '同花顺热榜' },
-    { id: 'news',     name: '快讯' },
-    { id: 'pools',    name: '涨跌对比' },
-    { id: 'capital',  name: '资金流向' },
-    { id: 'abnormal', name: '异动监控' },
+    { id: 'main',    name: '行情页面' },
+    { id: 'hotlist', name: '同花顺热榜' },
+    { id: 'news',    name: '快讯' },
+    { id: 'pools',   name: '涨跌对比' },
 ]
 const subTabs = ref([...ALL_SUB_TABS])  // 当前显示顺序，可被拖拽
 const activeTab = ref('main')
@@ -1493,44 +1491,6 @@ onUnmounted(() => {
                     </tr>
                 </tbody>
             </table>
-        </div>
-    </div>
-
-    <!-- ============ 占位 sub-tab ============ -->
-    <div v-else class="flex-1 overflow-auto custom-scrollbar bg-white px-[24px] py-[24px]">
-        <div class="max-w-[640px] mx-auto bg-[#fafafa] border border-[#eeeeee] rounded-[8px] p-[24px]">
-            <template v-if="activeTab === 'capital'">
-                <div class="flex items-baseline gap-[10px]">
-                    <div class="text-[15px] font-bold text-[#111]">资金流向</div>
-                    <span class="text-[10px] font-normal text-[#dc2626] bg-[#fff0f0] border border-[#fecaca] px-[6px] py-[1px] rounded-sm">规划中</span>
-                </div>
-                <div class="text-[12px] text-[#888] mt-[4px]">主力 / 北向 / 大单实时资金流</div>
-                <div class="text-[12px] text-[#666] leading-relaxed mt-[16px] space-y-[8px]">
-                    <div>计划展示：</div>
-                    <ul class="list-disc list-inside text-[#888] space-y-[4px] ml-[4px]">
-                        <li>沪深主力资金净流入排名</li>
-                        <li>北向资金当日累计 / 单日变动</li>
-                        <li>大单 / 超大单成交净额</li>
-                        <li>板块资金流入榜</li>
-                    </ul>
-                </div>
-            </template>
-            <template v-else-if="activeTab === 'abnormal'">
-                <div class="flex items-baseline gap-[10px]">
-                    <div class="text-[15px] font-bold text-[#111]">异动监控</div>
-                    <span class="text-[10px] font-normal text-[#dc2626] bg-[#fff0f0] border border-[#fecaca] px-[6px] py-[1px] rounded-sm">规划中</span>
-                </div>
-                <div class="text-[12px] text-[#888] mt-[4px]">盘中实时异动 / 涨跌速 / 突破信号</div>
-                <div class="text-[12px] text-[#666] leading-relaxed mt-[16px] space-y-[8px]">
-                    <div>计划展示：</div>
-                    <ul class="list-disc list-inside text-[#888] space-y-[4px] ml-[4px]">
-                        <li>快速拉升 / 急跌股票（涨速排序）</li>
-                        <li>板块异动（突然资金涌入）</li>
-                        <li>涨停 / 炸板 / 跌停实时事件流</li>
-                        <li>关键技术位突破提示</li>
-                    </ul>
-                </div>
-            </template>
         </div>
     </div>
 

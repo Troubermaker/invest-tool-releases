@@ -106,6 +106,12 @@ export const api = {
   /** 后端心跳探测 */
   getSystemStatus: () => call('get_system_status'),
 
+  // -------- 激活 / 授权（未激活时也能调用）--------
+  /** 是否已激活。返回 boolean */
+  isActivated: () => call('is_activated'),
+  /** 提交激活码。成功返回 true，失败返回 false */
+  activateLicense: (code) => call('activate_license', code),
+
   // -------- 自选股 --------
   /** 所有分组（按顺序）*/
   getWatchlistGroups: () => call('get_watchlist_groups'),

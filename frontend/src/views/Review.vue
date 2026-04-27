@@ -70,7 +70,6 @@ let _adjustTimer = null
 const ALL_SUB_TABS = [
     { id: 'sector', name: '板块复盘' },
     { id: 'pools',  name: '涨跌池复盘' },
-    { id: 'notes',  name: '复盘笔记' },
 ]
 const subTabs = ref([...ALL_SUB_TABS])
 const activeTab = ref('sector')
@@ -720,26 +719,6 @@ function shiftToTradingDay(direction) {
                     </tr>
                 </tbody>
             </table>
-        </div>
-    </div>
-
-    <!-- ============ 复盘笔记（占位）============ -->
-    <div v-else-if="activeTab === 'notes'" class="flex-1 overflow-auto custom-scrollbar bg-white px-[24px] py-[24px]">
-        <div class="max-w-[640px] mx-auto bg-[#fafafa] border border-[#eeeeee] rounded-[8px] p-[24px]">
-            <div class="flex items-baseline gap-[10px]">
-                <div class="text-[15px] font-bold text-[#111]">复盘笔记</div>
-                <span class="text-[10px] font-normal text-[#dc2626] bg-[#fff0f0] border border-[#fecaca] px-[6px] py-[1px] rounded-sm">规划中</span>
-            </div>
-            <div class="text-[12px] text-[#888] mt-[4px]">每个交易日的心得记录</div>
-            <div class="text-[12px] text-[#666] leading-relaxed mt-[16px] space-y-[8px]">
-                <div>计划展示：</div>
-                <ul class="list-disc list-inside text-[#888] space-y-[4px] ml-[4px]">
-                    <li>按交易日存档的 Markdown 编辑器</li>
-                    <li>关联当日操作 / 关注股票 / 当日做错的事</li>
-                    <li>关键词搜索过往笔记</li>
-                    <li>导出/导入跟着备份系统走</li>
-                </ul>
-            </div>
         </div>
     </div>
 

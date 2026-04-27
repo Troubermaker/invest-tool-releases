@@ -1,15 +1,25 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import RightDrawer from './components/RightDrawer.vue'
+import ActivationGate from './components/ActivationGate.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
 import Review from './views/Review.vue'
 import Settings from './views/Settings.vue'
+import { api } from './api/client'
 
 const currentTab = ref('market')
 const isAIDrawerOpen = ref(false)
+
+// 激活门禁状态：null=检查中（首屏空白片刻），false=未激活（显示 Gate），true=已激活
+const isActivated = ref(null)
+
+onMounted(async () => {
+    const res = await api.isActivated()
+    isActivated.value = !!(res.ok && res.data === true)
+})
 
 function handleNavigate(tabId) {
     currentTab.value = tabId
@@ -17,8 +27,15 @@ function handleNavigate(tabId) {
 </script>
 
 <template>
-  <div class="flex h-screen w-full bg-[#f9fafb] text-gray-800 overflow-hidden font-sans">
-    
+  <!-- 加载中：纯白屏（避免内容闪现）-->
+  <div v-if="isActivated === null" class="h-screen w-full bg-[#fafafa]"></div>
+
+  <!-- 未激活：全屏激活页，所有视图都不挂载（useSmartRefresh 不会启动）-->
+  <ActivationGate v-else-if="!isActivated" @activated="isActivated = true" />
+
+  <!-- 已激活：正常主界面 -->
+  <div v-else class="flex h-screen w-full bg-[#f9fafb] text-gray-800 overflow-hidden font-sans">
+
     <!-- Left Sidebar -->
     <Sidebar :currentTab="currentTab" @navigate="handleNavigate"/>
 
