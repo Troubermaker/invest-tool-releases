@@ -101,7 +101,7 @@ def raw_ths_limit_up_pool(date=''):
         'page': '1', 'limit': '100',
         'field': ('199112,10,9001,330323,330324,330325,9002,'
                   '330329,133971,133970,1968584,3475914,9003,9004'),
-        'filter': 'HS,GEM2STAR',
+        'filter': 'HS,GEM2STAR,ST,NEW',
         'order_field': '330324', 'order_type': '0',
         'date': date,
         '_': _ts_ms(),
@@ -115,7 +115,7 @@ def raw_ths_continuous_limit_pool(date=''):
     params = {
         'page': '1', 'limit': '100',
         'field': '199112,10,330329,330325,133971,133970,1968584,3475914,3541450,9004',
-        'filter': 'HS,GEM2STAR',
+        'filter': 'HS,GEM2STAR,ST,NEW',
         'order_field': '330329', 'order_type': '0',
         'date': date,
         '_': _ts_ms(),
@@ -129,7 +129,7 @@ def raw_ths_open_limit_pool(date=''):
     params = {
         'page': '1', 'limit': '100',
         'field': '199112,9002,48,1968584,19,3475914,9003,10,9004',
-        'filter': 'HS,GEM2STAR',
+        'filter': 'HS,GEM2STAR,ST,NEW',
         'order_field': '199112', 'order_type': '0',
         'date': date,
         '_': _ts_ms(),
@@ -143,7 +143,7 @@ def raw_ths_lower_limit_pool(date=''):
     params = {
         'page': '1', 'limit': '100',
         'field': '199112,10,330333,330334,1968584,3475914,9004',
-        'filter': 'HS,GEM2STAR',
+        'filter': 'HS,GEM2STAR,ST,NEW',
         'order_field': '330334', 'order_type': '0',
         'date': date,
         '_': _ts_ms(),
@@ -157,7 +157,7 @@ def raw_ths_limit_up_sprint(date=''):
     params = {
         'page': '1', 'limit': '100',
         'field': '199112,10,48,1968584,19,3475914,9003,9004',
-        'filter': 'HS,GEM2STAR',
+        'filter': 'HS,GEM2STAR,ST,NEW',
         'order_field': '199112', 'order_type': '0',
         'date': date,
         '_': _ts_ms(),
@@ -166,10 +166,15 @@ def raw_ths_limit_up_sprint(date=''):
 
 
 def raw_ths_continuous_limit_up(date=''):
-    """连板天梯（新增）"""
+    """
+    连板天梯。后端始终返回全部（含 ST + 次新），是否展示 ST 由前端开关决定。
+
+    THS filter 语义：'HS,GEM2STAR,ST,NEW' = 白名单加入主板 + 双创 + ST + 次新
+    （不是黑名单排除）。
+    """
     url = 'https://data.10jqka.com.cn/dataapi/limit_up/continuous_limit_up'
     params = {
-        'filter': 'HS,GEM2STAR',
+        'filter': 'HS,GEM2STAR,ST,NEW',
         'date': date or datetime.now().strftime('%Y%m%d'),
     }
     return fetch_json(url, params=params, headers=THS_DATA_HEADERS)
@@ -179,7 +184,7 @@ def raw_ths_block_top(date=''):
     """最强风口（板块强度榜）"""
     url = 'https://data.10jqka.com.cn/dataapi/limit_up/block_top'
     params = {
-        'filter': 'HS,GEM2STAR',
+        'filter': 'HS,GEM2STAR,ST,NEW',
         'date': date or datetime.now().strftime('%Y%m%d'),
     }
     return fetch_json(url, params=params, headers=THS_DATA_HEADERS)

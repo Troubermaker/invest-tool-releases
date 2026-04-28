@@ -27,6 +27,8 @@ CACHE_KEY = "limit_up_ladder"
 def get_ladder(date=None, force=False):
     """
     返回按连板高度降序的天梯数据，每只股票带概念标签。
+    始终返回全部（含 ST + 次新），是否展示 ST 由前端开关决定。
+
     Args:
         date:  'YYYY-MM-DD' 历史日期；None 表示用最近一个交易日
         force: 跳过缓存

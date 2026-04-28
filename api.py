@@ -277,7 +277,7 @@ class Api:
 
     @api_endpoint
     def get_limit_up_ladder(self, date=None):
-        """连板天梯：按连板高度降序分组的股票列表。date 历史日期 'YYYY-MM-DD'。"""
+        """连板天梯：按连板高度降序分组。后端返全量（含 ST + 次新），前端按需筛选。"""
         return limit_up_ladder_service.get_ladder(date=date)
 
     @api_endpoint

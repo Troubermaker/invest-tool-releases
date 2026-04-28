@@ -4,6 +4,7 @@ import Sidebar from './components/Sidebar.vue'
 import RightDrawer from './components/RightDrawer.vue'
 import ActivationGate from './components/ActivationGate.vue'
 import UpdateBanner from './components/UpdateBanner.vue'
+import Toaster from './components/Toaster.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
@@ -34,8 +35,8 @@ function handleNavigate(tabId) {
   <!-- 未激活：全屏激活页，所有视图都不挂载（useSmartRefresh 不会启动）-->
   <ActivationGate v-else-if="!isActivated" @activated="isActivated = true" />
 
-  <!-- 已激活：正常主界面 -->
-  <div v-else class="flex h-screen w-full bg-[#f9fafb] text-gray-800 overflow-hidden font-sans">
+  <!-- 已激活：正常主界面（含底部免责声明 22px）-->
+  <div v-else class="flex h-screen w-full bg-[#f9fafb] text-gray-800 overflow-hidden font-sans pb-[22px]">
 
     <!-- 在线更新通知（顶部，启动时静默检查 Gitee 上的 latest.json） -->
     <UpdateBanner />
@@ -63,6 +64,19 @@ function handleNavigate(tabId) {
 
     <!-- Right Drawer for AI -->
     <RightDrawer :isOpen="isAIDrawerOpen" @close="isAIDrawerOpen = false"/>
+
+    <!-- 全局 toast 通知（接口失败 / 重要事件） -->
+    <Toaster />
+
+    <!-- 底部固定免责声明（22px，常驻不可关）-->
+    <div class="fixed bottom-0 left-0 right-0 h-[22px] z-[150]
+                bg-[#fafafa] border-t border-[#e5e7eb]
+                flex items-center justify-center px-[12px]
+                text-[10px] text-[#888] tracking-wide select-none pointer-events-none">
+        <span>
+            ⚠ 此软件仅供个人复盘参考；不构成投资建议，实际交易请以交易所原始数据为准。
+        </span>
+    </div>
 
   </div>
 </template>

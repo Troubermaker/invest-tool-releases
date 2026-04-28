@@ -25,6 +25,7 @@
  */
 import { onMounted, onUnmounted, ref, watch, computed } from 'vue'
 import { api } from '../api/client'
+import { pushError } from './useNotifications'
 
 const HIDDEN_DEEP_MS = 5 * 60 * 1000  // 隐藏超过 5 分钟算 deep-hidden
 
@@ -117,13 +118,26 @@ function installGlobalListeners() {
         const hidden = document.hidden
         isHidden.value = hidden
         hiddenSince.value = hidden ? Date.now() : null
+        // 关键：窗口从后台回前台时，立即把 now 拉到真实时间。
+        // 否则若 setInterval 在后台被节流（Chrome / WebView2 都会），
+        // 倒计时会停在切走前的数字，回前台后看着像"卡住"。
+        now.value = Date.now()
     })
+    // 窗口聚焦时也强制对齐——比 visibilitychange 更敏感
+    window.addEventListener('focus', () => { now.value = Date.now() })
 }
 
 function startGlobalTicker() {
     if (globalTickerStarted || typeof window === 'undefined') return
     globalTickerStarted = true
-    setInterval(() => { now.value = Date.now() }, 1000)
+    // 用自调度的 setTimeout 而非 setInterval：
+    // 1) setInterval 后台被节流后，前台时大量积压触发，可能挤爆 main 线程
+    // 2) setTimeout 链能自纠正（每次实际执行时间都对齐到 Date.now()）
+    function tick() {
+        now.value = Date.now()
+        setTimeout(tick, 1000)
+    }
+    setTimeout(tick, 1000)
 }
 
 let tradingDaysLoadStarted = false
@@ -163,12 +177,36 @@ export function useSmartRefresh(fn, {
     const currentIntervalMs = ref(baseInterval)
 
     async function run() {
-        const res = await fn()
-        if (res && typeof res === 'object' && 'ok' in res) {
-            if (res.ok) onData && onData(res.data)
-            else onError && onError(res.error, res.code)
+        // try/finally 保证 lastRefreshAt 一定更新——
+        // 即便 fn() 抛异常，倒计时也不会卡在 0 永不归位
+        try {
+            const res = await fn()
+            if (res && typeof res === 'object' && 'ok' in res) {
+                if (res.ok) {
+                    onData && onData(res.data)
+                } else {
+                    onError && onError(res.error, res.code)
+                    _maybeToastError(res.error, res.code)
+                }
+            }
+        } catch (e) {
+            console.warn('[useSmartRefresh] run failed:', e)
+            if (onError) onError(String(e), 'EXCEPTION')
+            _maybeToastError(String(e), 'EXCEPTION')
+        } finally {
+            lastRefreshAt.value = Date.now()
         }
-        lastRefreshAt.value = Date.now()
+    }
+
+    function _maybeToastError(msg, code) {
+        // 静默吃掉的错误码：
+        //   NOT_ACTIVATED → 用户没激活，激活页会处理，没必要弹
+        //   NO_METHOD     → 后端方法名错（开发阶段），用户场景不该出现
+        if (code === 'NOT_ACTIVATED' || code === 'NO_METHOD') return
+        // 用 prefKey 作 dedupKey；同模块的同类错 30s 内只弹一次
+        pushError(`数据获取失败：${msg || '未知错误'}`, {
+            dedupKey: prefKey || `unknown_${code || 'err'}`,
+        })
     }
 
     function shouldAutoRefresh() {
@@ -236,8 +274,23 @@ export function useSmartRefresh(fn, {
     const stopWatch1 = watch(refreshMode, () => reschedule())
     const stopWatch2 = watch(isMarketOpen, () => reschedule())
 
+    // 看门狗：如果距离上次刷新已经超过预期间隔的 2 倍，说明 setInterval
+    // 可能被浏览器后台节流"丢"了 —— 主动触发一次 run() 自愈
+    const watchdog = setInterval(() => {
+        if (!shouldAutoRefresh()) return
+        if (!lastRefreshAt.value) return
+        const expected = currentIntervalMs.value * (MODE_MULTIPLIER[refreshMode.value] || 1)
+        const elapsed = Date.now() - lastRefreshAt.value
+        if (elapsed > expected * 2) {
+            // 久未刷新，强制跑一次 + 重排定时器
+            run()
+            reschedule()
+        }
+    }, 10_000)  // 每 10s 自查一次，开销可忽略
+
     onUnmounted(() => {
         if (timer) clearInterval(timer)
+        clearInterval(watchdog)
         stopWatch1()
         stopWatch2()
     })

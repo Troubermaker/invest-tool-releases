@@ -48,6 +48,11 @@ DB_PATH = os.path.join(_resolve_data_dir(), 'invest_data.db')
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    # WAL（Write-Ahead Logging）模式：让多个连接可同时读 + 单写者，
+    # scheduler 后台线程和 API 主线程并发写不会互相阻塞 / 损坏数据库。
+    # PRAGMA 是连接级设置，但 WAL 模式一旦设置会持久化在 DB 文件元信息里，
+    # 后续所有新连接默认都是 WAL，重复设置无害。
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 def init_db():

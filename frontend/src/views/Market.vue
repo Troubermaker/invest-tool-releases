@@ -4,6 +4,7 @@ import Sortable from 'sortablejs'
 import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
 import RefreshCountdown from '../components/RefreshCountdown.vue'
+import LastRefreshLabel from '../components/LastRefreshLabel.vue'
 
 const emit = defineEmits(['openAI'])
 
@@ -91,8 +92,24 @@ const filteredStocks = computed(() => {
     )
 })
 
-// 连板天梯数据（按 height 降序分组）
-const ladderTiers = ref([])
+// 连板天梯数据（按 height 降序分组）—— 后端返全量，前端按 ladderIncludeSt 过滤显示
+const ladderTiersRaw = ref([])
+// "显示 ST" 开关（持久化偏好；默认关 = 不显示 ST/*ST/SST 等）
+const ladderIncludeSt = ref(false)
+const LADDER_ST_PREF_KEY = 'ladder.include_st'
+
+// 前端过滤后的天梯：勾选时返原数据；未勾时按股名前缀过滤掉 ST 系
+const ladderTiers = computed(() => {
+    if (ladderIncludeSt.value) return ladderTiersRaw.value
+    return ladderTiersRaw.value
+        .map(tier => ({
+            ...tier,
+            stocks: tier.stocks.filter(s => !/^\*?S?ST/i.test(s.name || '')),
+        }))
+        .map(tier => ({ ...tier, number: tier.stocks.length }))
+        .filter(tier => tier.stocks.length > 0)  // 整层都没了就不要这层
+})
+
 const ladderTotalCount = computed(() =>
     ladderTiers.value.reduce((sum, t) => sum + (t.number || 0), 0)
 )
@@ -499,6 +516,7 @@ const {
     currentInterval:  marketInterval,
     setRefreshInterval: setMarketInterval,
     refresh: refreshMarket,
+    lastRefreshAt: marketLastAt,
 } = useSmartRefresh(api.getMarketData, {
     baseInterval: 15_000,
     prefKey: 'refresh.market_data',
@@ -520,11 +538,23 @@ const {
     currentInterval:  ladderInterval,
     setRefreshInterval: setLadderInterval,
     refresh: refreshLadder,
+    lastRefreshAt: ladderLastAt,
 } = useSmartRefresh(api.getLimitUpLadder, {
     baseInterval: 30_000,
     prefKey: 'refresh.limit_up_ladder',
-    onData: (data) => { ladderTiers.value = data || [] },
+    onData: (data) => { ladderTiersRaw.value = data || [] },
     onError: (err) => console.error("连板天梯拉取失败:", err),
+})
+
+// 切换"显示 ST"只持久化，不重拉接口（前端 computed 过滤）
+watch(ladderIncludeSt, async (v) => {
+    await api.setUserPreference(LADDER_ST_PREF_KEY, v)
+})
+
+// 启动时加载偏好
+onMounted(async () => {
+    const r = await api.getUserPreference(LADDER_ST_PREF_KEY, false)
+    if (r.ok && typeof r.data === 'boolean') ladderIncludeSt.value = r.data
 })
 
 // 市场情绪：基础 15s
@@ -533,6 +563,7 @@ const {
     currentInterval:  sentimentInterval,
     setRefreshInterval: setSentimentInterval,
     refresh: refreshSentiment,
+    lastRefreshAt: sentimentLastAt,
 } = useSmartRefresh(api.getMarketSentiment, {
     baseInterval: 15_000,
     prefKey: 'refresh.market_sentiment',
@@ -570,16 +601,19 @@ const topConcepts = computed(() => {
 // 后台预拉热榜（Market 页一打开就拉 + 周期刷新，
 // 这样用户点到 hotlist tab 时数据已经在内存里，不会卡 2-3 秒）
 // 后端 60s TTL，更短间隔时多余调用走缓存不打 THS。
+// ignoreMarketHours: 热榜数据在盘外也会变（热度沉淀 / 排名调整），保持 24x7 刷
 const {
     secondsUntilNext: hotListCountdown,
     currentInterval:  hotListInterval,
     setRefreshInterval: setHotListInterval,
     refresh: refreshHotList,
+    lastRefreshAt: hotListLastAt,
 } = useSmartRefresh(
     () => api.getThsHotList(hotListPeriod.value),
     {
         baseInterval: 60_000,
         prefKey: 'refresh.ths_hot_list',
+        ignoreMarketHours: true,
         onData: (data) => { hotListData.value = data || [] },
     }
 )
@@ -612,6 +646,7 @@ const {
     currentInterval:  newsInterval,
     setRefreshInterval: setNewsInterval,
     refresh: refreshNewsAuto,
+    lastRefreshAt: newsLastAt,
 } = useSmartRefresh(
     () => api.getFastNews(newsSource.value),
     {
@@ -754,6 +789,7 @@ const {
     currentInterval:  poolsInterval,
     setRefreshInterval: setPoolsInterval,
     refresh:          refreshActivePool,
+    lastRefreshAt:    poolsLastAt,
 } = useSmartRefresh(
     () => activeTab.value === 'pools'
         ? api.getLimitPool(activePoolKey.value)
@@ -879,12 +915,15 @@ onUnmounted(() => {
             <div class="bg-white border border-[#e8e8e8] rounded-[4px] py-[4px] px-[10px] flex items-center gap-[10px] w-full h-full cursor-default">
                 <!-- Left: Turnover value -->
                 <div class="flex-[4] basis-0 min-w-0 flex flex-col justify-center border-r border-[#f0f0f0] pr-[12px]">
-                    <div class="flex items-center justify-between mb-[7px]">
+                    <div class="flex items-center justify-between mb-[7px] gap-[6px]">
                         <span class="text-[#999] text-[11px] font-medium leading-none tracking-[0.12em]">全市场成交额</span>
-                        <RefreshCountdown :seconds="sentimentCountdown"
-                                          :current-interval="sentimentInterval"
-                                          @pick="setSentimentInterval"
-                                          @refresh-now="refreshSentiment" />
+                        <div class="flex items-center gap-[6px]">
+                            <LastRefreshLabel :timestamp="sentimentLastAt" />
+                            <RefreshCountdown :seconds="sentimentCountdown"
+                                              :current-interval="sentimentInterval"
+                                              @pick="setSentimentInterval"
+                                              @refresh-now="refreshSentiment" />
+                        </div>
                     </div>
                     <span class="text-[#222] text-[18px] font-bold leading-none"
                           v-html="marketSentiment ? formatAmt(marketSentiment.turnover.today / 1e8) : '--'"></span>
@@ -924,10 +963,13 @@ onUnmounted(() => {
       <div class="w-[220px] bg-white border-r border-[#e5e5e5] flex flex-col flex-shrink-0 z-0 relative">
         <div class="h-[44px] bg-[#fff5f5] text-[#dc2626] border-b border-[#ffe5e5] flex items-center justify-between px-[12px] font-semibold text-[13px]">
           <span>精选板块</span>
-          <RefreshCountdown :seconds="marketCountdown"
-                            :current-interval="marketInterval"
-                            @pick="setMarketInterval"
-                            @refresh-now="refreshMarket" />
+          <div class="flex items-center gap-[6px]">
+            <LastRefreshLabel :timestamp="marketLastAt" />
+            <RefreshCountdown :seconds="marketCountdown"
+                              :current-interval="marketInterval"
+                              @pick="setMarketInterval"
+                              @refresh-now="refreshMarket" />
+          </div>
         </div>
 
         <div class="flex-1 overflow-y-auto w-full custom-scrollbar">
@@ -1084,8 +1126,18 @@ onUnmounted(() => {
             </svg>
             <span class="font-semibold text-[13px]">连板天梯</span>
           </div>
-          <div class="flex items-center gap-[6px]">
+          <div class="flex items-center gap-[8px]">
+            <!-- ST 开关：默认排除，点击切换；勾上 = 显示 ST + 次新 -->
+            <label class="flex items-center gap-[3px] text-[10px] text-[#dc2626]/70 font-medium cursor-pointer select-none hover:text-[#dc2626] transition"
+                   title="勾选后显示 ST / *ST / 次新（涨跌停规则不同，默认排除）">
+                <input type="checkbox"
+                       v-model="ladderIncludeSt"
+                       class="w-[11px] h-[11px] accent-[#dc2626] cursor-pointer"
+                       />
+                <span>ST</span>
+            </label>
             <span class="text-[11px] text-[#dc2626]/70 font-medium">{{ ladderTotalCount }} 只</span>
+            <LastRefreshLabel :timestamp="ladderLastAt" />
             <RefreshCountdown :seconds="ladderCountdown"
                               :current-interval="ladderInterval"
                               @pick="setLadderInterval"
@@ -1170,6 +1222,7 @@ onUnmounted(() => {
             </div>
             <div class="flex items-center gap-[10px]">
                 <span class="text-[11px] text-[#999]">{{ hotListData.length }} 只</span>
+                <LastRefreshLabel :timestamp="hotListLastAt" />
                 <RefreshCountdown :seconds="hotListCountdown"
                                   :current-interval="hotListInterval"
                                   @pick="setHotListInterval"
@@ -1286,6 +1339,7 @@ onUnmounted(() => {
             </div>
             <div class="flex items-center gap-[10px]">
                 <span class="text-[11px] text-[#999]">{{ newsData.length }} 条</span>
+                <LastRefreshLabel :timestamp="newsLastAt" />
                 <RefreshCountdown :seconds="newsCountdown"
                                   :current-interval="newsInterval"
                                   @pick="setNewsInterval"
@@ -1356,6 +1410,7 @@ onUnmounted(() => {
                     <template v-else>{{ activePool.count }} 只</template>
                 </span>
                 <span v-else-if="activePoolLoading" class="text-[11px] text-[#999]">加载中...</span>
+                <LastRefreshLabel :timestamp="poolsLastAt" />
                 <RefreshCountdown :seconds="poolsCountdown"
                                   :current-interval="poolsInterval"
                                   @pick="setPoolsInterval"

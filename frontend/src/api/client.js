@@ -77,7 +77,7 @@ export const api = {
   /** 板块联动个股。plateId: KPL 板块代码；date='YYYY-MM-DD' 切历史 */
   getSectorStocks: (plateId, date = null) => call('get_sector_stocks', plateId, date),
 
-  /** 连板天梯。date='YYYY-MM-DD' 切历史 */
+  /** 连板天梯。date='YYYY-MM-DD' 切历史。返全量数据，ST 由前端按需过滤显示 */
   getLimitUpLadder: (date = null) => call('get_limit_up_ladder', date),
 
   /** 市场情绪。date 传了返回 null（THS 该接口无历史版）*/

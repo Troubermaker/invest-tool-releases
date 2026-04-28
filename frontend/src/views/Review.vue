@@ -114,7 +114,10 @@ const selectedSector = ref(null)
 const sectorStocks = ref([])
 const sectorStocksLoading = ref(false)
 const stockFilter = ref('')
-const ladderTiers = ref([])
+// 后端返全量；ladderIncludeSt 决定前端是否过滤掉 ST/*ST/SST/次新
+const ladderTiersRaw = ref([])
+const ladderIncludeSt = ref(false)
+const LADDER_ST_PREF_KEY = 'ladder.include_st'   // 跟主页共用一个偏好
 const loadingMain = ref(false)
 
 const sectorLimitUpCount = computed(() =>
@@ -126,6 +129,18 @@ const filteredStocks = computed(() => {
     return sectorStocks.value.filter(s =>
         (s.name && s.name.toLowerCase().includes(q)) || (s.code && s.code.includes(q))
     )
+})
+
+// 前端过滤后的天梯：勾选 ST 时返原数据；未勾时按股名前缀过滤
+const ladderTiers = computed(() => {
+    if (ladderIncludeSt.value) return ladderTiersRaw.value
+    return ladderTiersRaw.value
+        .map(tier => ({
+            ...tier,
+            stocks: tier.stocks.filter(s => !/^\*?S?ST/i.test(s.name || '')),
+        }))
+        .map(tier => ({ ...tier, number: tier.stocks.length }))
+        .filter(tier => tier.stocks.length > 0)
 })
 const ladderTotalCount = computed(() =>
     ladderTiers.value.reduce((sum, t) => sum + (t.number || 0), 0)
@@ -256,12 +271,17 @@ async function loadAll() {
             }
         }
         if (ladderRes.ok) {
-            ladderTiers.value = ladderRes.data || []
+            ladderTiersRaw.value = ladderRes.data || []
         }
     } finally {
         loadingMain.value = false
     }
 }
+
+// 切换"显示 ST"只持久化偏好；ladderTiers 是 computed，自动重算
+watch(ladderIncludeSt, async (v) => {
+    await api.setUserPreference(LADDER_ST_PREF_KEY, v)
+})
 
 async function loadSectorStocks(plateId) {
     if (!plateId) { sectorStocks.value = []; return }
@@ -307,6 +327,9 @@ onMounted(async () => {
     await nextTick()
     initSubTabSortable()
     await loadTradingDays()
+    // 加载 ST 显示偏好（跟主页共用一个 key）
+    const stPref = await api.getUserPreference(LADDER_ST_PREF_KEY, false)
+    if (stPref.ok && typeof stPref.data === 'boolean') ladderIncludeSt.value = stPref.data
     selectedDate.value = lastTradingDay()  // 校准为最近一个真正的交易日
     // watch 会自动触发 loadAll
 })
@@ -513,45 +536,71 @@ function shiftToTradingDay(direction) {
         </div>
       </div>
 
-      <!-- 右：连板天梯 -->
-      <div class="w-[340px] bg-white border-l border-[#e5e5e5] flex flex-col flex-shrink-0">
+      <!-- 右：连板天梯（跟主页同款样式：左色条 + 渐变档位头 + 2 列栅格） -->
+      <div class="w-[340px] bg-white border-l border-[#e5e5e5] flex flex-col flex-shrink-0 z-0 relative">
         <div class="h-[44px] bg-[#fff5f5] text-[#dc2626] border-b border-[#ffe5e5] flex items-center justify-between px-[14px] shrink-0">
-          <span class="font-semibold text-[13px]">连板天梯</span>
-          <span class="text-[11px] text-[#dc2626]/70">{{ ladderTotalCount }} 只</span>
+          <div class="flex items-center gap-[6px]">
+            <svg class="w-[13px] h-[13px]" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M12.395 2.553a1 1 0 00-1.45-.385c-.345.23-.614.558-.822.88-.214.33-.403.713-.57 1.116-.334.804-.614 1.768-.84 2.734a31.365 31.365 0 00-.613 3.58 2.64 2.64 0 01-.945-1.067c-.328-.68-.398-1.534-.398-2.654A1 1 0 005.05 6.05 6.981 6.981 0 003 11a7 7 0 1011.95-4.95c-.592-.591-.98-.985-1.348-1.467-.363-.476-.724-1.063-1.207-2.03zM12.12 15.12A3 3 0 017 13s.879.5 2.5.5c0-1 .5-4 1.25-4.5.5 1 .786 1.293 1.371 1.879A2.99 2.99 0 0113 13a2.99 2.99 0 01-.879 2.121z" clip-rule="evenodd" />
+            </svg>
+            <span class="font-semibold text-[13px]">连板天梯</span>
+          </div>
+          <div class="flex items-center gap-[8px]">
+            <!-- ST 开关：跟主页保持一致 -->
+            <label class="flex items-center gap-[3px] text-[10px] text-[#dc2626]/70 font-medium cursor-pointer select-none hover:text-[#dc2626] transition"
+                   title="勾选后显示 ST / *ST / 次新（涨跌停规则不同，默认排除）">
+                <input type="checkbox"
+                       v-model="ladderIncludeSt"
+                       class="w-[11px] h-[11px] accent-[#dc2626] cursor-pointer"
+                       />
+                <span>ST</span>
+            </label>
+            <span class="text-[11px] text-[#dc2626]/70 font-medium">{{ ladderTotalCount }} 只</span>
+          </div>
         </div>
         <div class="flex-1 overflow-y-auto custom-scrollbar">
-            <div v-if="!ladderTiers.length && !loadingMain" class="flex items-center justify-center h-full text-[#ccc] text-[12px]">
+            <!-- Empty / loading -->
+            <div v-if="loadingMain && !ladderTiers.length" class="flex items-center justify-center h-full text-[#ccc] text-[12px]">
+                加载天梯数据中...
+            </div>
+            <div v-else-if="!ladderTiers.length" class="flex items-center justify-center h-full text-[#ccc] text-[12px]">
                 {{ selectedDate }} 无连板数据
             </div>
-            <div v-else-if="loadingMain" class="flex items-center justify-center h-full text-[#ccc] text-[12px]">
-                加载中...
-            </div>
-            <div v-for="tier in ladderTiers" :key="tier.height" class="border-b border-[#f5f5f5]">
-                <div class="px-[14px] py-[8px] flex items-center justify-between sticky top-0 z-[1]"
-                     :style="{ background: tierStyle(tier.height).tint }">
-                    <span class="text-[13px] font-bold" :style="{ color: tierStyle(tier.height).main }">
-                        {{ tier.label }}
-                    </span>
-                    <span class="text-[11px] font-medium" :style="{ color: tierStyle(tier.height).main }">
-                        {{ tier.stocks.length }} 只
-                    </span>
-                </div>
-                <div v-for="stock in tier.stocks" :key="stock.code"
-                     class="px-[14px] py-[8px] hover:bg-[#fafafa] transition">
-                    <div class="flex items-center justify-between">
-                        <span class="text-[13px] font-bold text-[#111]">{{ stock.name }}</span>
-                        <span class="text-[10px] text-[#999] font-mono tabular-nums">{{ stock.code }}</span>
+
+            <!-- Tier groups -->
+            <div v-for="tier in ladderTiers" :key="tier.height"
+                 class="relative">
+                <!-- 左侧连续 accent 色条 -->
+                <div class="absolute left-0 top-0 bottom-0 w-[3px]"
+                     :style="{ background: tierStyle(tier.height).main }"></div>
+
+                <!-- 档位头：sticky + 渐变背景 + 数字徽章 -->
+                <div class="sticky top-0 z-[5] flex items-center justify-between pl-[14px] pr-[12px] py-[7px] border-b border-[#f0f0f0]"
+                     :style="{ background: `linear-gradient(to right, ${tierStyle(tier.height).tint}, rgba(255,255,255,0.85) 85%)` }">
+                    <div class="flex items-center gap-[8px]">
+                        <div class="flex items-baseline gap-[2px] px-[8px] py-[2px] rounded-[4px] text-white shadow-[0_1px_2px_rgba(0,0,0,0.15)]"
+                             :style="{ background: tierStyle(tier.height).main }">
+                            <span class="text-[13px] font-bold tabular-nums leading-none">{{ tier.height }}</span>
+                            <span class="text-[10px] font-semibold leading-none">板</span>
+                        </div>
+                        <span class="text-[11px] text-[#666] font-medium">{{ tier.number }} 只</span>
                     </div>
-                    <div v-if="stock.concepts && stock.concepts.length"
-                         class="mt-[3px] flex flex-wrap gap-[3px]"
-                         :title="stock.reasonAll">
-                        <span v-for="(c, i) in stock.concepts.slice(0, 3)" :key="i"
-                              class="text-[10px] text-[#dc2626] bg-[#fff5f5] px-[5px] py-[1px] rounded-sm">
-                            {{ c }}
-                        </span>
-                        <span v-if="stock.concepts.length > 3" class="text-[10px] text-[#999]">
-                            +{{ stock.concepts.length - 3 }}
-                        </span>
+                </div>
+
+                <!-- 股票行：2 列栅格 -->
+                <div class="grid grid-cols-2">
+                    <div v-for="(stock, idx) in tier.stocks" :key="stock.code"
+                         class="flex flex-col gap-[3px] pl-[14px] pr-[8px] py-[6px] cursor-default transition-colors min-w-0 border-b border-[#f5f5f5] hover:bg-[#fff5f5]"
+                         :class="{ 'border-l border-[#f5f5f5]': idx % 2 === 1 }">
+                        <div class="flex items-center gap-[8px] min-w-0">
+                            <span class="text-[12px] text-[#666] font-mono tabular-nums shrink-0">{{ stock.code }}</span>
+                            <span class="text-[14px] font-bold text-[#111] truncate">{{ stock.name }}</span>
+                        </div>
+                        <div v-if="stock.reasonAll"
+                             class="text-[11px] text-[#94a3b8] leading-[1.4] truncate"
+                             :title="stock.reasonAll">
+                            {{ stock.reasonAll }}
+                        </div>
                     </div>
                 </div>
             </div>
