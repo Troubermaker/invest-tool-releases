@@ -11,7 +11,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { api } from '../api/client'
-import { computeAll, pickCloses } from '../composables/useTechIndicators'
+import { computeAll, pickCloses, supportResistance, detectBoxes, detectPlatforms, detectTrendlines, detectZigzag, detectChannel } from '../composables/useTechIndicators'
 
 const props = defineProps({
     code:   { type: String, required: true },
@@ -38,6 +38,12 @@ const allIndicators = [
     { id: 'MA20', label: 'MA20' },
     { id: 'MA60', label: 'MA60' },
     { id: 'BOLL', label: 'BOLL' },
+    { id: 'SR',   label: '压/支' },
+    { id: 'BOX',  label: '箱体' },
+    { id: 'PLAT', label: '平台' },
+    { id: 'TREND', label: '趋势线' },
+    { id: 'ZZ',   label: '波段' },
+    { id: 'CHAN', label: '通道' },
     { id: 'MACD', label: 'MACD' },
     { id: 'KDJ',  label: 'KDJ'  },
 ]
@@ -143,6 +149,124 @@ let _resizeObs = null
 let _syncing = false  // 防止 timeScale 递归同步
 let _crosshairSyncing = false  // 防止 crosshair 递归同步
 
+// ============ 趋势线 overlay（SVG 斜线）============
+const trendlines = ref([])     // 算法返回的趋势线（基于 idx/time/price 的逻辑数据）
+const trendlinesPx = ref([])   // 转成像素坐标的渲染数据
+function updateTrendlinesPixels() {
+    if (!mainChart || !mainSeries || !trendlines.value.length || !klines.value.length) {
+        if (trendlinesPx.value.length) trendlinesPx.value = []
+        return
+    }
+    const ts = mainChart.timeScale()
+    const lastIdx  = klines.value.length - 1
+    const lastTime = klines.value[lastIdx].time
+    const out = []
+    for (const tl of trendlines.value) {
+        // 起点：swing 锚点
+        const x1 = ts.timeToCoordinate(tl.startTime)
+        const y1 = mainSeries.priceToCoordinate(tl.startPrice)
+        // 终点：用斜率把线延伸到最新 bar
+        const slope = (tl.endPrice - tl.startPrice) / (tl.endIdx - tl.startIdx)
+        const projectedPrice = tl.startPrice + slope * (lastIdx - tl.startIdx)
+        const x2 = ts.timeToCoordinate(lastTime)
+        const y2 = mainSeries.priceToCoordinate(projectedPrice)
+        if (x1 == null || y1 == null || x2 == null || y2 == null) continue
+        out.push({
+            key: `${tl.type}-${tl.startIdx}-${tl.endIdx}`,
+            type: tl.type,
+            x1, y1, x2, y2,
+            touches: tl.touches,
+        })
+    }
+    trendlinesPx.value = out
+}
+
+// ============ Zigzag 波段折线 overlay ============
+const zigzag = ref([])         // [{ idx, time, price, type }] 按时间排序
+const zigzagPx = ref([])       // [{ x, y, type }] 像素坐标
+function updateZigzagPixels() {
+    if (!mainChart || !mainSeries || !zigzag.value.length) {
+        if (zigzagPx.value.length) zigzagPx.value = []
+        return
+    }
+    const ts = mainChart.timeScale()
+    const out = []
+    for (const p of zigzag.value) {
+        const x = ts.timeToCoordinate(p.time)
+        const y = mainSeries.priceToCoordinate(p.price)
+        if (x == null || y == null) continue
+        out.push({ x, y, type: p.type, price: p.price })
+    }
+    zigzagPx.value = out
+}
+
+// ============ 趋势通道 overlay ============
+const channel = ref(null)        // { lowSlope, lowIntercept, highSlope, highIntercept, startIdx, endIdx, startTime, endTime }
+const channelPx = ref(null)      // { polygon: 'x1,y1 x2,y2 ...', lowLine, highLine }
+function updateChannelPixels() {
+    if (!mainChart || !mainSeries || !channel.value) {
+        if (channelPx.value) channelPx.value = null
+        return
+    }
+    const c = channel.value
+    const ts = mainChart.timeScale()
+    const startTime = c.startTime
+    const endTime   = c.endTime
+    const x1 = ts.timeToCoordinate(startTime)
+    const x2 = ts.timeToCoordinate(endTime)
+    if (x1 == null || x2 == null) { channelPx.value = null; return }
+    const lowYStart  = mainSeries.priceToCoordinate(c.lowSlope  * c.startIdx + c.lowIntercept)
+    const lowYEnd    = mainSeries.priceToCoordinate(c.lowSlope  * c.endIdx   + c.lowIntercept)
+    const highYStart = mainSeries.priceToCoordinate(c.highSlope * c.startIdx + c.highIntercept)
+    const highYEnd   = mainSeries.priceToCoordinate(c.highSlope * c.endIdx   + c.highIntercept)
+    if ([lowYStart, lowYEnd, highYStart, highYEnd].some(v => v == null)) { channelPx.value = null; return }
+    channelPx.value = {
+        // 多边形：左上 → 右上 → 右下 → 左下
+        polygon: `${x1},${highYStart} ${x2},${highYEnd} ${x2},${lowYEnd} ${x1},${lowYStart}`,
+        highLine: { x1, y1: highYStart, x2, y2: highYEnd },
+        lowLine:  { x1, y1: lowYStart,  x2, y2: lowYEnd },
+    }
+}
+
+// 统一刷新所有 overlay 的像素坐标
+function updateAllOverlays() {
+    updateRectOverlaysPixels()
+    updateTrendlinesPixels()
+    updateZigzagPixels()
+    updateChannelPixels()
+}
+
+// ============ 矩形 overlay（箱体 / 平台 共用）============
+const rectOverlays = ref([])      // [{ type: 'box'|'platform', startTime, endTime, upper, lower, ... }]
+const rectOverlaysPx = ref([])    // 像素坐标
+function updateRectOverlaysPixels() {
+    if (!mainChart || !mainSeries || !rectOverlays.value.length) {
+        if (rectOverlaysPx.value.length) rectOverlaysPx.value = []
+        return
+    }
+    const ts = mainChart.timeScale()
+    const out = []
+    for (const b of rectOverlays.value) {
+        const x1 = ts.timeToCoordinate(b.startTime)
+        const x2 = ts.timeToCoordinate(b.endTime)
+        const y1 = mainSeries.priceToCoordinate(b.upper)
+        const y2 = mainSeries.priceToCoordinate(b.lower)
+        if (x1 == null || x2 == null || y1 == null || y2 == null) continue
+        out.push({
+            key: `${b.type}-${b.startIdx}-${b.endIdx}`,
+            type: b.type,
+            upper: b.upper, lower: b.lower,
+            left: Math.min(x1, x2),
+            top:  Math.min(y1, y2),
+            width:  Math.max(2, Math.abs(x2 - x1)),
+            height: Math.max(2, Math.abs(y2 - y1)),
+            pct: b.lower > 0 ? (b.upper / b.lower - 1) * 100 : 0,
+            bars: (b.endIdx - b.startIdx + 1),
+        })
+    }
+    rectOverlaysPx.value = out
+}
+
 // ============ 数据加载 ============
 async function loadData() {
     loading.value = true
@@ -240,16 +364,18 @@ async function ensureChart() {
         if (kdjChart && kdjEl.value) {
             kdjChart.applyOptions({ width: kdjEl.value.clientWidth, height: kdjEl.value.clientHeight })
         }
+        updateAllOverlays()
     })
     _resizeObs.observe(mainEl.value)
 
-    // 主图 timeScale 变化时同步副图
+    // 主图 timeScale 变化时同步副图 + 重算箱体像素坐标
     mainChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
         if (_syncing || !range) return
         _syncing = true
         if (macdChart) macdChart.timeScale().setVisibleLogicalRange(range)
         if (kdjChart)  kdjChart.timeScale().setVisibleLogicalRange(range)
         _syncing = false
+        updateAllOverlays()
     })
 
     // 十字线 hover → 更新 hoverIdx（副图 legend 跟随）+ hoverSide（浮动卡片左右翻转）+ 竖直线同步到副图
@@ -474,6 +600,65 @@ async function renderAll() {
         overlaySeriesMap.set(ovl.name, series)
     }
 
+    // —— 简单压力/支撑位（同花顺/通达信模式：近 N 根高低，各一条）—— //
+    // 红虚线 = 压力（dashed），绿点线 = 支撑（sparseDotted），线型差异化对色弱友好
+    if (isCandleMode && activeIndicators.value.includes('SR')) {
+        const SR_WINDOW = { '日K': 60, '周K': 26, '月K': 12, '年K': 5 }
+        const window = SR_WINDOW[timeframe.value] || 60
+        const { supports, resistances } = supportResistance(klines.value, { window })
+        for (const r of resistances) {
+            mainSeries.createPriceLine({
+                price: r.price,
+                color: '#dc2626',
+                lineWidth: 1,
+                lineStyle: 2,
+                axisLabelVisible: true,
+                title: `压·近${window}`,
+            })
+        }
+        for (const s of supports) {
+            mainSeries.createPriceLine({
+                price: s.price,
+                color: '#16a34a',
+                lineWidth: 1,
+                lineStyle: 4,
+                axisLabelVisible: true,
+                title: `支·近${window}`,
+            })
+        }
+    }
+
+    // —— 箱体 / 平台 识别（矩形高亮）—— //
+    const rects = []
+    if (isCandleMode && activeIndicators.value.includes('BOX')) {
+        for (const b of detectBoxes(klines.value)) rects.push({ ...b, type: 'box' })
+    }
+    if (isCandleMode && activeIndicators.value.includes('PLAT')) {
+        for (const p of detectPlatforms(klines.value)) rects.push({ ...p, type: 'platform' })
+    }
+    rectOverlays.value = rects
+
+    // —— 趋势线识别（SVG 斜线）—— //
+    if (isCandleMode && activeIndicators.value.includes('TREND')) {
+        trendlines.value = detectTrendlines(klines.value)
+    } else {
+        trendlines.value = []
+    }
+
+    // —— Zigzag 波段折线 —— //
+    if (isCandleMode && activeIndicators.value.includes('ZZ')) {
+        zigzag.value = detectZigzag(klines.value)
+    } else {
+        zigzag.value = []
+    }
+
+    // —— 趋势通道（线性回归拟合上下轨）—— //
+    if (isCandleMode && activeIndicators.value.includes('CHAN')) {
+        channel.value = detectChannel(klines.value)
+    } else {
+        channel.value = null
+    }
+
     // —— 副图：MACD / KDJ —— //
     await renderSubPane('macd', subPanes.find(p => p.name === 'MACD'))
     await renderSubPane('kdj',  subPanes.find(p => p.name === 'KDJ'))
@@ -494,7 +679,11 @@ async function renderAll() {
     }
 
     // 等浏览器把所有刻度文本布局完成后再对齐价格刻度宽度（保证三图竖直线连成一根）
-    requestAnimationFrame(equalizePriceScaleWidths)
+    // 同时算箱体像素坐标（依赖最终的视窗 + 价格刻度尺寸）
+    requestAnimationFrame(() => {
+        equalizePriceScaleWidths()
+        updateAllOverlays()
+    })
 }
 
 // 三张 chart 价格刻度宽度对齐：取最大宽度回写为 minimumWidth，避免竖直十字线分段错位
@@ -663,6 +852,79 @@ onUnmounted(() => {
             <!-- 主图 + hover 浮动卡片（仅 hover 时出现；MACD/KDJ 已挪到各自副图 legend，这里不展示）-->
             <div class="relative bg-white" :style="{ height: mainChartHeight }">
                 <div ref="mainEl" class="w-full h-full"></div>
+
+                <!-- 趋势线 overlay（SVG 斜线；上升 = 蓝色实线、下降 = 橙色虚线，色弱友好的 hue + 线型双重区分）-->
+                <svg v-if="trendlinesPx.length"
+                     class="absolute inset-0 pointer-events-none z-[5]"
+                     style="width: 100%; height: 100%;">
+                    <line v-for="tl in trendlinesPx" :key="tl.key"
+                          :x1="tl.x1" :y1="tl.y1" :x2="tl.x2" :y2="tl.y2"
+                          :stroke="tl.type === 'high' ? '#ea580c' : '#2563eb'"
+                          stroke-width="1.5"
+                          :stroke-dasharray="tl.type === 'high' ? '5 3' : '0'" />
+                </svg>
+
+                <!-- Zigzag 波段折线 —— 分段着色：上行段（low→high）蓝色实线、下行段（high→low）橙色虚线 -->
+                <svg v-if="zigzagPx.length >= 2"
+                     class="absolute inset-0 pointer-events-none z-[5]"
+                     style="width: 100%; height: 100%;">
+                    <line v-for="i in zigzagPx.length - 1" :key="`seg-${i}`"
+                          :x1="zigzagPx[i-1].x" :y1="zigzagPx[i-1].y"
+                          :x2="zigzagPx[i].x"   :y2="zigzagPx[i].y"
+                          :stroke="zigzagPx[i].type === 'high' ? '#2563eb' : '#ea580c'"
+                          stroke-width="1.5"
+                          :stroke-dasharray="zigzagPx[i].type === 'high' ? '0' : '5 3'" />
+                    <circle v-for="(p, i) in zigzagPx" :key="`pt-${i}`"
+                            :cx="p.x" :cy="p.y" r="2.8"
+                            :fill="p.type === 'high' ? '#ea580c' : '#fff'"
+                            :stroke="p.type === 'high' ? '#ea580c' : '#2563eb'"
+                            stroke-width="1.2" />
+                </svg>
+
+                <!-- 趋势通道（半透明青色填充 + 上下两条边线，独立线性回归拟合）-->
+                <svg v-if="channelPx"
+                     class="absolute inset-0 pointer-events-none z-[5]"
+                     style="width: 100%; height: 100%;">
+                    <polygon :points="channelPx.polygon"
+                             fill="rgba(6, 182, 212, 0.10)" stroke="none" />
+                    <line :x1="channelPx.highLine.x1" :y1="channelPx.highLine.y1"
+                          :x2="channelPx.highLine.x2" :y2="channelPx.highLine.y2"
+                          stroke="#06b6d4" stroke-width="1.3" stroke-dasharray="0" />
+                    <line :x1="channelPx.lowLine.x1" :y1="channelPx.lowLine.y1"
+                          :x2="channelPx.lowLine.x2" :y2="channelPx.lowLine.y2"
+                          stroke="#06b6d4" stroke-width="1.3" stroke-dasharray="0" />
+                </svg>
+
+                <!-- 箱体 / 平台 overlay（绝对定位 div，coords 由 timeToCoordinate / priceToCoordinate 算出）
+                     箱体 = indigo（普通震荡），平台 = teal（缩量横盘，更有意义） -->
+                <div v-for="b in rectOverlaysPx" :key="b.key"
+                     class="absolute pointer-events-none z-[5]"
+                     :style="b.type === 'platform' ? {
+                        left:   b.left + 'px',
+                        top:    b.top + 'px',
+                        width:  b.width + 'px',
+                        height: b.height + 'px',
+                        background: 'rgba(13, 148, 136, 0.18)',
+                        borderTop:    '2px solid rgba(13, 148, 136, 0.9)',
+                        borderBottom: '2px solid rgba(13, 148, 136, 0.9)',
+                     } : {
+                        left:   b.left + 'px',
+                        top:    b.top + 'px',
+                        width:  b.width + 'px',
+                        height: b.height + 'px',
+                        background: 'rgba(99, 102, 241, 0.15)',
+                        borderTop:    '1.5px dashed rgba(99, 102, 241, 0.85)',
+                        borderBottom: '1.5px dashed rgba(99, 102, 241, 0.85)',
+                     }">
+                    <span v-if="b.type === 'platform'"
+                          class="absolute top-[2px] left-[3px] text-[10px] text-[#0f766e] font-bold tabular-nums leading-none bg-white/95 px-[3px] py-[1px] rounded-[2px] shadow-sm">
+                        平台 {{ b.bars }}根 · 振幅{{ b.pct.toFixed(1) }}%
+                    </span>
+                    <span v-else
+                          class="absolute top-[2px] left-[3px] text-[10px] text-[#4338ca] font-bold tabular-nums leading-none bg-white/90 px-[3px] py-[1px] rounded-[2px] shadow-sm">
+                        箱 {{ b.pct.toFixed(1) }}%
+                    </span>
+                </div>
 
                 <div v-if="hoverIdx >= 0 && displayData"
                      class="absolute top-[6px] z-[10] pointer-events-none
