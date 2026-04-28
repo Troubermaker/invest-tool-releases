@@ -264,7 +264,7 @@ async function initChart() {
     const { createChart } = await import('lightweight-charts');
     
     chartInstance = createChart(chartContainer.value, {
-        layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#6b7280' },
+        layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#6b7280', attributionLogo: false },
         grid: {
             vertLines: { color: '#f3f4f6', style: 3 }, horzLines: { color: '#f3f4f6', style: 3 },
         },

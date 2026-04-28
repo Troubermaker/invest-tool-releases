@@ -20,7 +20,7 @@ const props = defineProps({
 const emit = defineEmits(['close'])
 
 // ============ State ============
-const TIMEFRAMES = ['分时', '5日', '日K', '周K', '月K', '年K']
+const TIMEFRAMES = ['分时', '日K', '5日', '周K', '月K', '年K']
 const timeframe = ref('日K')
 
 // 默认视窗 bar 数（打开 / 切周期时只显示最近这么多根，更多需手动缩放）
@@ -41,7 +41,7 @@ const allIndicators = [
     { id: 'MACD', label: 'MACD' },
     { id: 'KDJ',  label: 'KDJ'  },
 ]
-const activeIndicators = ref(['MA5', 'MA10', 'MA20', 'MACD'])
+const activeIndicators = ref(['MA5', 'MA10', 'MA20', 'MACD', 'KDJ'])
 
 const klines = ref([])
 const loading = ref(false)
@@ -58,15 +58,21 @@ const overlaySeriesMap = new Map()  // name → seriesObj
 let macdSeries = null  // {dif, dea, hist}
 let kdjSeries  = null  // {k, d, j}
 
-// ============ Hover tooltip ============
-const tooltip = ref({ visible: false, idx: -1, side: 'left' })  // side: 卡片贴向哪一侧
+// ============ Hover 状态 ============
+// hoverIdx：当前十字线对应的索引（-1 表示无 hover，副图 legend 此时回落到最后一根）
+// hoverSide：浮动卡片贴左 / 贴右（避免遮挡 cursor 当前 bar）
+const hoverIdx = ref(-1)
+const hoverSide = ref('left')
 let _lastComputed = null   // { mainOverlays, subPanes }
 let _timeToIdx = new Map() // 时间 → klines 索引
 
-// 当前 hover 数据（按索引取，避免在 crosshair 回调里反复算）
-const tooltipData = computed(() => {
-    if (!tooltip.value.visible) return null
-    const idx = tooltip.value.idx
+const displayIdx = computed(() => {
+    if (!klines.value.length) return -1
+    return hoverIdx.value >= 0 ? hoverIdx.value : klines.value.length - 1
+})
+
+const displayData = computed(() => {
+    const idx = displayIdx.value
     if (idx < 0 || idx >= klines.value.length) return null
     const k = klines.value[idx]
     const prev = idx > 0 ? klines.value[idx - 1] : null
@@ -134,7 +140,8 @@ function formatVol(vol) {
 }
 
 let _resizeObs = null
-let _syncing = false  // 防止递归同步
+let _syncing = false  // 防止 timeScale 递归同步
+let _crosshairSyncing = false  // 防止 crosshair 递归同步
 
 // ============ 数据加载 ============
 async function loadData() {
@@ -203,6 +210,7 @@ async function ensureChart() {
             background: { color: '#fff' },
             textColor: '#475569',
             fontSize: 11,
+            attributionLogo: false,
         },
         grid: {
             vertLines: { color: '#f1f5f9' },
@@ -215,7 +223,7 @@ async function ensureChart() {
             fixRightEdge: true,   // 锁死右边沿：禁止拖到最新 bar 之后留白（金融软件惯例）
             rightOffset: 4,       // 给最新 bar 右侧留 4 根 bar 宽度的呼吸空间
         },
-        rightPriceScale: { borderColor: '#e2e8f0' },
+        rightPriceScale: { borderColor: '#e2e8f0', minimumWidth: 60 },  // 与副图统一刻度宽度，避免多图竖直线错位
         crosshair: { mode: 1 /* magnet */ },
     }
 
@@ -244,23 +252,62 @@ async function ensureChart() {
         _syncing = false
     })
 
-    // 十字线 hover → 更新 tooltip（cursor 在左半屏则卡片贴右，反之贴左，避免遮挡当前 bar）
+    // 十字线 hover → 更新 hoverIdx（副图 legend 跟随）+ hoverSide（浮动卡片左右翻转）+ 竖直线同步到副图
+    // 注意：副图 hover 通过 setCrosshairPosition 反向同步到主图时，param.point 可能 undefined/NaN，
+    //      只用 param.time 判 hoverIdx，side 翻转走单独的有效 point 判断。
     mainChart.subscribeCrosshairMove((param) => {
-        if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
-            if (tooltip.value.visible) tooltip.value = { visible: false, idx: -1, side: 'left' }
-            return
-        }
-        const idx = _timeToIdx.get(param.time)
+        const idx = param.time ? _timeToIdx.get(param.time) : null
         if (idx == null) {
-            if (tooltip.value.visible) tooltip.value = { visible: false, idx: -1, side: 'left' }
+            if (hoverIdx.value !== -1) hoverIdx.value = -1
+            syncCrosshairToSubs(null)
             return
         }
-        const w = mainEl.value?.clientWidth || 0
-        const side = w > 0 && param.point.x < w / 2 ? 'right' : 'left'
-        if (tooltip.value.idx !== idx || !tooltip.value.visible || tooltip.value.side !== side) {
-            tooltip.value = { visible: true, idx, side }
+        if (hoverIdx.value !== idx) hoverIdx.value = idx
+
+        // side 只在真实鼠标 hover 主图时才算（程序化触发的 point 不可信）
+        if (param.point && param.point.x >= 0 && param.point.y >= 0) {
+            const w = mainEl.value?.clientWidth || 0
+            const side = w > 0 && param.point.x < w / 2 ? 'right' : 'left'
+            if (hoverSide.value !== side) hoverSide.value = side
         }
+
+        syncCrosshairToSubs(param.time)
     })
+}
+
+// 主图 ↔ 副图 竖直十字线同步
+function syncCrosshairToSubs(time) {
+    if (_crosshairSyncing) return
+    _crosshairSyncing = true
+    try {
+        if (time != null) {
+            if (macdChart && macdSeries?.dif) macdChart.setCrosshairPosition(0, time, macdSeries.dif)
+            if (kdjChart  && kdjSeries?.k)    kdjChart.setCrosshairPosition(0, time, kdjSeries.k)
+        } else {
+            if (macdChart) macdChart.clearCrosshairPosition()
+            if (kdjChart)  kdjChart.clearCrosshairPosition()
+        }
+    } finally {
+        _crosshairSyncing = false
+    }
+}
+
+function syncCrosshairToMainAndOther(slot, time) {
+    if (_crosshairSyncing) return
+    _crosshairSyncing = true
+    try {
+        if (time != null) {
+            if (mainChart && mainSeries) mainChart.setCrosshairPosition(0, time, mainSeries)
+            if (slot === 'macd' && kdjChart && kdjSeries?.k) kdjChart.setCrosshairPosition(0, time, kdjSeries.k)
+            if (slot === 'kdj'  && macdChart && macdSeries?.dif) macdChart.setCrosshairPosition(0, time, macdSeries.dif)
+        } else {
+            if (mainChart) mainChart.clearCrosshairPosition()
+            if (slot === 'macd' && kdjChart)  kdjChart.clearCrosshairPosition()
+            if (slot === 'kdj'  && macdChart) macdChart.clearCrosshairPosition()
+        }
+    } finally {
+        _crosshairSyncing = false
+    }
 }
 
 async function ensureSubChart(slot /* 'macd' | 'kdj' */) {
@@ -271,7 +318,7 @@ async function ensureSubChart(slot /* 'macd' | 'kdj' */) {
 
     const { createChart } = await import('lightweight-charts')
     const opts = {
-        layout: { background: { color: '#fff' }, textColor: '#475569', fontSize: 10 },
+        layout: { background: { color: '#fff' }, textColor: '#475569', fontSize: 10, attributionLogo: false },
         grid: { vertLines: { color: '#f5f5f5' }, horzLines: { color: '#f5f5f5' } },
         timeScale: {
             borderColor: '#e2e8f0',
@@ -281,8 +328,11 @@ async function ensureSubChart(slot /* 'macd' | 'kdj' */) {
             fixRightEdge: true,
             rightOffset: 4,
         },
-        rightPriceScale: { borderColor: '#e2e8f0' },
-        crosshair: { mode: 1 },
+        rightPriceScale: { borderColor: '#e2e8f0', minimumWidth: 60 },
+        crosshair: {
+            mode: 1,
+            horzLine: { visible: false, labelVisible: false },  // 副图只保留竖直十字线
+        },
         height: el.clientHeight,
         width: el.clientWidth,
     }
@@ -295,6 +345,19 @@ async function ensureSubChart(slot /* 'macd' | 'kdj' */) {
         _syncing = true
         mainChart.timeScale().setVisibleLogicalRange(range)
         _syncing = false
+    })
+
+    // hover 副图时：① 直接更新 hoverIdx（lightweight-charts 的 setCrosshairPosition 不会
+    // 触发回调，所以不能依赖往主图的反向传播）② 把竖直线视觉同步到主图 + 另一个副图
+    chart.subscribeCrosshairMove((param) => {
+        const valid = param.time && param.point && param.point.x >= 0
+        if (valid) {
+            const idx = _timeToIdx.get(param.time)
+            if (idx != null && hoverIdx.value !== idx) hoverIdx.value = idx
+        } else {
+            if (hoverIdx.value !== -1) hoverIdx.value = -1
+        }
+        syncCrosshairToMainAndOther(slot, valid ? param.time : null)
     })
 
     if (slot === 'macd') macdChart = chart
@@ -397,17 +460,17 @@ async function renderAll() {
     const { mainOverlays, subPanes } = computeAll(klines.value, indicators)
     _lastComputed = { mainOverlays, subPanes }
 
-    // 主图 overlay（MA + BOLL）
+    // 主图 overlay（MA + BOLL）—— 预热期用 whitespace（只 time 不带 value），保持时间索引与主序列一致
     for (const ovl of mainOverlays) {
         const series = mainChart.addLineSeries({
             color: ovl.color, lineWidth: 1,
             priceLineVisible: false, lastValueVisible: false,
             crosshairMarkerVisible: false,
         })
-        series.setData(klines.value.map((k, i) => ({
-            time: k.time,
-            value: ovl.values[i] == null ? undefined : ovl.values[i],
-        })).filter(p => p.value !== undefined))
+        series.setData(klines.value.map((k, i) => {
+            const v = ovl.values[i]
+            return v == null ? { time: k.time } : { time: k.time, value: v }
+        }))
         overlaySeriesMap.set(ovl.name, series)
     }
 
@@ -429,6 +492,26 @@ async function renderAll() {
             mainChart.timeScale().fitContent()
         }
     }
+
+    // 等浏览器把所有刻度文本布局完成后再对齐价格刻度宽度（保证三图竖直线连成一根）
+    requestAnimationFrame(equalizePriceScaleWidths)
+}
+
+// 三张 chart 价格刻度宽度对齐：取最大宽度回写为 minimumWidth，避免竖直十字线分段错位
+function equalizePriceScaleWidths() {
+    const charts = [mainChart, macdChart, kdjChart].filter(Boolean)
+    if (charts.length < 2) return
+    let maxW = 0
+    for (const c of charts) {
+        try {
+            const w = c.priceScale('right').width()
+            if (w > maxW) maxW = w
+        } catch {}
+    }
+    if (maxW <= 0) return
+    for (const c of charts) {
+        try { c.priceScale('right').applyOptions({ minimumWidth: maxW }) } catch {}
+    }
 }
 
 async function renderSubPane(slot, paneData) {
@@ -448,32 +531,41 @@ async function renderSubPane(slot, paneData) {
     }
     const newRefs = {}
 
-    // 副图 hist（MACD 才有）
+    // 副图 hist（MACD 才有）—— 预热期用 whitespace；
+    // 4 色配色：动能强化用深色、动能减弱用浅色（参考 TradingView MACD 默认配色，但保留 A 股红涨绿跌）
+    //   v ≥ 0 且 ↑ → 深红（多头加强）        v ≥ 0 且 ↓ → 浅红（多头减弱）
+    //   v <  0 且 ↓ → 深绿（空头加强）        v <  0 且 ↑ → 浅绿（空头减弱）
     if (paneData.histogram) {
         const histSeries = chart.addHistogramSeries({
             priceFormat: { type: 'price', precision: 3, minMove: 0.001 },
             color: '#94a3b8',
         })
-        histSeries.setData(klines.value.map((k, i) => ({
-            time: k.time,
-            value: paneData.histogram.values[i] ?? 0,
-            color: (paneData.histogram.values[i] ?? 0) >= 0
-                ? 'rgba(220,38,38,0.55)' : 'rgba(22,163,74,0.55)',
-        })))
+        const histVals = paneData.histogram.values
+        histSeries.setData(klines.value.map((k, i) => {
+            const v = histVals[i]
+            if (v == null) return { time: k.time }
+            const prev = i > 0 ? histVals[i - 1] : null
+            // 动能加强 = 绝对值在变大（正向时 v ≥ prev，负向时 v ≤ prev）
+            const strong = prev == null ? true : (v >= 0 ? v >= prev : v <= prev)
+            const color = v >= 0
+                ? (strong ? 'rgba(220, 38, 38, 0.90)' : 'rgba(220, 38, 38, 0.28)')
+                : (strong ? 'rgba(22, 163, 74, 0.90)' : 'rgba(22, 163, 74, 0.28)')
+            return { time: k.time, value: v, color }
+        }))
         newRefs.hist = histSeries
     }
 
-    // 副图线条（DIF/DEA 或 KDJ 三条）
+    // 副图线条（DIF/DEA 或 KDJ 三条）—— 预热期用 whitespace，保持时间索引与主图一致
     for (const line of paneData.lines) {
         const series = chart.addLineSeries({
             color: line.color, lineWidth: 1,
             priceLineVisible: false, lastValueVisible: true,
             crosshairMarkerVisible: false,
         })
-        series.setData(klines.value.map((k, i) => ({
-            time: k.time,
-            value: line.values[i] == null ? undefined : line.values[i],
-        })).filter(p => p.value !== undefined))
+        series.setData(klines.value.map((k, i) => {
+            const v = line.values[i]
+            return v == null ? { time: k.time } : { time: k.time, value: v }
+        }))
         newRefs[line.name.toLowerCase()] = series
     }
 
@@ -568,114 +660,120 @@ onUnmounted(() => {
                 {{ errMsg }}
             </div>
 
-            <!-- 主图 + 浮动 tooltip -->
+            <!-- 主图 + hover 浮动卡片（仅 hover 时出现；MACD/KDJ 已挪到各自副图 legend，这里不展示）-->
             <div class="relative bg-white" :style="{ height: mainChartHeight }">
                 <div ref="mainEl" class="w-full h-full"></div>
 
-                <!-- Hover tooltip 卡片（贴左上 / 右上自动切换，永远在 cursor 反侧避免遮挡）-->
-                <div v-if="tooltipData"
+                <div v-if="hoverIdx >= 0 && displayData"
                      class="absolute top-[6px] z-[10] pointer-events-none
                             bg-white/95 backdrop-blur-[2px] border border-[#e5e7eb] rounded-[5px]
                             shadow-[0_2px_8px_rgba(0,0,0,0.08)]
                             px-[10px] py-[7px] text-[11px] tabular-nums font-mono leading-[1.5] min-w-[170px]"
-                     :style="tooltip.side === 'right' ? { right: '10px' } : { left: '10px' }">
-                    <!-- 时间标题 -->
+                     :style="hoverSide === 'right' ? { right: '10px' } : { left: '10px' }">
                     <div class="font-bold text-[#111] mb-[4px] pb-[3px] border-b border-[#f1f5f9]">
-                        {{ formatHoverTime(tooltipData.k.time) }}
+                        {{ formatHoverTime(displayData.k.time) }}
                     </div>
 
-                    <!-- 蜡烛模式：开/高/低/收 + 涨跌 + 振幅 + 量额 -->
+                    <!-- 蜡烛模式 -->
                     <template v-if="!isLineMode">
                         <div class="flex flex-col gap-y-[2px] text-[#475569]">
                             <div class="flex justify-between gap-3"><span>开盘</span>
-                                <span :class="tooltipData.k.close >= tooltipData.k.open ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+tooltipData.k.open).toFixed(2) }}</span>
+                                <span :class="displayData.k.close >= displayData.k.open ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+displayData.k.open).toFixed(2) }}</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>最高</span>
-                                <span :class="tooltipData.k.close >= tooltipData.k.open ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+tooltipData.k.high).toFixed(2) }}</span>
+                                <span :class="displayData.k.close >= displayData.k.open ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+displayData.k.high).toFixed(2) }}</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>最低</span>
-                                <span :class="tooltipData.k.close >= tooltipData.k.open ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+tooltipData.k.low).toFixed(2) }}</span>
+                                <span :class="displayData.k.close >= displayData.k.open ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+displayData.k.low).toFixed(2) }}</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>收盘</span>
-                                <span class="font-semibold" :class="tooltipData.k.close >= tooltipData.k.open ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+tooltipData.k.close).toFixed(2) }}</span>
+                                <span class="font-semibold" :class="displayData.k.close >= displayData.k.open ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+displayData.k.close).toFixed(2) }}</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>涨跌</span>
-                                <span :class="tooltipData.chg >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ tooltipData.chg >= 0 ? '+' : '' }}{{ tooltipData.chg.toFixed(2) }}</span>
+                                <span :class="displayData.chg >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ displayData.chg >= 0 ? '+' : '' }}{{ displayData.chg.toFixed(2) }}</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>涨幅</span>
-                                <span :class="tooltipData.pct >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ tooltipData.pct >= 0 ? '+' : '' }}{{ tooltipData.pct.toFixed(2) }}%</span>
+                                <span :class="displayData.pct >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ displayData.pct >= 0 ? '+' : '' }}{{ displayData.pct.toFixed(2) }}%</span>
                             </div>
-                            <div v-if="tooltipData.k.amp != null" class="flex justify-between gap-3"><span>振幅</span>
-                                <span class="text-[#111]">{{ (+tooltipData.k.amp).toFixed(2) }}%</span>
+                            <div v-if="displayData.k.amp != null" class="flex justify-between gap-3"><span>振幅</span>
+                                <span class="text-[#111]">{{ (+displayData.k.amp).toFixed(2) }}%</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>成交额</span>
-                                <span class="text-[#475569]">{{ formatAmtText(tooltipData.k.amt) }}</span>
+                                <span class="text-[#475569]">{{ formatAmtText(displayData.k.amt) }}</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>成交量</span>
-                                <span class="text-[#475569]">{{ formatVol(tooltipData.k.vol) }}</span>
+                                <span class="text-[#475569]">{{ formatVol(displayData.k.vol) }}</span>
                             </div>
                         </div>
 
-                        <!-- 主图叠加（MA / BOLL）-->
-                        <div v-if="tooltipData.overlays.length"
+                        <!-- 主图叠加（MA / BOLL）—— MACD/KDJ 已挪到各自副图 legend，不在卡片中显示 -->
+                        <div v-if="displayData.overlays.length"
                              class="mt-[4px] pt-[4px] border-t border-[#f1f5f9] flex flex-col gap-y-[2px]">
-                            <div v-for="ovl in tooltipData.overlays" :key="ovl.name"
+                            <div v-for="ovl in displayData.overlays" :key="ovl.name"
                                  class="flex justify-between gap-3">
                                 <span :style="{ color: ovl.color }">{{ ovl.name }}</span>
                                 <span :style="{ color: ovl.color }" class="font-semibold">{{ ovl.value.toFixed(2) }}</span>
                             </div>
                         </div>
-
-                        <!-- 副图（MACD / KDJ）-->
-                        <div v-if="tooltipData.subs.length"
-                             class="mt-[4px] pt-[4px] border-t border-[#f1f5f9] flex flex-col gap-y-[2px]">
-                            <div v-for="s in tooltipData.subs" :key="s.pane + s.name"
-                                 class="flex justify-between gap-3">
-                                <span :style="{ color: s.color }">{{ s.pane }}.{{ s.name }}</span>
-                                <span :style="{ color: s.color }" class="font-semibold">{{ s.value.toFixed(s.pane === 'MACD' ? 3 : 2) }}</span>
-                            </div>
-                        </div>
                     </template>
 
-                    <!-- 分时/5日 模式 -->
+                    <!-- 分时/5日 -->
                     <template v-else>
                         <div class="flex flex-col gap-y-[2px] text-[#475569]">
                             <div class="flex justify-between gap-3"><span>现价</span>
-                                <span class="font-semibold" :class="tooltipData.chg >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+(tooltipData.k.value ?? tooltipData.k.close)).toFixed(2) }}</span>
+                                <span class="font-semibold" :class="displayData.chg >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ (+(displayData.k.value ?? displayData.k.close)).toFixed(2) }}</span>
                             </div>
-                            <div v-if="tooltipData.avg != null" class="flex justify-between gap-3"><span>均价</span>
-                                <span class="font-semibold text-[#f59e0b]">{{ tooltipData.avg.toFixed(2) }}</span>
+                            <div v-if="displayData.avg != null" class="flex justify-between gap-3"><span>均价</span>
+                                <span class="font-semibold text-[#f59e0b]">{{ displayData.avg.toFixed(2) }}</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>涨跌</span>
-                                <span :class="tooltipData.chg >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ tooltipData.chg >= 0 ? '+' : '' }}{{ tooltipData.chg.toFixed(2) }}</span>
+                                <span :class="displayData.chg >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ displayData.chg >= 0 ? '+' : '' }}{{ displayData.chg.toFixed(2) }}</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>涨幅</span>
-                                <span :class="tooltipData.pct >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ tooltipData.pct >= 0 ? '+' : '' }}{{ tooltipData.pct.toFixed(2) }}%</span>
+                                <span :class="displayData.pct >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">{{ displayData.pct >= 0 ? '+' : '' }}{{ displayData.pct.toFixed(2) }}%</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>成交额</span>
-                                <span class="text-[#475569]">{{ formatAmtText(tooltipData.k.amt) }}</span>
+                                <span class="text-[#475569]">{{ formatAmtText(displayData.k.amt) }}</span>
                             </div>
                             <div class="flex justify-between gap-3"><span>成交量</span>
-                                <span class="text-[#475569]">{{ formatVol(tooltipData.k.vol) }}</span>
+                                <span class="text-[#475569]">{{ formatVol(displayData.k.vol) }}</span>
                             </div>
                         </div>
                     </template>
                 </div>
             </div>
 
-            <!-- MACD 副图 -->
+            <!-- MACD 副图 + 行内 legend -->
             <div v-if="showMacd" class="border-t border-[#e5e7eb] relative">
-                <span class="absolute top-[4px] left-[8px] text-[10px] text-[#666] font-semibold pointer-events-none z-[1]">
-                    MACD (12,26,9)
-                </span>
+                <div class="absolute top-[3px] left-[10px] z-[10] pointer-events-none
+                            text-[10px] tabular-nums font-mono leading-[1.4]
+                            flex flex-wrap items-center gap-x-[8px]
+                            bg-white/85 backdrop-blur-[1px] px-[4px] py-[1px] rounded-[3px]">
+                    <span class="text-[#666] font-semibold">MACD (12, 26, 9)</span>
+                    <template v-if="displayData">
+                        <span v-for="s in displayData.subs.filter(x => x.pane === 'MACD')" :key="s.name"
+                              :style="{ color: s.color }" class="font-semibold">
+                            {{ s.name }} {{ s.value.toFixed(3) }}
+                        </span>
+                    </template>
+                </div>
                 <div ref="macdEl" class="w-full" style="height: 110px"></div>
             </div>
 
-            <!-- KDJ 副图 -->
+            <!-- KDJ 副图 + 行内 legend -->
             <div v-if="showKdj" class="border-t border-[#e5e7eb] relative">
-                <span class="absolute top-[4px] left-[8px] text-[10px] text-[#666] font-semibold pointer-events-none z-[1]">
-                    KDJ (9,3,3)
-                </span>
+                <div class="absolute top-[3px] left-[10px] z-[10] pointer-events-none
+                            text-[10px] tabular-nums font-mono leading-[1.4]
+                            flex flex-wrap items-center gap-x-[8px]
+                            bg-white/85 backdrop-blur-[1px] px-[4px] py-[1px] rounded-[3px]">
+                    <span class="text-[#666] font-semibold">KDJ (9, 3, 3)</span>
+                    <template v-if="displayData">
+                        <span v-for="s in displayData.subs.filter(x => x.pane === 'KDJ')" :key="s.name"
+                              :style="{ color: s.color }" class="font-semibold">
+                            {{ s.name }} {{ s.value.toFixed(2) }}
+                        </span>
+                    </template>
+                </div>
                 <div ref="kdjEl" class="w-full" style="height: 110px"></div>
             </div>
         </div>
