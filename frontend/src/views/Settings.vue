@@ -9,12 +9,26 @@ const checkingUpdate = ref(false)
 const updateCheckMsg = ref('')      // 检查后的反馈
 let _updateCheckMsgTimer = null
 
+// 桌面通知开关（默认 false，仅应用内 toast）
+const desktopNotifyEnabled = ref(false)
+const DESKTOP_NOTIFY_PREF_KEY = 'alerts.desktop_notification'
+
 async function loadAppInfo() {
     const res = await api.getAppVersion()
     if (res.ok && res.data) {
         appVersion.value = res.data.version
         dataDir.value = res.data.data_dir
     }
+    // 顺便加载通知偏好
+    const pref = await api.getUserPreference(DESKTOP_NOTIFY_PREF_KEY, false)
+    if (pref.ok && typeof pref.data === 'boolean') {
+        desktopNotifyEnabled.value = pref.data
+    }
+}
+
+async function handleToggleDesktopNotify() {
+    // v-model 已经更新了 desktopNotifyEnabled.value，这里只持久化
+    await api.setUserPreference(DESKTOP_NOTIFY_PREF_KEY, desktopNotifyEnabled.value)
 }
 
 async function handleOpenDataDir() {
@@ -391,6 +405,22 @@ function confirmCancel() {
                        @click="handleResetDataDir">恢复默认</a>
                 </div>
             </div>
+
+            <!-- 通知偏好行 -->
+            <div class="px-[14px] pb-[10px] -mt-[4px] flex items-center gap-[14px] flex-wrap">
+                <span class="text-[11px] text-[#666] shrink-0">价格警报</span>
+                <label class="flex items-center gap-[6px] cursor-pointer select-none">
+                    <input type="checkbox"
+                           v-model="desktopNotifyEnabled"
+                           @change="handleToggleDesktopNotify"
+                           class="accent-[#dc2626] cursor-pointer">
+                    <span class="text-[11px] text-[#333]">桌面通知（Windows Toast）</span>
+                </label>
+                <span class="text-[10px] text-[#aaa]">
+                    应用内永远开启（右下角弹 toast）；桌面 Toast 默认关，避免抢焦点
+                </span>
+            </div>
+
             <!-- 反馈消息：检查更新结果（如有）-->
             <div v-if="updateCheckMsg"
                  class="px-[14px] pb-[8px] -mt-[4px] text-[11px]"

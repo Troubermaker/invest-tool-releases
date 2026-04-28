@@ -50,10 +50,13 @@ def get_hot_sectors(date=None, force=False):
     return _get_from_kpl_historical(date, force)
 
 
-def _parse_kpl_list(lst):
-    """KPL 板块榜 list 字段解析。实时和历史返回结构一致，复用。"""
+def _parse_kpl_list(lst, limit=TOP_N):
+    """KPL 板块榜 list 字段解析。实时和历史返回结构一致，复用。
+    Args:
+        limit: 取前 N 条，默认 TOP_N（20）；热力图等场景可传更大值（如 80）
+    """
     results = []
-    for i, item in enumerate(lst[:TOP_N]):
+    for i, item in enumerate(lst[:limit]):
         if not isinstance(item, list) or len(item) < 7:
             continue
         # 字段索引：[代码, 名称, 强度, 涨跌幅%, 领涨股涨幅%, 成交额, 主力净流入...]
@@ -78,9 +81,12 @@ def _parse_kpl_list(lst):
 
 # ---------------- KPL 主源（实时）---------------- #
 
-def _get_from_kpl(force=False):
+def _get_from_kpl(force=False, limit=TOP_N):
+    """实时拉 KPL 精选板块榜。
+    limit > TOP_N 时单独缓存，避免覆盖小列表。"""
+    cache_key = KPL_CACHE_KEY if limit == TOP_N else f"{KPL_CACHE_KEY}_l{limit}"
     if not force:
-        cached, updated_at = db.get_cache(KPL_CACHE_KEY)
+        cached, updated_at = db.get_cache(cache_key)
         if cached and not db.is_market_cache_stale(updated_at, trading_ttl=15):
             return cached
 
@@ -89,11 +95,24 @@ def _get_from_kpl(force=False):
     if not lst:
         raise RuntimeError("KPL 精选板块返回空 list")
 
-    results = _parse_kpl_list(lst)
+    results = _parse_kpl_list(lst, limit=limit)
     if not results:
         raise RuntimeError("KPL 精选板块解析后 0 条")
-    db.set_cache(KPL_CACHE_KEY, results)
+    db.set_cache(cache_key, results)
     return results
+
+
+def get_all_sectors(force=False, limit=80):
+    """
+    返回更多板块（默认 80 个）—— 给热力图等需要广覆盖的场景用。
+    跟 get_hot_sectors 共用同一个上游接口，但分开缓存避免互相覆盖。
+    历史日期暂不支持（热力图本就是当下状态）。
+    """
+    try:
+        return _get_from_kpl(force=force, limit=limit)
+    except Exception as e:
+        logger.warning(f"KPL 全量板块失败: {e}")
+        return []
 
 
 # ---------------- KPL 历史（apphis）---------------- #

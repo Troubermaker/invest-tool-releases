@@ -5,6 +5,8 @@ import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
 import RefreshCountdown from '../components/RefreshCountdown.vue'
 import LastRefreshLabel from '../components/LastRefreshLabel.vue'
+import SectorHeatmap from '../components/SectorHeatmap.vue'
+import { openStockChart } from '../composables/useStockChart'
 
 const emit = defineEmits(['openAI'])
 
@@ -12,6 +14,7 @@ const emit = defineEmits(['openAI'])
 // 加新 tab 只需要：① 在 ALL_SUB_TABS 里加一项 ② 模板里加 v-if 分支
 const ALL_SUB_TABS = [
     { id: 'main',    name: '行情页面' },
+    { id: 'heatmap', name: '板块热力图' },
     { id: 'hotlist', name: '同花顺热榜' },
     { id: 'news',    name: '快讯' },
     { id: 'pools',   name: '涨跌对比' },
@@ -266,10 +269,12 @@ async function initChart() {
             vertLines: { color: '#f3f4f6', style: 3 }, horzLines: { color: '#f3f4f6', style: 3 },
         },
         rightPriceScale: { borderColor: '#e5e7eb' },
-        timeScale: { 
+        timeScale: {
             borderColor: '#e5e7eb',
             timeVisible: true,
             secondsVisible: false,
+            fixRightEdge: true,   // 锁右边沿：禁止拖到最新 bar 之后留白
+            rightOffset: 4,       // 最新 bar 右侧留 4 根 bar 宽度
         },
     });
 
@@ -507,7 +512,19 @@ async function renderChartData() {
         currentVolumeSeries.setData(volData);
     }
     
-    chartInstance.timeScale().fitContent();
+    // 默认视窗：蜡烛模式只显示最近 N 根，剩下的可手动拖看
+    const DEFAULT_VISIBLE_BARS = { '日K': 200, '周K': 52, '月K': 36, '年K': 20 }  // 日K ≈ 10 个月
+    const isLineMode = activeTimeframe.value === '分时' || activeTimeframe.value === '5日'
+    const total = klineData.length
+    const defaultBars = DEFAULT_VISIBLE_BARS[activeTimeframe.value]
+    if (!isLineMode && defaultBars && total > defaultBars) {
+        chartInstance.timeScale().setVisibleLogicalRange({
+            from: total - defaultBars,
+            to:   total - 0.5,
+        })
+    } else {
+        chartInstance.timeScale().fitContent()
+    }
 }
 
 // 指数 + 板块榜：基础 15s（用户可在 RefreshCountdown 改）
@@ -520,6 +537,7 @@ const {
 } = useSmartRefresh(api.getMarketData, {
     baseInterval: 15_000,
     prefKey: 'refresh.market_data',
+    snapshotKey: 'market_data',
     onData: (data) => {
         marketIndices.value = data.indices
         totalTurnover.value = data.total_turnover
@@ -542,6 +560,7 @@ const {
 } = useSmartRefresh(api.getLimitUpLadder, {
     baseInterval: 30_000,
     prefKey: 'refresh.limit_up_ladder',
+    snapshotKey: 'limit_up_ladder',
     onData: (data) => { ladderTiersRaw.value = data || [] },
     onError: (err) => console.error("连板天梯拉取失败:", err),
 })
@@ -567,9 +586,52 @@ const {
 } = useSmartRefresh(api.getMarketSentiment, {
     baseInterval: 15_000,
     prefKey: 'refresh.market_sentiment',
+    snapshotKey: 'market_sentiment',
     onData: (data) => { marketSentiment.value = data },
     onError: (err) => console.error("市场情绪拉取失败:", err),
 })
+
+// ---------------- 板块热力图 ----------------
+// 后端返 60-80 个板块，treemap 比"精选板块榜"覆盖广得多
+const heatmapSectors = ref([])
+const heatmapSizeBy = ref('strength')   // 'strength' | 'absChange' | 'absInflow'
+const HEATMAP_SIZE_PREF_KEY = 'heatmap.size_by'
+
+const {
+    secondsUntilNext: heatmapCountdown,
+    currentInterval:  heatmapInterval,
+    setRefreshInterval: setHeatmapInterval,
+    refresh: refreshHeatmap,
+    lastRefreshAt: heatmapLastAt,
+} = useSmartRefresh(
+    () => api.getAllSectors(80),
+    {
+        baseInterval: 30_000,
+        prefKey: 'refresh.heatmap',
+        snapshotKey: 'heatmap_sectors',
+        onData: (data) => { heatmapSectors.value = data || [] },
+    }
+)
+
+// 加载 sizeBy 偏好
+onMounted(async () => {
+    const r = await api.getUserPreference(HEATMAP_SIZE_PREF_KEY, 'strength')
+    if (r.ok && typeof r.data === 'string') heatmapSizeBy.value = r.data
+})
+watch(heatmapSizeBy, async (v) => {
+    await api.setUserPreference(HEATMAP_SIZE_PREF_KEY, v)
+})
+
+// 点热力图方块 → 跳到主行情 tab + 选中该板块（如果在 hotSectors 里）
+function handleHeatmapSelect(sector) {
+    activeTab.value = 'main'
+    // 如果该板块在主行情的精选板块里，直接选中；否则忽略
+    const matched = hotSectors.value.find(s => s.code === sector.code)
+    if (matched) {
+        selectedSector.value = matched
+        loadSectorStocks(matched.code)
+    }
+}
 
 // ---------------- 同花顺热榜 ----------------
 const hotListPeriod = ref('hour')        // 'hour' | 'day'
@@ -614,6 +676,7 @@ const {
         baseInterval: 60_000,
         prefKey: 'refresh.ths_hot_list',
         ignoreMarketHours: true,
+        snapshotKey: 'ths_hot_list',
         onData: (data) => { hotListData.value = data || [] },
     }
 )
@@ -653,6 +716,8 @@ const {
         baseInterval: 60_000,
         prefKey: 'refresh.fast_news',
         ignoreMarketHours: true,
+        // 不做快照：news 有 ths/em 两个源，单 key 会导致跨源闪现旧数据；
+        // 而且 news 用 feed 风格，空白几百毫秒可接受
         onData: (data) => {
             newsData.value = data || []
             // 首次填充 / 用户已经在看快讯 → 直接标记为已读
@@ -1050,7 +1115,9 @@ onUnmounted(() => {
                         <tr
                             v-for="stock in filteredStocks"
                             :key="stock.code"
-                            class="border-b border-[#f5f5f5] hover:bg-[#f2f8fc] transition-colors group cursor-default"
+                            @dblclick="openStockChart(stock.code, stock.name)"
+                            :title="'双击查看 K 线'"
+                            class="border-b border-[#f5f5f5] hover:bg-[#f2f8fc] transition-colors group cursor-pointer"
                         >
                             <td class="px-[12px] py-[10px] text-[12px] text-[#666] font-mono align-top">{{ stock.code }}</td>
                             <td class="px-[12px] py-[10px] align-top">
@@ -1175,7 +1242,9 @@ onUnmounted(() => {
                 <!-- 股票行：2 列栅格，每格内 2 行（name / concept badge）-->
                 <div class="grid grid-cols-2">
                     <div v-for="(stock, idx) in tier.stocks" :key="stock.code"
-                         class="flex flex-col gap-[3px] pl-[14px] pr-[8px] py-[6px] cursor-default transition-colors min-w-0 border-b border-[#f5f5f5] hover:bg-[#fff5f5]"
+                         @dblclick="openStockChart(stock.code, stock.name)"
+                         :title="'双击查看 K 线'"
+                         class="flex flex-col gap-[3px] pl-[14px] pr-[8px] py-[6px] cursor-pointer transition-colors min-w-0 border-b border-[#f5f5f5] hover:bg-[#fff5f5]"
                          :class="{ 'border-l border-[#f5f5f5]': idx % 2 === 1 }">
                         <!-- 第一行：代码 + 名字 -->
                         <div class="flex items-center gap-[8px] min-w-0">
@@ -1197,6 +1266,67 @@ onUnmounted(() => {
 
     </template>
     <!-- /行情页面 -->
+
+    <!-- ============ 板块热力图 ============ -->
+    <div v-else-if="activeTab === 'heatmap'" class="flex-1 flex flex-col overflow-hidden bg-white">
+        <!-- 工具栏：sizeBy 切换 + 计数 + 时间戳 + 倒计时 -->
+        <div class="h-[44px] px-[14px] border-b border-[#f0f0f0] flex items-center justify-between bg-white shrink-0">
+            <div class="flex items-center gap-[12px]">
+                <div class="flex bg-[#f5f5f5] rounded-[4px] p-[2px]">
+                    <button @click="heatmapSizeBy = 'strength'"
+                            class="text-[12px] px-[10px] py-[4px] rounded-[3px] font-semibold transition"
+                            :class="heatmapSizeBy === 'strength' ? 'bg-white text-[#dc2626] shadow-sm' : 'text-[#666] hover:text-[#111]'">
+                        按强度
+                    </button>
+                    <button @click="heatmapSizeBy = 'absInflow'"
+                            class="text-[12px] px-[10px] py-[4px] rounded-[3px] font-semibold transition"
+                            :class="heatmapSizeBy === 'absInflow' ? 'bg-white text-[#dc2626] shadow-sm' : 'text-[#666] hover:text-[#111]'">
+                        按资金净流入
+                    </button>
+                    <button @click="heatmapSizeBy = 'absChange'"
+                            class="text-[12px] px-[10px] py-[4px] rounded-[3px] font-semibold transition"
+                            :class="heatmapSizeBy === 'absChange' ? 'bg-white text-[#dc2626] shadow-sm' : 'text-[#666] hover:text-[#111]'">
+                        按涨跌幅
+                    </button>
+                </div>
+                <span class="text-[10px] text-[#999]">方块大小 = 当前选中维度；颜色 = 涨跌幅（红涨绿跌）</span>
+            </div>
+            <div class="flex items-center gap-[10px]">
+                <span class="text-[11px] text-[#999]">{{ heatmapSectors.length }} 个</span>
+                <LastRefreshLabel :timestamp="heatmapLastAt" />
+                <RefreshCountdown :seconds="heatmapCountdown"
+                                  :current-interval="heatmapInterval"
+                                  @pick="setHeatmapInterval"
+                                  @refresh-now="refreshHeatmap" />
+            </div>
+        </div>
+
+        <!-- 主图区域 -->
+        <div class="flex-1 relative bg-[#fafafa] p-[6px]">
+            <div v-if="!heatmapSectors.length"
+                 class="absolute inset-0 flex items-center justify-center text-[#bbb] text-[13px]">
+                加载板块数据中...
+            </div>
+            <SectorHeatmap v-else
+                           :sectors="heatmapSectors"
+                           :size-by="heatmapSizeBy"
+                           @select-sector="handleHeatmapSelect" />
+        </div>
+
+        <!-- 图例：颜色档位说明 -->
+        <div class="h-[34px] px-[14px] border-t border-[#f0f0f0] flex items-center gap-[8px] bg-white shrink-0 text-[10px]">
+            <span class="text-[#666] mr-[2px]">涨跌幅：</span>
+            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#7f1d1d"></span> ≥+5%</span>
+            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#dc2626"></span> +1~5%</span>
+            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#ef4444"></span> 0~+1%</span>
+            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#9ca3af"></span> 0</span>
+            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#86efac"></span> -1~0%</span>
+            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#22c55e"></span> -3~-1%</span>
+            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#15803d"></span> -5~-3%</span>
+            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#064e3b"></span> ≤-5%</span>
+            <span class="ml-auto text-[#aaa]">点击方块跳转主行情该板块（如有联动股）</span>
+        </div>
+    </div>
 
     <!-- ============ 同花顺热榜 ============ -->
     <div v-else-if="activeTab === 'hotlist'" class="flex-1 flex flex-col overflow-hidden bg-white">
@@ -1270,7 +1400,9 @@ onUnmounted(() => {
                         <td colspan="7" class="py-[60px] text-center text-[#aaa] text-[13px]">暂无热榜数据</td>
                     </tr>
                     <tr v-for="s in hotListData" :key="s.code"
-                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors">
+                        @dblclick="openStockChart(s.code, s.name)"
+                        :title="'双击查看 K 线'"
+                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors cursor-pointer">
                         <td class="px-[14px] py-[8px] text-center">
                             <span class="inline-flex items-center justify-center w-[26px] h-[26px] rounded-[4px] text-[12px] font-bold tabular-nums"
                                   :class="s.rank <= 3
@@ -1477,7 +1609,9 @@ onUnmounted(() => {
                         </td>
                     </tr>
                     <tr v-for="s in filteredPoolStocks" :key="s.code"
-                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors">
+                        @dblclick="openStockChart(s.code, s.name)"
+                        :title="'双击查看 K 线'"
+                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors cursor-pointer">
                         <!-- 股票（名字大字 + 代码小字，垂直堆叠，跟热榜一致）-->
                         <td class="px-[14px] py-[8px]">
                             <div class="text-[14px] font-bold text-[#111] leading-tight truncate max-w-[140px]">{{ s.name }}</div>

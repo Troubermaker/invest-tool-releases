@@ -27,6 +27,7 @@ from services import (
     sector_stocks_service,
     limit_up_ladder_service,
     market_sentiment_service,
+    alert_service,
 )
 
 # 关键缓存 key：启动预热时检测哪些需要补
@@ -90,6 +91,26 @@ def job_eod_snapshot():
     _run_full_fetch("EOD snapshot")
 
 
+def job_alert_check():
+    """
+    周期性检查价格警报。盘外不调用上游接口（quote_service 缓存挡住），
+    所以这个 job 即便每 30s 跑也不打 EM。
+    """
+    now = datetime.now()
+    if not db.is_trading_day(now.date()):
+        return
+    t = now.time()
+    in_session = (dtime(9, 30) <= t <= dtime(11, 35)) or (dtime(13, 0) <= t <= dtime(15, 0))
+    if not in_session:
+        return
+    try:
+        n = alert_service.check_alerts()
+        if n > 0:
+            _log(f"价格警报触发 {n} 条")
+    except Exception as e:
+        _log(f"警报检查异常: {e}")
+
+
 def warm_cache_on_startup_async():
     """
     启动时按需预热缓存（在后台线程跑，不阻塞窗口启动）。
@@ -134,10 +155,12 @@ def _warm_cache_check_and_fire():
 def run_scheduler():
     # 15:05 给 A 股收盘预留 5 分钟，确保数据落盘
     schedule.every().day.at("15:05").do(job_eod_snapshot)
-    _log("Started background daemon. EOD snapshot scheduled at 15:05 on weekdays.")
+    # 价格警报：每 30s 检查一次，job 内部判断是否在交易时段
+    schedule.every(30).seconds.do(job_alert_check)
+    _log("Started: EOD snapshot @15:05；价格警报检查每 30s")
     while True:
         schedule.run_pending()
-        time.sleep(60)  # 分钟粒度轮询
+        time.sleep(5)  # 5s 轮询，让 30s alert check 触发足够准
 
 
 def start_background_daemon():

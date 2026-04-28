@@ -40,6 +40,7 @@ from services import news_service
 from services import limit_pool_service
 from services import license_service
 from services import update_service
+from services import alert_service
 import ai_service
 
 
@@ -311,12 +312,23 @@ class Api:
 
     @api_endpoint
     def get_kline(self, name, timeframe):
+        """指数 K 线（按显示名查找）。"""
         return kline_service.get_kline(name, timeframe)
+
+    @api_endpoint
+    def get_stock_kline(self, code, timeframe):
+        """个股 K 线（任意 6 位代码）。timeframe: 分时/5日/日K/周K/月K/年K"""
+        return kline_service.get_stock_kline(code, timeframe)
 
     @api_endpoint
     def get_sector_stocks(self, plate_id, date=None):
         """根据 KPL 板块 ID 返回该板块精选联动股票列表。date 历史日期 'YYYY-MM-DD'。"""
         return sector_stocks_service.get_sector_stocks(plate_id, date=date)
+
+    @api_endpoint
+    def get_all_sectors(self, limit=80):
+        """全量板块榜（前 N 个，默认 80），给热力图用。"""
+        return sector_service.get_all_sectors(limit=limit)
 
     @api_endpoint
     def get_limit_up_ladder(self, date=None):
@@ -414,6 +426,32 @@ class Api:
         watchlist_service.update_stock(group_id, code, name=name, added_price=added_price,
                                         remark=remark, added_at=added_at)
         return {"ok": True}
+
+    # ---------- 价格警报 ----------
+    @api_endpoint
+    def set_stock_alert(self, code, above=None, below=None):
+        """设警报。above/below 至少传一个；都传 None 等同清除。"""
+        return alert_service.set_alert(code, above=above, below=below)
+
+    @api_endpoint
+    def clear_stock_alert(self, code):
+        """清除某只股的警报。"""
+        return alert_service.clear_alert(code)
+
+    @api_endpoint
+    def get_stock_alert(self, code):
+        """读单只股的当前警报阈值。返回 None / {alert_above, alert_below}"""
+        return alert_service.get_alert(code)
+
+    @api_endpoint
+    def get_pending_alerts(self, limit=20):
+        """前端轮询：获取未展示过的触发记录（按时间倒序）"""
+        return alert_service.get_pending_alerts(limit=limit)
+
+    @api_endpoint
+    def ack_alerts(self, ids):
+        """前端展示完成后调，标记为已展示。"""
+        return alert_service.ack_alerts(ids or [])
 
     @api_endpoint
     def search_stocks(self, query, limit=20):

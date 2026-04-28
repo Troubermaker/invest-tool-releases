@@ -46,6 +46,8 @@ def get_all_stocks_deduped():
                MIN(s.added_price) AS added_price,
                MIN(s.added_at) AS added_at,
                MIN(s.remark) AS remark,
+               MAX(s.alert_above) AS alert_above,
+               MIN(s.alert_below) AS alert_below,
                GROUP_CONCAT(g.name, '|') AS group_names
         FROM watchlist_stocks s
         JOIN watchlist_groups g ON g.id = s.group_id
@@ -127,7 +129,8 @@ def get_group_stocks(group_id):
     conn = db.get_db()
     c = conn.cursor()
     c.execute('''
-        SELECT id, group_id, code, name, added_price, remark, sort_order, added_at
+        SELECT id, group_id, code, name, added_price, remark, sort_order, added_at,
+               alert_above, alert_below
         FROM watchlist_stocks
         WHERE group_id = ?
         ORDER BY sort_order ASC, id ASC

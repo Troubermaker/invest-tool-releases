@@ -5,3 +5,4 @@ openai
 pyinstaller
 chinese_calendar
 keyboard
+plyer

@@ -71,11 +71,17 @@ export const api = {
   /** 首页概览。date='YYYY-MM-DD' 时返回历史数据（indices 会变成 null，前端需隐藏指数面板）*/
   getMarketData: (date = null) => call('get_market_data', date),
 
-  /** K 线 / 分时。timeframe: '分时'|'5日'|'日K'|'周K'|'月K'|'年K' */
+  /** 指数 K 线 / 分时。timeframe: '分时'|'5日'|'日K'|'周K'|'月K'|'年K' */
   getKline: (name, timeframe) => call('get_kline', name, timeframe),
+
+  /** 个股 K 线 / 分时。code = 6 位股票代码 */
+  getStockKline: (code, timeframe) => call('get_stock_kline', code, timeframe),
 
   /** 板块联动个股。plateId: KPL 板块代码；date='YYYY-MM-DD' 切历史 */
   getSectorStocks: (plateId, date = null) => call('get_sector_stocks', plateId, date),
+
+  /** 全量板块榜（默认 80 个），热力图用 */
+  getAllSectors: (limit = 80) => call('get_all_sectors', limit),
 
   /** 连板天梯。date='YYYY-MM-DD' 切历史。返全量数据，ST 由前端按需过滤显示 */
   getLimitUpLadder: (date = null) => call('get_limit_up_ladder', date),
@@ -169,6 +175,18 @@ export const api = {
   removeWatchlistStock: (groupId, code) => call('remove_watchlist_stock', groupId, code),
   /** 重排分组内股票，参数 [code1, code2, ...] */
   reorderWatchlistStocks: (groupId, orderedCodes) => call('reorder_watchlist_stocks', groupId, orderedCodes),
+
+  // -------- 价格警报 --------
+  /** 设警报。above/below 至少一个非空；都传 null 等于清除 */
+  setStockAlert: (code, above = null, below = null) => call('set_stock_alert', code, above, below),
+  /** 清警报（等同 setStockAlert(code, null, null)） */
+  clearStockAlert: (code) => call('clear_stock_alert', code),
+  /** 读警报阈值。返回 null 或 {alert_above, alert_below} */
+  getStockAlert: (code) => call('get_stock_alert', code),
+  /** 轮询：拿未展示过的触发记录 */
+  getPendingAlerts: (limit = 20) => call('get_pending_alerts', limit),
+  /** 标记 ack（前端展示后调）*/
+  ackAlerts: (ids) => call('ack_alerts', ids || []),
 
   // -------- 持仓 Portfolio --------
   /** 所有持仓账户（按顺序，含 count）*/

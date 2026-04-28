@@ -12,7 +12,7 @@ import symbols
 
 
 def get_kline(index_name, timeframe):
-    """返回 K 线数据数组。组件直接喂给 lightweight-charts。"""
+    """指数 K 线（按显示名查 symbols.CORE_INDICES）。"""
     short_code = symbols.get_short_code(index_name) or 'sh000001'
 
     if timeframe == '分时':
@@ -21,6 +21,26 @@ def get_kline(index_name, timeframe):
         return _fetch_5day(short_code)
     else:
         return _fetch_candle(index_name, short_code, timeframe)
+
+
+def get_stock_kline(code, timeframe):
+    """
+    个股 K 线。
+    Args:
+        code:      6 位股票代码（如 '600519'）
+        timeframe: 同 get_kline，'分时'/'5日'/'日K'/'周K'/'月K'/'年K'
+    """
+    code = (code or '').strip()
+    if not code:
+        return []
+    short_code = symbols.stock_short_code(code)            # sh600519 / sz000001 / bj430047
+    em_secid   = symbols.stock_eastmoney_secid(code)        # 1.600519 / 0.000001
+
+    if timeframe == '分时':
+        return _fetch_minute(short_code)
+    if timeframe == '5日':
+        return _fetch_5day(short_code)
+    return _fetch_candle_by_secid(em_secid, short_code, timeframe)
 
 
 # ---------------- 分时 ---------------- #
@@ -115,15 +135,24 @@ TENCENT_TF_MAP = {'日K': 'day', '周K': 'week', '月K': 'month', '年K': 'year'
 
 def _fetch_candle(index_name, symbol, timeframe):
     # 优先走东方财富（含真实成交额）
-    em_data = _try_eastmoney(index_name, timeframe)
+    secid = symbols.get_eastmoney_secid(index_name)
+    em_data = _try_eastmoney_by_secid(secid, timeframe) if secid else None
     if em_data:
         return em_data
     # 回退到腾讯
     return _try_tencent(symbol, timeframe)
 
 
-def _try_eastmoney(index_name, timeframe):
-    secid = symbols.get_eastmoney_secid(index_name)
+def _fetch_candle_by_secid(secid, symbol, timeframe):
+    """个股版 K 线：直接给 secid 抓 EM，回退腾讯。"""
+    em_data = _try_eastmoney_by_secid(secid, timeframe)
+    if em_data:
+        return em_data
+    return _try_tencent(symbol, timeframe)
+
+
+def _try_eastmoney_by_secid(secid, timeframe):
+    """给定 secid 走 EM 历史 K 线接口。"""
     if not secid:
         return None
     klt = KLT_MAP.get(timeframe, 101)
@@ -132,7 +161,7 @@ def _try_eastmoney(index_name, timeframe):
         f"?secid={secid}"
         f"&fields1=f1,f2,f3,f4,f5,f6"
         f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58"
-        f"&klt={klt}&fqt=0&beg=0&end=20500101&lmt=300"
+        f"&klt={klt}&fqt=1&beg=0&end=20500101&lmt=300"
     )
     try:
         res = fetch_json(url, headers={'Referer': 'https://quote.eastmoney.com/'})

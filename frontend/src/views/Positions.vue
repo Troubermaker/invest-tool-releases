@@ -3,6 +3,7 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import draggable from 'vuedraggable'
 import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
+import { openStockChart } from '../composables/useStockChart'
 
 // ---------------- 账户 / 持仓状态 ----------------
 const SUMMARY_ID = 'summary'  // 选中汇总 tab 时的哨兵值（真实账户 id 都是数字）
@@ -1278,7 +1279,9 @@ onMounted(async () => {
                     </tr>
 
                     <tr v-for="p in filteredPositions" :key="p.code"
-                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors group">
+                        @dblclick="openStockChart(p.code, p.name)"
+                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors group cursor-pointer"
+                        title="双击查看 K 线">
 
                         <!-- 股票名称 + 代码 -->
                         <td class="px-[12px] py-[8px] align-middle">

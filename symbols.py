@@ -50,3 +50,36 @@ def get_eastmoney_secid(name):
         if n == name:
             return f"{prefix}.{c[2:]}"
     return None
+
+
+# ---------------- 任意 A 股代码 → 各源命名 ---------------- #
+# 个股 K 线服务用：根据 6 位数字代码推导各家 API 需要的 symbol。
+
+def stock_market_prefix(code):
+    """
+    根据 6 位股票代码判断市场前缀。返回 'sh' / 'sz' / 'bj'。
+    A 股代码规则（粗略覆盖主板 / 创业板 / 科创板 / 北交所）：
+        6/9 开头   → 沪市 sh（含科创 688）
+        0/2/3 开头 → 深市 sz（含创业板 30）
+        4/8 开头   → 北交所 bj
+    """
+    code = (code or '').strip()
+    if not code or not code.isdigit() or len(code) != 6:
+        return 'sh'  # fallback
+    h = code[0]
+    if h in ('6', '9'): return 'sh'
+    if h in ('0', '2', '3'): return 'sz'
+    if h in ('4', '8'): return 'bj'
+    return 'sh'
+
+
+def stock_short_code(code):
+    """6 位代码 → 'sh600519' / 'sz000001' / 'bj430047' 给腾讯 / 新浪用。"""
+    return stock_market_prefix(code) + (code or '')
+
+
+def stock_eastmoney_secid(code):
+    """6 位代码 → '1.600519' / '0.000001' / '0.430047' 给 EastMoney 用。"""
+    market = stock_market_prefix(code)
+    em_prefix = '1' if market == 'sh' else '0'  # 北交所走 0（同深市）
+    return f"{em_prefix}.{code}"

@@ -26,6 +26,7 @@
 import { onMounted, onUnmounted, ref, watch, computed } from 'vue'
 import { api } from '../api/client'
 import { pushError } from './useNotifications'
+import { loadSnapshot, saveSnapshot } from './useSnapshot'
 
 const HIDDEN_DEEP_MS = 5 * 60 * 1000  // 隐藏超过 5 分钟算 deep-hidden
 
@@ -155,6 +156,8 @@ function ensureTradingDaysLoaded() {
  *   - baseInterval:        基础间隔 ms
  *   - prefKey:             可选，user_preferences key；值是秒数（0 = 暂停）
  *   - ignoreMarketHours:   true = 24x7 刷新（用于快讯等盘外也变的数据）；默认 false
+ *   - snapshotKey:         可选，localStorage 快照 key —— mount 时先用上次的数据
+ *                           瞬时渲染，再后台拉新替换。冷启动体感"瞬开"。
  *   - onData:              成功回调（信封模式）
  *   - onError:             失败回调（信封模式）
  *   - immediate:           挂载时立即拉一次，默认 true
@@ -163,6 +166,7 @@ export function useSmartRefresh(fn, {
     baseInterval = 30_000,
     prefKey = null,
     ignoreMarketHours = false,
+    snapshotKey = null,
     onData = null,
     onError = null,
     immediate = true,
@@ -184,6 +188,8 @@ export function useSmartRefresh(fn, {
             if (res && typeof res === 'object' && 'ok' in res) {
                 if (res.ok) {
                     onData && onData(res.data)
+                    // 写快照供下次冷启动用
+                    if (snapshotKey) saveSnapshot(snapshotKey, res.data)
                 } else {
                     onError && onError(res.error, res.code)
                     _maybeToastError(res.error, res.code)
@@ -254,6 +260,17 @@ export function useSmartRefresh(fn, {
     const currentInterval = computed(() => Math.round(currentIntervalMs.value / 1000))
 
     onMounted(async () => {
+        // 1. 同步 hydrate 快照 —— 让用户在网络请求返回前先看到上次的数据
+        //    这一步必须在 await 任何东西之前做，否则会有空白闪烁
+        if (snapshotKey && onData) {
+            const cached = loadSnapshot(snapshotKey)
+            if (cached) {
+                onData(cached.data)
+                lastRefreshAt.value = cached.savedAt   // 倒计时基线 = 快照保存时间
+            }
+        }
+
+        // 2. 异步加载用户的刷新间隔偏好
         if (prefKey) {
             try {
                 const res = await api.getUserPreference(prefKey)
@@ -265,7 +282,8 @@ export function useSmartRefresh(fn, {
                 }
             } catch (e) { console.warn(e) }
         }
-        // 首次仍然拉一次（拿到当前最新数据，让用户看到东西）
+
+        // 3. 首次拉真实数据（用快照后立刻发起，~100-500ms 内替换）
         if (immediate) run()
         reschedule()
     })

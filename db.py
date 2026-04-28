@@ -98,12 +98,35 @@ def init_db():
             FOREIGN KEY (group_id) REFERENCES watchlist_groups(id) ON DELETE CASCADE
         )
     ''')
-    # 迁移旧表：给已存在的 watchlist_stocks 表补 added_price / remark 字段
-    for col, decl in [('added_price', 'REAL'), ('remark', "TEXT DEFAULT ''")]:
+    # 迁移旧表：给已存在的 watchlist_stocks 表补字段
+    for col, decl in [
+        ('added_price',  'REAL'),
+        ('remark',       "TEXT DEFAULT ''"),
+        # 价格警报：alert_above 上涨触发阈值，alert_below 下跌触发阈值，任一可空
+        ('alert_above',  'REAL'),
+        ('alert_below',  'REAL'),
+    ]:
         try:
             c.execute(f'ALTER TABLE watchlist_stocks ADD COLUMN {col} {decl}')
         except Exception:
             pass  # 已存在则忽略
+
+    # 警报触发历史（用于去重 + 前端轮询展示）
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS alert_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            name TEXT,
+            alert_type TEXT NOT NULL,        -- 'above' | 'below'
+            threshold REAL NOT NULL,         -- 设定的阈值
+            triggered_price REAL NOT NULL,   -- 实际触发时的价格
+            triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            acked INTEGER NOT NULL DEFAULT 0  -- 0 = 前端尚未展示，1 = 已展示过
+        )
+    ''')
+    # 加索引方便查最近触发（去重 1h 窗口）和 un-acked 列表
+    c.execute('CREATE INDEX IF NOT EXISTS idx_alert_code_time ON alert_history(code, alert_type, triggered_at)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_alert_unacked ON alert_history(acked, triggered_at)')
     # 用户偏好键值存储（列顺序、主题等）
     c.execute('''
         CREATE TABLE IF NOT EXISTS user_preferences (

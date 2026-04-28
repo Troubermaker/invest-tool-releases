@@ -1,16 +1,18 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import RightDrawer from './components/RightDrawer.vue'
 import ActivationGate from './components/ActivationGate.vue'
 import UpdateBanner from './components/UpdateBanner.vue'
 import Toaster from './components/Toaster.vue'
+import StockChartDrawer from './components/StockChartDrawer.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
 import Review from './views/Review.vue'
 import Settings from './views/Settings.vue'
 import { api } from './api/client'
+import { pushWarn } from './composables/useNotifications'
 
 const currentTab = ref('market')
 const isAIDrawerOpen = ref(false)
@@ -26,6 +28,46 @@ onMounted(async () => {
 function handleNavigate(tabId) {
     currentTab.value = tabId
 }
+
+// ============ 价格警报轮询（激活后每 10s 一次）============
+let _alertPollTimer = null
+const ALERT_POLL_INTERVAL = 10_000
+
+async function pollAlerts() {
+    try {
+        const res = await api.getPendingAlerts(20)
+        if (!res.ok || !res.data?.length) return
+        const ids = []
+        for (const a of res.data) {
+            ids.push(a.id)
+            const dir = a.alert_type === 'above' ? '↑ 上涨' : '↓ 下跌'
+            const name = a.name || a.code
+            pushWarn(
+                `🔔 ${name} ${dir}至 ${Number(a.triggered_price).toFixed(2)}（阈值 ${Number(a.threshold).toFixed(2)}）`,
+                { dedupKey: `alert_${a.code}_${a.alert_type}`, ttlMs: 8000 }
+            )
+        }
+        if (ids.length) await api.ackAlerts(ids)
+    } catch (e) {
+        // 静默：网络 / 后端短暂异常不影响主流程
+    }
+}
+
+// 激活通过 → 开启轮询；未激活 → 不跑（数据访问被门禁拦着）
+watch(isActivated, (v) => {
+    if (v === true) {
+        pollAlerts()  // 立即跑一次捕获积压
+        if (_alertPollTimer) clearInterval(_alertPollTimer)
+        _alertPollTimer = setInterval(pollAlerts, ALERT_POLL_INTERVAL)
+    } else if (_alertPollTimer) {
+        clearInterval(_alertPollTimer)
+        _alertPollTimer = null
+    }
+}, { immediate: true })
+
+onUnmounted(() => {
+    if (_alertPollTimer) clearInterval(_alertPollTimer)
+})
 </script>
 
 <template>
@@ -67,6 +109,9 @@ function handleNavigate(tabId) {
 
     <!-- 全局 toast 通知（接口失败 / 重要事件） -->
     <Toaster />
+
+    <!-- 全局 K 线 drawer（任意页双击股票行触发）-->
+    <StockChartDrawer />
 
     <!-- 底部固定免责声明（22px，常驻不可关）-->
     <div class="fixed bottom-0 left-0 right-0 h-[22px] z-[150]

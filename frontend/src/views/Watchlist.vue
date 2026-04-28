@@ -4,6 +4,7 @@ import draggable from 'vuedraggable'
 import Sortable from 'sortablejs'
 import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
+import { openStockChart } from '../composables/useStockChart'
 
 // ---------------- 数据状态 ----------------
 const groups = ref([])
@@ -696,6 +697,82 @@ function cancelEdit() {
     editingStock.value = null
 }
 
+// ============ 价格警报 ============
+const alertModalStock = ref(null)        // 当前打开警报设置弹窗的 stock
+const alertModalAbove = ref('')
+const alertModalBelow = ref('')
+const alertModalSaving = ref(false)
+
+function hasAlert(stock) {
+    return (stock.alert_above != null && stock.alert_above > 0) ||
+           (stock.alert_below != null && stock.alert_below > 0)
+}
+
+function alertTooltip(stock) {
+    if (!hasAlert(stock)) return '设置价格警报'
+    const parts = []
+    if (stock.alert_above != null) parts.push(`≥ ${Number(stock.alert_above).toFixed(2)}`)
+    if (stock.alert_below != null) parts.push(`≤ ${Number(stock.alert_below).toFixed(2)}`)
+    return `已设警报：${parts.join(' / ')}（点击修改）`
+}
+
+function openAlertModal(stock) {
+    alertModalStock.value = stock
+    // 默认填当前已设值，没设则用现价 ±5%
+    const curPrice = parseFloat(quotes.value[stock.code]?.price || stock.added_price || 0) || 0
+    alertModalAbove.value = stock.alert_above != null
+        ? String(stock.alert_above)
+        : (curPrice ? (curPrice * 1.05).toFixed(2) : '')
+    alertModalBelow.value = stock.alert_below != null
+        ? String(stock.alert_below)
+        : (curPrice ? (curPrice * 0.95).toFixed(2) : '')
+}
+
+function closeAlertModal() {
+    alertModalStock.value = null
+    alertModalAbove.value = ''
+    alertModalBelow.value = ''
+}
+
+async function saveAlert() {
+    if (!alertModalStock.value) return
+    alertModalSaving.value = true
+    try {
+        const above = parseFloat(alertModalAbove.value) || null
+        const below = parseFloat(alertModalBelow.value) || null
+        const code = alertModalStock.value.code
+        const res = await api.setStockAlert(code, above, below)
+        if (!res.ok) {
+            console.warn('设警报失败', res)
+            return
+        }
+        // 本地更新（避免等下次刷新才看到 🔔 图标变化）
+        // 找到该 code 在 stocks 列表里的所有副本，更新 alert 字段
+        for (const s of stocks.value) {
+            if (s.code === code) {
+                s.alert_above = above
+                s.alert_below = below
+            }
+        }
+        closeAlertModal()
+    } finally {
+        alertModalSaving.value = false
+    }
+}
+
+async function clearAlertFromModal() {
+    if (!alertModalStock.value) return
+    const code = alertModalStock.value.code
+    await api.clearStockAlert(code)
+    for (const s of stocks.value) {
+        if (s.code === code) {
+            s.alert_above = null
+            s.alert_below = null
+        }
+    }
+    closeAlertModal()
+}
+
 // 点击搜索框外部时自动关闭下拉
 function onDocumentClick(e) {
     if (addBoxRef.value && !addBoxRef.value.contains(e.target)) {
@@ -963,7 +1040,9 @@ onUnmounted(() => {
                     </tr>
 
                     <tr v-for="stock in filteredStocks" :key="stock.code"
-                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors group">
+                        @dblclick="openStockChart(stock.code, stock.name || quotes[stock.code]?.name)"
+                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors group cursor-pointer"
+                        title="双击查看 K 线">
 
                         <td class="px-[12px] py-[8px] align-middle">
                             <div class="text-[14px] font-bold text-[#111] leading-tight truncate">{{ stock.name || quotes[stock.code]?.name || '—' }}</div>
@@ -1025,13 +1104,32 @@ onUnmounted(() => {
                         </td>
 
                         <td class="px-[10px] py-[8px] text-center">
-                            <div class="flex items-center justify-center gap-[8px] opacity-0 group-hover:opacity-100 transition">
-                                <button @click="startEdit(stock)" class="text-[#666] hover:text-[#2563eb] transition" title="编辑">
+                            <div class="flex items-center justify-center gap-[8px]">
+                                <!-- 警报：已设时常驻显示，未设时 hover 才显 -->
+                                <button @click="openAlertModal(stock)"
+                                        class="transition"
+                                        :class="hasAlert(stock)
+                                            ? 'text-[#dc2626]'
+                                            : 'text-[#666] opacity-0 group-hover:opacity-100 hover:text-[#dc2626]'"
+                                        :title="alertTooltip(stock)">
+                                    <svg v-if="hasAlert(stock)" class="w-[14px] h-[14px]" viewBox="0 0 20 20" fill="currentColor">
+                                        <path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z"/>
+                                    </svg>
+                                    <svg v-else class="w-[14px] h-[14px]" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                              d="M14.857 17.082A23.848 23.848 0 0018 16.5c-1.094-1.39-1.5-3.236-1.5-5V8a5.5 5.5 0 00-11 0v3.5c0 1.764-.406 3.61-1.5 5a23.848 23.848 0 003.143.582m7.857 0a24.297 24.297 0 01-7.857 0m7.857 0a3 3 0 11-7.857 0"/>
+                                    </svg>
+                                </button>
+                                <button @click="startEdit(stock)"
+                                        class="text-[#666] hover:text-[#2563eb] transition opacity-0 group-hover:opacity-100"
+                                        title="编辑">
                                     <svg class="w-[14px] h-[14px]" viewBox="0 0 20 20" fill="currentColor">
                                         <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/>
                                     </svg>
                                 </button>
-                                <button @click="handleRemoveStock(stock)" class="text-[#666] hover:text-[#dc2626] transition" title="移除">
+                                <button @click="handleRemoveStock(stock)"
+                                        class="text-[#666] hover:text-[#dc2626] transition opacity-0 group-hover:opacity-100"
+                                        title="移除">
                                     <svg class="w-[14px] h-[14px]" viewBox="0 0 20 20" fill="currentColor">
                                         <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/>
                                     </svg>
@@ -1078,6 +1176,52 @@ onUnmounted(() => {
                         class="text-[12px] px-[14px] py-[6px] text-[#666] border border-[#e5e5e5] rounded-[4px] hover:bg-[#f5f5f5]">取消</button>
                 <button @click="saveEdit"
                         class="text-[12px] font-bold text-white bg-[#dc2626] px-[14px] py-[6px] rounded-[4px] hover:bg-[#991b1b]">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ 价格警报弹窗 ============ -->
+    <div v-if="alertModalStock" class="fixed inset-0 bg-black/30 z-50 flex items-center justify-center"
+         @click.self="closeAlertModal">
+        <div class="bg-white rounded-[10px] w-[380px] shadow-[0_10px_40px_rgba(0,0,0,0.20)] overflow-hidden">
+            <div class="px-[20px] py-[14px] border-b border-[#f0f0f0]">
+                <div class="text-[14px] font-bold text-[#111] flex items-center gap-[8px]">
+                    <span>🔔</span>
+                    <span>价格警报 · {{ alertModalStock.name || alertModalStock.code }}</span>
+                </div>
+                <div class="text-[11px] text-[#888] mt-[2px]">
+                    现价 {{ quotes[alertModalStock.code]?.price ? Number(quotes[alertModalStock.code].price).toFixed(2) : '—' }}
+                    · 触发后桌面通知 + 应用内提醒 · 同一警报 1 小时内不重复
+                </div>
+            </div>
+            <div class="px-[20px] py-[16px] flex flex-col gap-[12px]">
+                <label class="flex flex-col gap-[4px]">
+                    <span class="text-[12px] text-[#dc2626] font-semibold">▲ 上涨警报：现价 ≥</span>
+                    <input v-model="alertModalAbove" type="number" step="0.01"
+                           placeholder="留空 = 不设上涨警报"
+                           class="text-[13px] px-[10px] py-[6px] border border-[#e5e5e5] rounded-[4px] outline-none focus:border-[#dc2626] tabular-nums">
+                </label>
+                <label class="flex flex-col gap-[4px]">
+                    <span class="text-[12px] text-[#059669] font-semibold">▼ 下跌警报：现价 ≤</span>
+                    <input v-model="alertModalBelow" type="number" step="0.01"
+                           placeholder="留空 = 不设下跌警报"
+                           class="text-[13px] px-[10px] py-[6px] border border-[#e5e5e5] rounded-[4px] outline-none focus:border-[#059669] tabular-nums">
+                </label>
+            </div>
+            <div class="flex items-center justify-end gap-[8px] px-[20px] py-[14px] bg-[#fafafa] border-t border-[#f0f0f0]">
+                <button v-if="hasAlert(alertModalStock)"
+                        @click="clearAlertFromModal"
+                        class="text-[12px] mr-auto text-[#666] hover:text-[#dc2626] hover:underline">
+                    清除警报
+                </button>
+                <button @click="closeAlertModal"
+                        class="text-[12px] px-[14px] py-[6px] text-[#666] border border-[#e5e5e5] rounded-[4px] hover:bg-white">
+                    取消
+                </button>
+                <button @click="saveAlert" :disabled="alertModalSaving"
+                        class="text-[12px] font-bold text-white bg-[#dc2626] px-[14px] py-[6px] rounded-[4px] hover:bg-[#991b1b] disabled:opacity-50">
+                    {{ alertModalSaving ? '保存中...' : '保存' }}
+                </button>
             </div>
         </div>
     </div>
