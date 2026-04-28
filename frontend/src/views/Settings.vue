@@ -341,98 +341,149 @@ function confirmCancel() {
   <div class="flex flex-col h-full bg-[#fcfcfc] overflow-auto custom-scrollbar">
 
     <!-- 页头 -->
-    <div class="px-[24px] py-[20px] border-b border-[#e5e5e5] bg-white shrink-0">
-        <div class="text-[18px] font-bold text-[#111]">设置</div>
-        <div class="text-[12px] text-[#888] mt-[2px]">数据备份、偏好配置等</div>
+    <div class="px-[24px] py-[12px] border-b border-[#e5e5e5] bg-white shrink-0">
+        <div class="text-[16px] font-bold text-[#111]">设置</div>
     </div>
 
-    <div class="flex-1 px-[24px] py-[20px]">
+    <div class="flex-1 px-[16px] py-[14px] space-y-[12px]">
 
         <!-- ============ 关于 / 系统 ============ -->
-        <div class="max-w-[760px] mb-[20px] bg-white border border-[#eeeeee] rounded-[8px] shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
-            <div class="px-[20px] py-[14px] border-b border-[#f0f0f0]">
-                <div class="text-[14px] font-bold text-[#111]">关于 / 系统</div>
-                <div class="text-[12px] text-[#999] mt-[2px]">版本信息、数据目录、检查更新</div>
+        <div class="bg-white border border-[#eeeeee] rounded-[6px] shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
+            <div class="px-[14px] py-[8px] border-b border-[#f0f0f0]">
+                <div class="text-[13px] font-bold text-[#111]">关于 / 系统</div>
             </div>
-            <div class="px-[20px] py-[14px] space-y-[12px]">
+            <!-- 一行铺开：版本 / 数据目录 / 操作按钮组 -->
+            <div class="px-[14px] py-[10px] flex items-center gap-[14px] flex-wrap">
 
-                <!-- 当前版本 -->
-                <div class="flex items-center gap-[14px]">
-                    <span class="text-[12px] text-[#666] w-[80px] shrink-0">当前版本</span>
+                <!-- 版本 + 检查更新 -->
+                <div class="flex items-center gap-[8px] shrink-0">
+                    <span class="text-[11px] text-[#666]">版本</span>
                     <span class="text-[13px] font-mono font-semibold text-[#111] tabular-nums">v{{ appVersion || '...' }}</span>
                     <button @click="handleCheckUpdate"
                             :disabled="checkingUpdate"
-                            class="ml-auto text-[12px] font-semibold text-[#dc2626] border border-[#fecaca] hover:bg-[#fff5f5] disabled:opacity-50 disabled:cursor-wait px-[12px] py-[5px] rounded-[4px] transition">
-                        {{ checkingUpdate ? '检查中...' : '检查更新' }}
+                            class="text-[11px] font-semibold text-[#dc2626] border border-[#fecaca] hover:bg-[#fff5f5] disabled:opacity-50 disabled:cursor-wait px-[8px] py-[2px] rounded-[3px] transition">
+                        {{ checkingUpdate ? '检查中' : '检查更新' }}
                     </button>
                 </div>
-                <div v-if="updateCheckMsg"
-                     class="text-[12px] pl-[94px] -mt-[6px]"
-                     :class="updateCheckMsg.includes('失败') || updateCheckMsg.includes('未配置') ? 'text-[#dc2626]' : 'text-[#059669]'">
-                    {{ updateCheckMsg }}
+
+                <!-- 竖线分隔 -->
+                <div class="w-px h-[18px] bg-[#e5e7eb] shrink-0"></div>
+
+                <!-- 数据目录占满中间 -->
+                <div class="flex items-center gap-[8px] flex-1 min-w-[280px]">
+                    <span class="text-[11px] text-[#666] shrink-0">数据目录</span>
+                    <code class="text-[11px] font-mono text-[#475569] bg-[#f8fafc] border border-[#e5e7eb] px-[6px] py-[1px] rounded-[3px] truncate flex-1 min-w-0"
+                          :title="dataDir">{{ dataDir || '...' }}</code>
                 </div>
 
-                <!-- 数据目录 -->
-                <div class="flex items-center gap-[14px]">
-                    <span class="text-[12px] text-[#666] w-[80px] shrink-0">数据目录</span>
-                    <code class="text-[11px] font-mono text-[#475569] bg-[#f8fafc] border border-[#e5e7eb] px-[8px] py-[2px] rounded-[3px] truncate flex-1">{{ dataDir || '...' }}</code>
+                <!-- 数据目录 4 个按钮 -->
+                <div class="flex items-center gap-[5px] shrink-0">
                     <button @click="handleOpenDataDir"
-                            class="text-[12px] font-semibold text-[#2563eb] border border-[#bfdbfe] hover:bg-[#eff6ff] px-[12px] py-[5px] rounded-[4px] transition shrink-0">
-                        打开目录
+                            class="text-[11px] font-semibold text-[#2563eb] border border-[#bfdbfe] hover:bg-[#eff6ff] px-[8px] py-[2px] rounded-[3px] transition">
+                        打开
                     </button>
                     <button @click="handleChangeDataDir"
                             :disabled="changeDirBusy"
-                            class="text-[12px] font-semibold text-[#dc2626] border border-[#fecaca] hover:bg-[#fff5f5] disabled:opacity-50 px-[12px] py-[5px] rounded-[4px] transition shrink-0">
-                        {{ changeDirBusy ? '处理中...' : '更改位置' }}
+                            class="text-[11px] font-semibold text-[#dc2626] border border-[#fecaca] hover:bg-[#fff5f5] disabled:opacity-50 px-[8px] py-[2px] rounded-[3px] transition">
+                        {{ changeDirBusy ? '处理中' : '更改' }}
                     </button>
-                </div>
-                <div class="text-[11px] text-[#aaa] pl-[94px] -mt-[6px] leading-relaxed">
-                    自选 / 持仓 / 激活码 / 偏好都存在这里，升级新版本不会丢失。
-                    <a class="text-[#2563eb] cursor-pointer hover:underline ml-[6px]"
+                    <a class="text-[11px] text-[#2563eb] cursor-pointer hover:underline px-[4px]"
                        @click="handleResetDataDir">恢复默认</a>
+                </div>
+            </div>
+            <!-- 反馈消息：检查更新结果（如有）-->
+            <div v-if="updateCheckMsg"
+                 class="px-[14px] pb-[8px] -mt-[4px] text-[11px]"
+                 :class="updateCheckMsg.includes('失败') || updateCheckMsg.includes('未配置') ? 'text-[#dc2626]' : 'text-[#059669]'">
+                {{ updateCheckMsg }}
+            </div>
+        </div>
+
+        <!-- ============ 老板键（一行铺开）============ -->
+        <div class="bg-white border border-[#eeeeee] rounded-[6px] shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
+            <div class="px-[14px] py-[8px] border-b border-[#f0f0f0]">
+                <div class="text-[13px] font-bold text-[#111]">老板键</div>
+            </div>
+            <div class="px-[14px] py-[10px]">
+                <!-- 查看态：当前快捷键 + 修改按钮 + 说明 inline -->
+                <div v-if="!recording" class="flex items-center gap-[12px] flex-wrap">
+                    <span class="text-[11px] text-[#666]">当前</span>
+                    <span class="text-[15px] font-bold text-[#111] tabular-nums">{{ formatDisplay(bossKey) }}</span>
+                    <button @click="startRecording"
+                            class="text-[11px] font-semibold text-[#444] bg-white border border-[#d4d4d4] px-[10px] py-[2px] rounded-[3px] hover:bg-[#f5f5f5] hover:border-[#999] transition">
+                        修改
+                    </button>
+                    <span class="text-[10px] text-[#999] flex-1 min-w-[200px]">
+                        一键隐藏 / 恢复窗口（Alt+Tab 也消失）；2 键组合（修饰键 + 普通键）。推荐 Ctrl+`、Alt+Z 避开浏览器常用键。
+                    </span>
+                </div>
+
+                <!-- 录制态 -->
+                <div v-else class="bg-[#fafafa] border border-dashed border-[#fbbf24] rounded-[4px] px-[10px] py-[8px] flex items-center gap-[10px] flex-wrap">
+                    <span class="text-[11px] text-[#92400e] shrink-0">请按下新的快捷键组合 ⌨</span>
+                    <div class="text-[14px] font-bold text-[#111] tabular-nums tracking-wider px-[10px] py-[3px] bg-white rounded-[3px] border border-[#eeeeee] min-w-[120px] text-center">
+                        {{ capturedCombo || '等待按键...' }}
+                    </div>
+                    <div class="text-[10px] flex-1 min-w-[120px]"
+                         :class="isValidCombo ? 'text-[#059669]' : 'text-[#888]'">
+                        {{ validationHint }}
+                    </div>
+                    <div class="flex gap-[6px] shrink-0">
+                        <button @click="cancelRecording"
+                                class="text-[11px] px-[10px] py-[3px] text-[#666] border border-[#e5e5e5] rounded-[3px] hover:bg-white">
+                            取消
+                        </button>
+                        <button @click="saveBossKey" :disabled="!isValidCombo"
+                                class="text-[11px] font-bold text-white bg-[#dc2626] px-[10px] py-[3px] rounded-[3px] hover:bg-[#991b1b] disabled:bg-[#ccc] disabled:cursor-not-allowed transition">
+                            保存
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="bossKeyMsg && !recording"
+                     class="text-[11px] mt-[6px] px-[8px] py-[3px] rounded-[3px]"
+                     :class="bossKeyMsg.includes('失败')
+                         ? 'text-[#dc2626] bg-[#fef2f2] border border-[#fecaca]'
+                         : 'text-[#059669] bg-[#f0fdf4] border border-[#dcfce7]'">
+                    {{ bossKeyMsg }}
                 </div>
             </div>
         </div>
 
-        <!-- ============ 数据备份 ============ -->
-        <div class="max-w-[760px] bg-white border border-[#eeeeee] rounded-[8px] shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
-            <div class="px-[20px] py-[14px] border-b border-[#f0f0f0]">
-                <div class="text-[14px] font-bold text-[#111]">数据备份</div>
-                <div class="text-[12px] text-[#999] mt-[2px]">
-                    导出当前电脑的所有自选股和持仓记录为 JSON 文件，在另一台电脑「导入」即可恢复。
-                    文件可放在云盘 / 私有 git 仓库里版本化管理。
+        <!-- ============ 数据备份（占满下方）============ -->
+        <div class="bg-white border border-[#eeeeee] rounded-[6px] shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
+            <div class="px-[14px] py-[8px] border-b border-[#f0f0f0]">
+                <div class="flex items-baseline gap-[10px]">
+                    <div class="text-[13px] font-bold text-[#111]">数据备份</div>
+                    <div class="text-[11px] text-[#999]">导出 JSON → 在另一台电脑导入；可云盘 / 私有 git 版本化</div>
                 </div>
             </div>
 
             <!-- 导出块 -->
-            <div class="px-[20px] py-[16px] border-b border-[#f5f5f5]">
-                <div class="flex items-start gap-[16px]">
-                    <div class="flex-1">
-                        <div class="text-[13px] font-semibold text-[#111]">导出数据</div>
-                        <div class="text-[12px] text-[#888] mt-[2px]">勾选要导出的分区 —— 比如<b class="text-[#dc2626]">分享自选给朋友时去掉"持仓"</b>。不含市场行情缓存。</div>
-                    </div>
+            <div class="px-[14px] py-[10px] border-b border-[#f5f5f5]">
+                <div class="flex items-center gap-[12px] flex-wrap">
+                    <div class="text-[12px] font-semibold text-[#111] shrink-0">导出</div>
+                    <!-- 分区勾选 inline -->
+                    <label class="flex items-center gap-[4px] cursor-pointer select-none text-[11px]">
+                        <input type="checkbox" v-model="exportSections.watchlist" class="accent-[#dc2626]">
+                        <span class="text-[#333]">自选</span>
+                    </label>
+                    <label class="flex items-center gap-[4px] cursor-pointer select-none text-[11px]">
+                        <input type="checkbox" v-model="exportSections.portfolio" class="accent-[#dc2626]">
+                        <span class="text-[#333]">持仓</span>
+                    </label>
+                    <label class="flex items-center gap-[4px] cursor-pointer select-none text-[11px]">
+                        <input type="checkbox" v-model="exportSections.preferences" class="accent-[#dc2626]">
+                        <span class="text-[#666]">偏好</span>
+                    </label>
+                    <span class="text-[10px] text-[#999]">分享自选时记得去掉"持仓"</span>
                     <button @click="handleExport" :disabled="exporting"
-                            class="shrink-0 text-[12px] font-bold text-white bg-[#dc2626] px-[16px] py-[7px] rounded-[4px] hover:bg-[#991b1b] disabled:bg-[#ccc] disabled:cursor-not-allowed transition">
+                            class="ml-auto shrink-0 text-[11px] font-bold text-white bg-[#dc2626] px-[12px] py-[5px] rounded-[3px] hover:bg-[#991b1b] disabled:bg-[#ccc] disabled:cursor-not-allowed transition">
                         {{ exporting ? '导出中...' : '导出为 JSON' }}
                     </button>
                 </div>
-                <!-- 分区勾选 -->
-                <div class="flex items-center gap-[16px] mt-[10px] text-[12px]">
-                    <label class="flex items-center gap-[6px] cursor-pointer select-none">
-                        <input type="checkbox" v-model="exportSections.watchlist" class="accent-[#dc2626]">
-                        <span class="text-[#333]">自选（分组 + 股票）</span>
-                    </label>
-                    <label class="flex items-center gap-[6px] cursor-pointer select-none">
-                        <input type="checkbox" v-model="exportSections.portfolio" class="accent-[#dc2626]">
-                        <span class="text-[#333]">持仓（账户 + 持仓记录）</span>
-                    </label>
-                    <label class="flex items-center gap-[6px] cursor-pointer select-none">
-                        <input type="checkbox" v-model="exportSections.preferences" class="accent-[#dc2626]">
-                        <span class="text-[#666]">用户偏好（列顺序等）</span>
-                    </label>
-                </div>
                 <div v-if="exportMsg"
-                     class="text-[12px] mt-[10px] px-[10px] py-[6px] rounded-[4px]"
+                     class="text-[11px] mt-[8px] px-[8px] py-[4px] rounded-[3px]"
                      :class="exportMsg.startsWith('请') || exportMsg.startsWith('导出失败')
                          ? 'text-[#dc2626] bg-[#fef2f2] border border-[#fecaca]'
                          : 'text-[#059669] bg-[#f0fdf4] border border-[#dcfce7]'">
@@ -441,147 +492,69 @@ function confirmCancel() {
             </div>
 
             <!-- 导入块 -->
-            <div class="px-[20px] py-[16px]">
-                <div class="flex items-start gap-[16px]">
-                    <div class="flex-1">
-                        <div class="text-[13px] font-semibold text-[#111]">导入数据</div>
-                        <div class="text-[12px] text-[#888] mt-[2px]">选择之前导出的 JSON 文件。<span class="text-[#dc2626]">将清空当前所有自选和持仓，用文件内容替换</span>，请先导出当前数据作为备份。</div>
-                    </div>
+            <div class="px-[14px] py-[10px]">
+                <div class="flex items-center gap-[12px] flex-wrap">
+                    <div class="text-[12px] font-semibold text-[#111] shrink-0">导入</div>
+                    <span class="text-[11px] text-[#888]">选择之前导出的 JSON；预览后可选合并 / 覆盖</span>
                     <button @click="triggerFilePicker"
-                            class="shrink-0 text-[12px] font-bold text-[#444] bg-white border border-[#d4d4d4] px-[16px] py-[7px] rounded-[4px] hover:bg-[#f5f5f5] hover:border-[#999] transition">
+                            class="ml-auto shrink-0 text-[11px] font-bold text-[#444] bg-white border border-[#d4d4d4] px-[12px] py-[5px] rounded-[3px] hover:bg-[#f5f5f5] hover:border-[#999] transition">
                         选择备份文件...
                     </button>
                 </div>
 
                 <!-- 导入预览 -->
-                <div v-if="importPreview" class="mt-[14px] bg-[#fafafa] border border-[#eeeeee] rounded-[6px] p-[14px]">
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <div class="text-[12px] font-semibold text-[#111]">备份文件预览</div>
-                            <div class="text-[11px] text-[#999] mt-[2px]">
-                                生成时间：{{ importPreview.exportedAt || '—' }} / schema v{{ importPreview.schemaVersion }}
-                            </div>
-                        </div>
+                <div v-if="importPreview" class="mt-[10px] bg-[#fafafa] border border-[#eeeeee] rounded-[4px] p-[10px]">
+                    <div class="flex items-center justify-between text-[11px]">
+                        <div class="font-semibold text-[#111]">备份文件预览</div>
+                        <div class="text-[#999]">{{ importPreview.exportedAt || '—' }} · schema v{{ importPreview.schemaVersion }}</div>
                     </div>
-                    <div class="grid grid-cols-5 gap-[8px] mt-[12px]">
+                    <div class="grid grid-cols-5 gap-[6px] mt-[8px]">
                         <div v-for="(v, k) in importPreview.counts" :key="k"
-                             class="bg-white border border-[#eeeeee] rounded-[4px] px-[10px] py-[8px]">
+                             class="bg-white border border-[#eeeeee] rounded-[3px] px-[8px] py-[5px]">
                             <div class="text-[10px] text-[#999]">{{ k }}</div>
-                            <div class="text-[15px] font-bold text-[#111] tabular-nums mt-[2px]">{{ v }}</div>
+                            <div class="text-[14px] font-bold text-[#111] tabular-nums mt-[1px]">{{ v }}</div>
                         </div>
                     </div>
 
-                    <!-- 模式选择 -->
-                    <div class="mt-[14px] border-t border-[#eeeeee] pt-[12px]">
-                        <div class="text-[12px] font-semibold text-[#111] mb-[8px]">导入方式</div>
-                        <label class="flex items-start gap-[8px] px-[10px] py-[8px] rounded-[4px] cursor-pointer transition"
-                               :class="importMode === 'merge' ? 'bg-white border border-[#dc2626]' : 'border border-transparent hover:bg-white/60'">
-                            <input type="radio" value="merge" v-model="importMode" class="mt-[3px] accent-[#dc2626]">
-                            <div class="flex-1">
-                                <div class="text-[12px] font-semibold text-[#111]">合并（增量更新）<span class="ml-[6px] text-[10px] font-normal text-[#dc2626]">推荐</span></div>
-                                <div class="text-[11px] text-[#888] mt-[1px] leading-relaxed">
-                                    按「分组名/账户名/代码」匹配：<b>同键条目用备份值覆盖</b>（自选价、持股、成本价、备注等），<b>仅本地有的条目原样保留</b>。适合两台电脑都编辑过、希望同步增量改动的场景。
+                    <!-- 模式选择（紧凑横向）-->
+                    <div class="mt-[10px] border-t border-[#eeeeee] pt-[8px]">
+                        <div class="text-[11px] font-semibold text-[#111] mb-[5px]">导入方式</div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-[6px]">
+                            <label class="flex items-start gap-[6px] px-[8px] py-[6px] rounded-[3px] cursor-pointer transition"
+                                   :class="importMode === 'merge' ? 'bg-white border border-[#dc2626]' : 'border border-transparent hover:bg-white/60'">
+                                <input type="radio" value="merge" v-model="importMode" class="mt-[2px] accent-[#dc2626]">
+                                <div class="flex-1">
+                                    <div class="text-[11px] font-semibold text-[#111]">合并（增量）<span class="ml-[4px] text-[9px] font-normal text-[#dc2626]">推荐</span></div>
+                                    <div class="text-[10px] text-[#888] leading-relaxed">同键覆盖、仅本地有的保留。适合两机都编辑过同步</div>
                                 </div>
-                            </div>
-                        </label>
-                        <label class="flex items-start gap-[8px] px-[10px] py-[8px] rounded-[4px] cursor-pointer transition mt-[4px]"
-                               :class="importMode === 'replace' ? 'bg-white border border-[#dc2626]' : 'border border-transparent hover:bg-white/60'">
-                            <input type="radio" value="replace" v-model="importMode" class="mt-[3px] accent-[#dc2626]">
-                            <div class="flex-1">
-                                <div class="text-[12px] font-semibold text-[#111]">替换（清空后全量写入）</div>
-                                <div class="text-[11px] text-[#888] mt-[1px] leading-relaxed">
-                                    先清空本地数据再用备份完整覆盖，本地独有的条目会丢失。适合<b>全新电脑首次迁移</b>或者<b>想以备份为权威版本</b>的场景。
+                            </label>
+                            <label class="flex items-start gap-[6px] px-[8px] py-[6px] rounded-[3px] cursor-pointer transition"
+                                   :class="importMode === 'replace' ? 'bg-white border border-[#dc2626]' : 'border border-transparent hover:bg-white/60'">
+                                <input type="radio" value="replace" v-model="importMode" class="mt-[2px] accent-[#dc2626]">
+                                <div class="flex-1">
+                                    <div class="text-[11px] font-semibold text-[#111]">替换（覆盖）</div>
+                                    <div class="text-[10px] text-[#888] leading-relaxed">清空再写入，本地独有会丢失。适合首次迁移 / 备份权威</div>
                                 </div>
-                            </div>
-                        </label>
+                            </label>
+                        </div>
                     </div>
 
-                    <div class="flex justify-end gap-[8px] mt-[14px]">
+                    <div class="flex justify-end gap-[6px] mt-[10px]">
                         <button @click="cancelImport"
-                                class="text-[12px] px-[14px] py-[6px] text-[#666] border border-[#e5e5e5] rounded-[4px] hover:bg-white transition">
+                                class="text-[11px] px-[12px] py-[5px] text-[#666] border border-[#e5e5e5] rounded-[3px] hover:bg-white transition">
                             取消
                         </button>
                         <button @click="confirmImport" :disabled="importing"
-                                class="text-[12px] font-bold text-white bg-[#dc2626] px-[14px] py-[6px] rounded-[4px] hover:bg-[#991b1b] disabled:bg-[#ccc] disabled:cursor-not-allowed transition">
+                                class="text-[11px] font-bold text-white bg-[#dc2626] px-[12px] py-[5px] rounded-[3px] hover:bg-[#991b1b] disabled:bg-[#ccc] disabled:cursor-not-allowed transition">
                             {{ importing ? '导入中...' : (importMode === 'merge' ? '确认合并导入' : '确认覆盖导入') }}
                         </button>
                     </div>
                 </div>
 
                 <div v-if="importMsg"
-                     class="text-[12px] mt-[10px] px-[10px] py-[6px] rounded-[4px]"
+                     class="text-[11px] mt-[8px] px-[8px] py-[4px] rounded-[3px]"
                      :class="importMsg.includes('成功') ? 'text-[#059669] bg-[#f0fdf4] border border-[#dcfce7]' : 'text-[#dc2626] bg-[#fef2f2] border border-[#fecaca]'">
                     {{ importMsg }}
-                </div>
-            </div>
-        </div>
-
-        <!-- 提示：手工拷库路径 -->
-        <div class="max-w-[760px] mt-[16px] bg-[#fffbeb] border border-[#fde68a] rounded-[6px] px-[14px] py-[10px] text-[12px] text-[#92400e]">
-            💡 数据库位置：<code class="bg-white px-[5px] py-[1px] rounded text-[11px]">%APPDATA%\InvestTool\invest_data.db</code>
-            （在文件管理器地址栏粘贴 <code class="bg-white px-[5px] py-[1px] rounded text-[11px]">%APPDATA%\InvestTool</code> 可直达）。
-            升级新版本会自动保留你的所有数据。也可以直接拷贝这个文件到另一台电脑的相同路径迁移，
-            但不建议放在云盘自动同步目录（SQLite 锁冲突风险）。
-        </div>
-
-        <!-- ============ 老板键 ============ -->
-        <div class="max-w-[760px] mt-[20px] bg-white border border-[#eeeeee] rounded-[8px] shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
-            <div class="px-[20px] py-[14px] border-b border-[#f0f0f0]">
-                <div class="text-[14px] font-bold text-[#111]">老板键</div>
-                <div class="text-[12px] text-[#999] mt-[2px]">
-                    一键隐藏 / 恢复窗口。窗口从任务栏、Alt+Tab 彻底消失，再按同组合恢复。
-                    <b>只允许 2 键组合（1 个修饰键 + 1 个普通键）</b>。
-                </div>
-            </div>
-
-            <div class="px-[20px] py-[16px]">
-                <!-- 查看态 -->
-                <div v-if="!recording" class="flex items-center justify-between">
-                    <div>
-                        <div class="text-[12px] text-[#888]">当前快捷键</div>
-                        <div class="text-[16px] font-bold text-[#111] mt-[4px] tabular-nums">
-                            {{ formatDisplay(bossKey) }}
-                        </div>
-                    </div>
-                    <button @click="startRecording"
-                            class="shrink-0 text-[12px] font-bold text-[#444] bg-white border border-[#d4d4d4] px-[16px] py-[7px] rounded-[4px] hover:bg-[#f5f5f5] hover:border-[#999] transition">
-                        修改快捷键
-                    </button>
-                </div>
-
-                <!-- 录制态 -->
-                <div v-else
-                     class="bg-[#fafafa] border border-dashed border-[#fbbf24] rounded-[6px] px-[14px] py-[14px]">
-                    <div class="text-[12px] text-[#92400e] mb-[8px]">请按下新的快捷键组合 ⌨</div>
-                    <div class="text-[20px] font-bold text-[#111] tabular-nums tracking-wider py-[10px] text-center bg-white rounded-[4px] border border-[#eeeeee]">
-                        {{ capturedCombo || '等待按键...' }}
-                    </div>
-                    <div class="text-[11px] mt-[8px]"
-                         :class="isValidCombo ? 'text-[#059669]' : 'text-[#888]'">
-                        {{ validationHint }}
-                    </div>
-                    <div class="flex justify-end gap-[8px] mt-[12px]">
-                        <button @click="cancelRecording"
-                                class="text-[12px] px-[14px] py-[6px] text-[#666] border border-[#e5e5e5] rounded-[4px] hover:bg-white">
-                            取消
-                        </button>
-                        <button @click="saveBossKey" :disabled="!isValidCombo"
-                                class="text-[12px] font-bold text-white bg-[#dc2626] px-[14px] py-[6px] rounded-[4px] hover:bg-[#991b1b] disabled:bg-[#ccc] disabled:cursor-not-allowed transition">
-                            保存
-                        </button>
-                    </div>
-                </div>
-
-                <div v-if="bossKeyMsg && !recording"
-                     class="text-[12px] mt-[10px] px-[10px] py-[6px] rounded-[4px]"
-                     :class="bossKeyMsg.includes('失败')
-                         ? 'text-[#dc2626] bg-[#fef2f2] border border-[#fecaca]'
-                         : 'text-[#059669] bg-[#f0fdf4] border border-[#dcfce7]'">
-                    {{ bossKeyMsg }}
-                </div>
-
-                <div class="mt-[12px] text-[11px] text-[#999]">
-                    推荐组合：Ctrl + `（反引号）、Alt + Z、Ctrl + B 等。避免与浏览器 / 系统常用快捷键冲突。
                 </div>
             </div>
         </div>
