@@ -3,19 +3,23 @@
 invest_tool 一键打包脚本。
 
 用法（在项目根目录执行）:
-  python build.py                 发布版打包（无 console 窗口、体积略小）
+  python build.py                 发布版打包（Cython 保护 + 无 console）
   python build.py --dev           调试版打包（保留 console 窗口看 Python 报错）
   python build.py --skip-front    跳过前端构建（前端无改动时省 30 秒）
+  python build.py --skip-cython   跳过 Cython 编译（开发自测用，不推荐发布）
   python build.py --clean         仅清理 build/ dist/ frontend/dist/，不打包
   python build.py --run           打完包立即启动一次 exe
   python build.py -h              查看帮助
 
 流程:
-  1. 校验环境（Node/npm、PyInstaller、spec 文件）
+  1. 校验环境（Node/npm、PyInstaller、Cython、spec 文件）
   2. 清理旧产物（build/ + dist/）
   3. 构建前端（npm run build → frontend/dist/）
-  4. PyInstaller 打包（invest_tool.spec）
-  5. 输出结果汇总（exe 路径 + 目录大小）
+  4. Cython 编译关键模块为 .pyd（保护 SECRET / Cookies）
+     → license_service / _auth 源码改名 .py.bak（PyInstaller 只看到 .pyd）
+  5. PyInstaller 打包（invest_tool.spec）
+  6. 恢复源码（.py.bak → .py，无论上一步成功失败都执行）
+  7. 输出结果汇总（exe 路径 + 目录大小）
 
 产物:
   dist/invest_tool/                整个目录可直接拷走分发
@@ -43,7 +47,17 @@ FRONTEND_DIST = FRONTEND_DIR / 'dist'
 BUILD_DIR = ROOT / 'build'
 DIST_DIR = ROOT / 'dist'
 SPEC_FILE = ROOT / 'invest_tool.spec'
+SETUP_CYTHON = ROOT / 'setup_cython.py'
 EXE_PATH = DIST_DIR / 'invest_tool' / 'invest_tool.exe'
+
+# 与 setup_cython.py 中的 PROTECTED_MODULES 保持一致
+CYTHON_MODULES = [
+    'services/license_service.py',
+    'api_endpoints/_auth.py',
+]
+
+# 由 main() 在解析 CLI 后赋值；check_prereq() 用它判断是否需要 Cython
+_SKIP_CYTHON = False
 
 
 # ---- 简易日志（Win10+ 自动支持 ANSI 彩色）----
@@ -106,11 +120,24 @@ def check_prereq():
         err("未安装 PyInstaller。运行：pip install pyinstaller")
         passed = False
 
+    # Cython（除非 --skip-cython，否则必需）
+    if not _SKIP_CYTHON:
+        try:
+            import Cython
+            ok(f"Cython {Cython.__version__}")
+        except ImportError:
+            err("未安装 Cython。运行：pip install cython")
+            passed = False
+
     # spec
     if SPEC_FILE.exists():
         ok(f"spec：{SPEC_FILE.name}")
     else:
         err(f"未找到 {SPEC_FILE.name}")
+        passed = False
+
+    if not _SKIP_CYTHON and not SETUP_CYTHON.exists():
+        err(f"未找到 {SETUP_CYTHON.name}")
         passed = False
 
     return passed
@@ -150,6 +177,97 @@ def build_frontend():
     return True
 
 
+def compile_cython():
+    """
+    用 setup_cython.py 把 PROTECTED_MODULES 编译为 .pyd 放到模块原目录下。
+    成功返回 True；失败返回 False。
+    """
+    step("Cython 编译关键模块（保护 SECRET / Cookies）")
+    rc = run(
+        [sys.executable, str(SETUP_CYTHON), 'build_ext', '--inplace'],
+        cwd=ROOT,
+    )
+    if rc != 0:
+        err("Cython 编译失败")
+        return False
+    # 校验产物
+    for py_path in CYTHON_MODULES:
+        pyd_dir = ROOT / Path(py_path).parent
+        stem = Path(py_path).stem
+        # .pyd 名带 ABI tag，如 license_service.cp312-win_amd64.pyd
+        pyd_files = list(pyd_dir.glob(f"{stem}.*.pyd"))
+        if not pyd_files:
+            err(f"未生成 {py_path[:-3]}.*.pyd")
+            return False
+        ok(f"{py_path} → {pyd_files[0].name}")
+    return True
+
+
+def hide_source_for_pyinstaller():
+    """
+    把 PROTECTED_MODULES 的 .py 改名 .py.bak，让 PyInstaller 只能看到 .pyd。
+    返回已重命名的 (原路径) 列表，用于后续 restore。
+    """
+    step("隐藏源码（.py → .py.bak）")
+    backup_paths = []
+    for py_path in CYTHON_MODULES:
+        full = ROOT / py_path
+        if not full.exists():
+            warn(f"{py_path} 不存在（可能上次未恢复），跳过")
+            continue
+        bak = Path(str(full) + '.bak')
+        # 防御：如果 .bak 已存在（上次异常残留），先删掉
+        if bak.exists():
+            bak.unlink()
+        full.rename(bak)
+        backup_paths.append(full)
+        ok(f"隐藏 {py_path}")
+    return backup_paths
+
+
+def restore_sources(backup_paths):
+    """把 .py.bak 恢复为 .py。无论 PyInstaller 成功失败都要调用。"""
+    if not backup_paths:
+        return
+    step("恢复源码（.py.bak → .py）")
+    for original in backup_paths:
+        bak = Path(str(original) + '.bak')
+        if not bak.exists():
+            warn(f"{original.relative_to(ROOT)}.bak 不存在，无法恢复")
+            continue
+        if original.exists():
+            # 极端情况：.py 又出现了（不应该），先删掉
+            original.unlink()
+        bak.rename(original)
+        ok(f"恢复 {original.relative_to(ROOT).as_posix()}")
+
+
+def cleanup_cython_artifacts():
+    """
+    可选清理：把 .pyd / .lib / .exp 中间产物删掉，保持源码树干净。
+    .pyd 在打包结束后已经被 PyInstaller 复制进 dist/，源码目录里的可以删。
+
+    注意：若有进程正在加载 .pyd（如杀软扫描中 / IDE 在跑），删除会失败。
+    无关紧要，下次 build 会被覆盖。
+    """
+    removed = 0
+    skipped = 0
+    for py_path in CYTHON_MODULES:
+        pyd_dir = ROOT / Path(py_path).parent
+        stem = Path(py_path).stem
+        for pat in (f"{stem}.*.pyd", f"{stem}.*.exp", f"{stem}.*.lib"):
+            for f in pyd_dir.glob(pat):
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    skipped += 1
+    if removed:
+        dim(f"  清理了 {removed} 个 Cython 中间产物")
+    if skipped:
+        warn(f"{skipped} 个 .pyd / .lib 被占用，跳过删除（不影响打包）")
+
+
 def build_exe(dev_mode):
     label = '调试版 console=True' if dev_mode else '发布版 console=False'
     step(f"PyInstaller 打包 — {label}")
@@ -166,6 +284,76 @@ def build_exe(dev_mode):
         return False
     ok(f"打包完成，耗时 {dt:.1f}s")
     return True
+
+
+VENDOR_OPENSSL = ROOT / 'vendor' / 'openssl'  # 由 vendor_openssl.py 填充
+
+# 必须配套替换的 4 个文件（与 vendor_openssl.py 的 EMBED_FILES 一致）。
+# 4 个文件来自同一份 python.org Python build，ABI 互相匹配。
+# 单独换 .dll 不行——会触发 "DLL load failed while importing _ssl"。
+# 注意：DLL 名是 libcrypto-3.dll（python.org 命名），不能重命名为带 -x64 的，
+# 否则 _ssl.pyd 找不到它的依赖。
+OPENSSL_FILES = ['_ssl.pyd', '_hashlib.pyd', 'libcrypto-3.dll', 'libssl-3.dll']
+
+# Anaconda PyInstaller 自动 bundle 进来的同名/旧名文件，替换后该清理掉
+ANACONDA_LEFTOVERS = ['libcrypto-3-x64.dll', 'libssl-3-x64.dll']
+
+
+def fix_openssl_dll_location():
+    """
+    替换 dist 里 PyInstaller 自动收集的 Anaconda OpenSSL 套件，改用
+    vendor/openssl/ 里 python.org 官方 build 的版本。
+
+    为什么必须替换全套（4 个文件，不能光换 .dll）：
+        Anaconda 编 libcrypto 时启用了 -DOPENSSL_USE_APPLINK，要求加载它
+        的主程序提供 OPENSSL_Applink 符号。Anaconda python.exe 提供了，
+        但 PyInstaller bootloader 没提供 → 启动崩 OPENSSL_Uplink。
+
+        python.org 的 libcrypto 没启 USE_APPLINK，与 PyInstaller 兼容。
+        但 _ssl.pyd 必须跟 libcrypto 来自同一份 build，ABI 才匹配；
+        混用 Anaconda _ssl.pyd + python.org libcrypto 会 "DLL load failed"。
+
+    libcrypto / libssl 同时复制到 exe 同级目录，因为 Windows DLL 搜索里
+    "exe 所在目录" 优先级高于 _internal/，挡掉 PATH 上的脏 DLL。
+    """
+    step("替换 OpenSSL 套件（_ssl/_hashlib/libcrypto/libssl → python.org 版）")
+    bundle = DIST_DIR / 'invest_tool'
+    internal = bundle / '_internal'
+    if not internal.exists():
+        warn("dist/invest_tool/_internal/ 不存在，跳过")
+        return
+
+    missing_vendored = [f for f in OPENSSL_FILES if not (VENDOR_OPENSSL / f).exists()]
+    if missing_vendored:
+        err(f"vendor/openssl/ 缺少文件：{missing_vendored}")
+        err("请先运行：venv\\Scripts\\python.exe vendor_openssl.py")
+        err("（这会从 python.org 下载 embeddable Python 提取 4 个文件，只需一次）")
+        sys.exit(1)
+
+    # 1) 用 python.org 版覆盖 / 新增到 dist
+    for name in OPENSSL_FILES:
+        src = VENDOR_OPENSSL / name
+        shutil.copy2(src, internal / name)
+        # libcrypto / libssl 还要放到 exe 同级，避免 PATH 上的脏 DLL 抢加载
+        if name.endswith('.dll'):
+            shutil.copy2(src, bundle / name)
+            ok(f"{name}（_internal/ + exe 同级，python.org 版）")
+        else:
+            ok(f"{name}（_internal/，python.org 版）")
+
+    # 2) 清掉 PyInstaller bundle 进来的 Anaconda 同名旧版 DLL
+    #    （文件名 libcrypto-3-x64.dll，跟 python.org 的 libcrypto-3.dll 是不同文件）
+    cleaned = 0
+    for name in ANACONDA_LEFTOVERS:
+        for path in [internal / name, bundle / name]:
+            if path.exists():
+                try:
+                    path.unlink()
+                    cleaned += 1
+                except OSError:
+                    pass
+    if cleaned:
+        dim(f"  清理 {cleaned} 个 Anaconda 残留 DLL（{', '.join(ANACONDA_LEFTOVERS)}）")
 
 
 def summarize():
@@ -208,9 +396,15 @@ def main():
     )
     parser.add_argument('--dev', action='store_true', help='保留 console 窗口调试')
     parser.add_argument('--skip-front', action='store_true', help='跳过前端构建')
+    parser.add_argument('--skip-cython', action='store_true',
+                        help='跳过 Cython 编译（开发自测用，发布请勿使用）')
     parser.add_argument('--clean', action='store_true', help='只清理，不打包')
     parser.add_argument('--run', action='store_true', help='打包成功后立即启动 exe')
     args = parser.parse_args()
+
+    # check_prereq() 需要知道是否要校验 Cython
+    global _SKIP_CYTHON
+    _SKIP_CYTHON = args.skip_cython
 
     _enable_ansi()
     print(f"{_C.BOLD}=== invest_tool 构建脚本 ==={_C.END}")
@@ -236,8 +430,28 @@ def main():
         if not build_frontend():
             sys.exit(1)
 
-    if not build_exe(dev_mode=args.dev):
+    # —— Cython 保护流程：编译 → 隐藏源码 → PyInstaller → 无论成败恢复源码 —— #
+    backup_paths = []
+    pyinstaller_ok = False
+    try:
+        if not args.skip_cython:
+            if not compile_cython():
+                sys.exit(1)
+            backup_paths = hide_source_for_pyinstaller()
+        else:
+            warn("已跳过 Cython 编译（SECRET / Cookies 将明文打包，不要发布！）")
+
+        pyinstaller_ok = build_exe(dev_mode=args.dev)
+    finally:
+        # 关键：无论 PyInstaller 成功还是失败，源码必须恢复回来
+        restore_sources(backup_paths)
+        if not args.skip_cython:
+            cleanup_cython_artifacts()
+
+    if not pyinstaller_ok:
         sys.exit(1)
+
+    fix_openssl_dll_location()
 
     if not summarize():
         sys.exit(1)

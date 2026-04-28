@@ -5,6 +5,7 @@
 数据源：开盘啦 ZhiShuStockList_W8 接口。
 """
 import logging
+from datetime import datetime
 
 import db
 from api_endpoints import kaipanla
@@ -25,23 +26,27 @@ def get_sector_stocks(plate_id, date=None, force=False):
     if not plate_id:
         return []
 
+    # date 是当前交易日就当成实时（KPL apphis 对当天不返回数据）
+    today_str = db.current_trading_day(datetime.now()).strftime('%Y-%m-%d')
+    is_today = (date is None) or (date == today_str)
+
     # 缓存 key：实时 = 'sector_stocks:801001'；历史 = 'sector_stocks:801001:20260422'
-    if date:
-        cache_key = f"{CACHE_PREFIX}{plate_id}:{date.replace('-', '')}"
-    else:
+    if is_today:
         cache_key = f"{CACHE_PREFIX}{plate_id}"
+    else:
+        cache_key = f"{CACHE_PREFIX}{plate_id}:{date.replace('-', '')}"
 
     if not force:
         cached, updated_at = db.get_cache(cache_key)
         # 历史缓存永久新鲜；实时按 TTL 判
-        if cached and (date or not db.is_market_cache_stale(updated_at)):
+        if cached and (not is_today or not db.is_market_cache_stale(updated_at)):
             return cached
 
-    # 抓取：历史走 apphis，实时走 apphq
-    if date:
-        raw = kaipanla.raw_kpl_plate_stocks_historical(plate_id, date)
-    else:
+    # 抓取：实时走 apphq；过去日子走 apphis
+    if is_today:
         raw = kaipanla.raw_kpl_plate_stocks(plate_id)
+    else:
+        raw = kaipanla.raw_kpl_plate_stocks_historical(plate_id, date)
 
     errcode = raw.get('errcode')
     if errcode is not None and str(errcode) != '0':

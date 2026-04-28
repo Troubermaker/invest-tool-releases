@@ -32,7 +32,7 @@ from services import watchlist_service
 #     妥善保管这个值；私钥泄露 = 任何人能签发激活码
 # ============================================
 SECRET = bytes.fromhex(
-    "8a4f3c9e1d6b7f2a5c0e8d3b9f1a4c6e2d8b5f7a3c9e1d6b7f2a5c0e8d3b9f1a"
+    "3146b6a8d3a4731284de89851b87efc06eb1c873028610afbbe0739ea175d77e"
 )
 
 # 自定义 32 字符表：去掉容易混淆的 0/1/I/O，剩下刚好 32 个

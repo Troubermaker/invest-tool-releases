@@ -39,6 +39,7 @@ from services import hot_list_service
 from services import news_service
 from services import limit_pool_service
 from services import license_service
+from services import update_service
 import ai_service
 
 
@@ -127,6 +128,129 @@ class Api:
     def activate_license(self, code):
         """提交激活码。成功返回 True；签名错误返回 False。"""
         return license_service.activate(code)
+
+    # ============ 在线更新 ============
+    @api_endpoint
+    def check_update(self):
+        """联网拉 latest.json 比版本号。返回包含 has_update / download_url 等的 dict。"""
+        return update_service.check_update()
+
+    @api_endpoint
+    def start_update_download(self, download_url, expected_sha256, total_bytes=0):
+        """启动后台下载。前端轮询 get_update_progress() 看进度。"""
+        ok = update_service.start_download(download_url, expected_sha256, total_bytes)
+        return {'started': ok}
+
+    @api_endpoint
+    def get_update_progress(self):
+        """轮询下载状态：phase / downloaded_bytes / total_bytes / error。"""
+        return update_service.get_progress()
+
+    @api_endpoint
+    def cancel_update_download(self):
+        """取消下载（清状态；正在跑的线程会自然结束）。"""
+        update_service.cancel_download()
+        return True
+
+    @api_endpoint
+    def apply_update(self):
+        """触发更新：写 updater.bat、启动它、本进程退出。
+        成功的话本调用永远不会返回（进程已退出）；失败返回 {ok:false, error}。"""
+        return update_service.apply_update()
+
+    @api_endpoint
+    def get_app_version(self):
+        """返回当前 app 版本号 + 数据库路径，给 Settings 页展示用。"""
+        from version import __version__
+        import os as _os
+        return {
+            'version':  __version__,
+            'data_dir': _os.path.dirname(db.DB_PATH),
+            'db_path':  db.DB_PATH,
+        }
+
+    @api_endpoint
+    def open_data_directory(self):
+        """用资源管理器打开当前数据目录，方便用户备份 / 检查数据。"""
+        import os as _os
+        data_dir = _os.path.dirname(db.DB_PATH)
+        _os.makedirs(data_dir, exist_ok=True)
+        if _os.name == 'nt':
+            _os.startfile(data_dir)
+        else:
+            import subprocess as _sp
+            _sp.Popen(['xdg-open', data_dir])
+        return data_dir
+
+    @api_endpoint
+    def pick_data_directory(self):
+        """弹原生"选择文件夹"对话框，返回 {cancelled, path}。"""
+        if not self._window:
+            raise RuntimeError("pywebview 窗口未就绪")
+        result = self._window.create_file_dialog(webview.FileDialog.FOLDER)
+        if not result:
+            return {"cancelled": True}
+        path = result[0] if isinstance(result, (list, tuple)) else result
+        return {"cancelled": False, "path": path}
+
+    @api_endpoint
+    def change_data_directory(self, new_path, migrate=True):
+        """
+        切换数据目录。
+        Args:
+            new_path: 新路径（必须可写）
+            migrate:  True 时把当前 invest_data.db 拷一份到新目录
+        Returns:
+            {"new_path": ..., "migrated": bool, "restart_required": True}
+        副作用：修改 %APPDATA%\\InvestTool\\config.json；下次启动 db.py 读取新路径生效。
+        """
+        import os as _os
+        import shutil as _shutil
+        import app_config
+
+        new_path = _os.path.abspath(new_path)
+        _os.makedirs(new_path, exist_ok=True)
+
+        # 可写性测试
+        try:
+            test = _os.path.join(new_path, '.write_test')
+            with open(test, 'w', encoding='utf-8') as f:
+                f.write('ok')
+            _os.remove(test)
+        except (OSError, PermissionError) as e:
+            raise RuntimeError(f"目标目录不可写：{e}")
+
+        # 迁移现有 db
+        migrated = False
+        current_db = db.DB_PATH
+        new_db = _os.path.join(new_path, 'invest_data.db')
+        same = _os.path.exists(new_db) and _os.path.abspath(current_db) == _os.path.abspath(new_db)
+        if migrate and _os.path.exists(current_db) and not same:
+            _shutil.copy2(current_db, new_db)
+            migrated = True
+
+        # 写 config
+        app_config.set_data_dir(new_path)
+
+        return {
+            "new_path": new_path,
+            "migrated": migrated,
+            "restart_required": True,
+        }
+
+    @api_endpoint
+    def reset_data_directory(self):
+        """恢复默认数据目录（%APPDATA%\\InvestTool\\）。下次启动生效。"""
+        import app_config
+        app_config.reset_data_dir()
+        return {"restart_required": True}
+
+    @api_endpoint
+    def restart_app(self):
+        """退出当前进程；用户需手动重启（或可调用方在前端用 updater 类似手段拉起）。"""
+        import threading as _t
+        _t.Timer(0.2, lambda: __import__('os')._exit(0)).start()
+        return True
 
     @api_endpoint
     def get_market_data(self, date=None):
@@ -356,7 +480,7 @@ class Api:
         # 根据分区组合定制默认文件名，便于一眼分辨共享的是啥
         default_name = _build_default_filename(sections)
         result = self._window.create_file_dialog(
-            webview.SAVE_DIALOG,
+            webview.FileDialog.SAVE,
             save_filename=default_name,
             file_types=('JSON Files (*.json)',),
         )
@@ -376,7 +500,7 @@ class Api:
         if not self._window:
             raise RuntimeError("pywebview 窗口未就绪")
         result = self._window.create_file_dialog(
-            webview.OPEN_DIALOG,
+            webview.FileDialog.OPEN,
             file_types=('JSON Files (*.json)',),
             allow_multiple=False,
         )

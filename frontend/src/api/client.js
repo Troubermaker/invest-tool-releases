@@ -112,6 +112,32 @@ export const api = {
   /** 提交激活码。成功返回 true，失败返回 false */
   activateLicense: (code) => call('activate_license', code),
 
+  // -------- 在线更新 --------
+  /** 检查更新：联网拉 latest.json 比版本。返回 {has_update, latest_version, ...} */
+  checkUpdate: () => call('check_update'),
+  /** 启动后台下载。前端轮询 getUpdateProgress() 看进度 */
+  startUpdateDownload: (downloadUrl, expectedSha256, totalBytes = 0) =>
+    call('start_update_download', downloadUrl, expectedSha256, totalBytes),
+  /** 轮询下载状态：{phase, downloaded_bytes, total_bytes, error} */
+  getUpdateProgress: () => call('get_update_progress'),
+  /** 取消下载 */
+  cancelUpdateDownload: () => call('cancel_update_download'),
+  /** 应用更新（写 updater.bat、退出进程）。成功的话本调用不会返回 */
+  applyUpdate: () => call('apply_update'),
+  /** 获取当前版本 + 数据库路径，给 Settings 显示用 */
+  getAppVersion: () => call('get_app_version'),
+  /** 打开数据目录（资源管理器） */
+  openDataDirectory: () => call('open_data_directory'),
+  /** 选择新的数据目录（原生文件夹选择对话框）。返回 {cancelled, path} */
+  pickDataDirectory: () => call('pick_data_directory'),
+  /** 切换数据目录。migrate=true 会把当前 invest_data.db 拷到新目录 */
+  changeDataDirectory: (newPath, migrate = true) =>
+    call('change_data_directory', newPath, migrate),
+  /** 恢复默认数据目录（%APPDATA%\InvestTool\）*/
+  resetDataDirectory: () => call('reset_data_directory'),
+  /** 退出当前进程（用户手动重启） */
+  restartApp: () => call('restart_app'),
+
   // -------- 自选股 --------
   /** 所有分组（按顺序）*/
   getWatchlistGroups: () => call('get_watchlist_groups'),

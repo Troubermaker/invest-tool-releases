@@ -1,19 +1,22 @@
 /**
- * 可见性感知的定时轮询。
+ * 可见性 + 市场会话感知的定时轮询。
  *
- * 设计思路：app 每次只挂载一个页面（v-if 切换时其它页面 unmount），
- * 所以当前可见的页面就是"用户正在盯的页面"，自然应该保持基础刷新节奏。
- * 只需要处理"窗口切到后台 / 最小化"这一种降速场景 —— 用户看不见就没必要抓接口。
+ * 三层降速 / 暂停策略：
+ *   1. 窗口可见性
+ *      - 'active'      窗口可见，正常刷新（baseInterval）
+ *      - 'hidden'      窗口隐藏 / 最小化 < 5 分钟，6× 间隔
+ *      - 'deep-hidden' 隐藏 ≥ 5 分钟，18× 间隔
+ *   2. 市场会话
+ *      - 盘外（盘前 / 午休 / 盘后 / 周末）→ 自动暂停（数据已固定缓存，重复抓没意义）
+ *        9:30 准点开盘自动恢复；周末永久暂停到周一 9:30
+ *      - 不依赖 backend 节假日数据；周末检测足够大部分时候，节假日只是会多刷几次（无害）
+ *   3. 用户偏好（每模块独立持久化）
+ *      - 用户在 RefreshCountdown 选 0 = 暂停；选具体秒数 = 自定义周期
  *
- * 三态：
- *   - 'active'      窗口可见，正常刷新（baseInterval）
- *   - 'hidden'      窗口隐藏 / 最小化不足 5 分钟，6 倍间隔（用户可能很快回来）
- *   - 'deep-hidden' 隐藏超过 5 分钟，18 倍间隔（接近暂停）
- *
- * 间隔可被用户偏好覆盖：传入 prefKey，组合就会从 user_preferences 读取秒数（0 = 暂停）。
+ * 想 24x7 刷新（如快讯）→ 传 ignoreMarketHours: true 跳过市场会话检查
  *
  * 用法：
- *   const { secondsUntilNext, currentInterval, setRefreshInterval, refresh } =
+ *   const { secondsUntilNext, currentInterval, setRefreshInterval, refresh, marketSession } =
  *       useSmartRefresh(api.getMarketData, {
  *           baseInterval: 15_000,
  *           prefKey: 'refresh.market_data',
@@ -28,7 +31,7 @@ const HIDDEN_DEEP_MS = 5 * 60 * 1000  // 隐藏超过 5 分钟算 deep-hidden
 // ---------------- 模块级全局状态 ----------------
 const isHidden    = ref(typeof document !== 'undefined' ? document.hidden : false)
 const hiddenSince = ref(isHidden.value ? Date.now() : null)
-// 每秒推一次时间戳：1) 驱动 deep-hidden 判定 2) 驱动各模块倒计时 UI
+// 每秒推一次时间戳：1) 驱动 deep-hidden 判定 2) 驱动倒计时 UI 3) 驱动市场会话切换
 const now = ref(Date.now())
 
 export const refreshMode = computed(() => {
@@ -42,6 +45,66 @@ const MODE_MULTIPLIER = {
     hidden:       6,
     'deep-hidden': 18,
 }
+
+// ---------------- 市场会话（A 股交易时段判定）----------------
+// 'morning'      9:30 - 11:30 上半场
+// 'lunch'        11:30 - 13:00 午休
+// 'afternoon'    13:00 - 15:00 下半场
+// 'after-close'  15:00 - 24:00 盘后
+// 'before-open'  0:00 - 9:30   盘前
+// 'weekend'      周六/周日全天
+// 'holiday'      工作日里的法定节假日（如清明 / 国庆 / 春节调休等）
+//
+// 节假日靠 backend 的 chinese_calendar 给的交易日清单（getTradingDays），
+// 首次启动时异步拉一次，挂在 tradingDaysSet。在 set 加载完成前，
+// 仅靠周末判断作为兜底，节假日会被暂时误判为开盘日（无危害——backend 缓存挡上游）。
+
+// 后端交易日集合（'YYYY-MM-DD'）。null=尚未加载；Set=已加载（即使是空 Set）
+const tradingDaysSet = ref(null)
+
+async function _loadTradingDays() {
+    if (tradingDaysSet.value !== null) return  // 只加载一次
+    try {
+        const res = await api.getTradingDays()
+        tradingDaysSet.value = (res.ok && Array.isArray(res.data))
+            ? new Set(res.data)
+            : new Set()
+    } catch (e) {
+        console.warn('加载交易日清单失败，节假日判断将退化为周末-only:', e)
+        tradingDaysSet.value = new Set()
+    }
+}
+
+function _localYmd(d) {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+}
+
+export const marketSession = computed(() => {
+    // 用 now（每秒 tick）让计算具备响应性，跨过 9:30/11:30/13:00/15:00 时自动切状态
+    const d = new Date(now.value)
+    const day = d.getDay()
+    if (day === 0 || day === 6) return 'weekend'
+
+    // 节假日检测（仅当 set 已加载且非空时生效）
+    const set = tradingDaysSet.value
+    if (set && set.size > 0 && !set.has(_localYmd(d))) {
+        return 'holiday'
+    }
+
+    const m = d.getHours() * 60 + d.getMinutes()
+    if (m < 9 * 60 + 30)         return 'before-open'
+    if (m < 11 * 60 + 30)        return 'morning'
+    if (m < 13 * 60)             return 'lunch'
+    if (m <= 15 * 60)            return 'afternoon'
+    return 'after-close'
+})
+
+export const isMarketOpen = computed(() =>
+    marketSession.value === 'morning' || marketSession.value === 'afternoon'
+)
 
 // ---------------- 全局监听器只挂一次 ----------------
 let globalListenersInstalled = false
@@ -63,26 +126,36 @@ function startGlobalTicker() {
     setInterval(() => { now.value = Date.now() }, 1000)
 }
 
+let tradingDaysLoadStarted = false
+function ensureTradingDaysLoaded() {
+    if (tradingDaysLoadStarted) return
+    tradingDaysLoadStarted = true
+    _loadTradingDays()  // 火种异步触发，不阻塞 useSmartRefresh
+}
+
 
 // ---------------- 核心 API ----------------
 /**
  * @param {Function} fn API 调用函数，可以返回 {ok, data, error} 信封或 void
  * @param {Object} opts
- *   - baseInterval: 基础间隔 ms（active 模式下真实使用）
- *   - prefKey:      可选，user_preferences key；值是秒数（0 = 暂停）
- *   - onData:       成功回调（信封模式）
- *   - onError:      失败回调（信封模式）
- *   - immediate:    挂载时立即拉一次，默认 true
+ *   - baseInterval:        基础间隔 ms
+ *   - prefKey:             可选，user_preferences key；值是秒数（0 = 暂停）
+ *   - ignoreMarketHours:   true = 24x7 刷新（用于快讯等盘外也变的数据）；默认 false
+ *   - onData:              成功回调（信封模式）
+ *   - onError:             失败回调（信封模式）
+ *   - immediate:           挂载时立即拉一次，默认 true
  */
 export function useSmartRefresh(fn, {
     baseInterval = 30_000,
     prefKey = null,
+    ignoreMarketHours = false,
     onData = null,
     onError = null,
     immediate = true,
 } = {}) {
     installGlobalListeners()
     startGlobalTicker()
+    ensureTradingDaysLoaded()
 
     let timer = null
     const lastRefreshAt = ref(0)
@@ -98,12 +171,19 @@ export function useSmartRefresh(fn, {
         lastRefreshAt.value = Date.now()
     }
 
+    function shouldAutoRefresh() {
+        // 用户暂停
+        if (currentIntervalMs.value <= 0) return false
+        // 盘外暂停（除非显式 opt-out）
+        if (!ignoreMarketHours && !isMarketOpen.value) return false
+        return true
+    }
+
     function reschedule() {
         if (timer) { clearInterval(timer); timer = null }
-        const intervalMs = currentIntervalMs.value
-        if (intervalMs <= 0) return  // 暂停模式：不安排定时器
+        if (!shouldAutoRefresh()) return
         const multiplier = MODE_MULTIPLIER[refreshMode.value] || 1
-        timer = setInterval(run, intervalMs * multiplier)
+        timer = setInterval(run, currentIntervalMs.value * multiplier)
     }
 
     /**
@@ -119,9 +199,13 @@ export function useSmartRefresh(fn, {
         reschedule()
     }
 
-    // 距离下次刷新的秒数。null = 还没首次拉取；-1 = 暂停模式
+    // 距离下次刷新的秒数。
+    //   null = 还没首次拉取
+    //   -1   = 用户主动暂停
+    //   -2   = 盘外自动暂停（数据已固定缓存，无意义抓取）
     const secondsUntilNext = computed(() => {
         if (currentIntervalMs.value <= 0) return -1
+        if (!ignoreMarketHours && !isMarketOpen.value) return -2
         if (!lastRefreshAt.value) return null
         const interval = currentIntervalMs.value * (MODE_MULTIPLIER[refreshMode.value] || 1)
         const remainingMs = (lastRefreshAt.value + interval) - now.value
@@ -143,20 +227,25 @@ export function useSmartRefresh(fn, {
                 }
             } catch (e) { console.warn(e) }
         }
+        // 首次仍然拉一次（拿到当前最新数据，让用户看到东西）
         if (immediate) run()
         reschedule()
     })
 
-    const stopWatch = watch(refreshMode, () => reschedule())
+    // 窗口可见性 / 市场会话 / 用户偏好 任一变化都重排定时器
+    const stopWatch1 = watch(refreshMode, () => reschedule())
+    const stopWatch2 = watch(isMarketOpen, () => reschedule())
 
     onUnmounted(() => {
         if (timer) clearInterval(timer)
-        stopWatch()
+        stopWatch1()
+        stopWatch2()
     })
 
     return {
         refresh: run,
         mode: refreshMode,
+        marketSession,
         lastRefreshAt,
         secondsUntilNext,
         currentInterval,

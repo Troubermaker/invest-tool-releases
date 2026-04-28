@@ -10,6 +10,7 @@
 """
 import json
 import logging
+from datetime import datetime
 
 from http_client import fetch_text
 import db
@@ -28,16 +29,25 @@ def get_hot_sectors(date=None, force=False):
     Args:
         date: 'YYYY-MM-DD' 历史日期；None 表示当前交易日（实时）
         force: 跳过缓存
-    主源 KPL，失败自动降级到新浪（仅实时；历史只走 KPL apphis）。
+
+    路由策略：
+        - date 是当前交易日（含已收盘）→ 走实时接口（KPL apphq；KPL apphis 对当天不返回数据）
+          失败时降级到新浪
+        - date 是过去交易日 → 走历史接口（KPL apphis），失败不降级（新浪没有历史）
+        - date=None → 走实时接口
     """
-    if date:
-        # 历史路径：只走 KPL apphis，没降级
-        return _get_from_kpl_historical(date, force)
-    try:
-        return _get_from_kpl(force)
-    except Exception as e:
-        logger.warning(f"KPL 精选板块失败，降级到新浪: {e}")
-        return _get_from_sina(force)
+    today_str = db.current_trading_day(datetime.now()).strftime('%Y-%m-%d')
+    is_today = (date is None) or (date == today_str)
+
+    if is_today:
+        try:
+            return _get_from_kpl(force)
+        except Exception as e:
+            logger.warning(f"KPL 精选板块失败，降级到新浪: {e}")
+            return _get_from_sina(force)
+
+    # 过去日子 — 只能走 KPL apphis（新浪没有历史板块榜）
+    return _get_from_kpl_historical(date, force)
 
 
 def _parse_kpl_list(lst):

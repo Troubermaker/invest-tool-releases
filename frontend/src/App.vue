@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import RightDrawer from './components/RightDrawer.vue'
 import ActivationGate from './components/ActivationGate.vue'
+import UpdateBanner from './components/UpdateBanner.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
@@ -35,6 +36,9 @@ function handleNavigate(tabId) {
 
   <!-- 已激活：正常主界面 -->
   <div v-else class="flex h-screen w-full bg-[#f9fafb] text-gray-800 overflow-hidden font-sans">
+
+    <!-- 在线更新通知（顶部，启动时静默检查 Gitee 上的 latest.json） -->
+    <UpdateBanner />
 
     <!-- Left Sidebar -->
     <Sidebar :currentTab="currentTab" @navigate="handleNavigate"/>

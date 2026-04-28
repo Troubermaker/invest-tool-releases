@@ -2,6 +2,112 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../api/client'
 
+// ---------------- 关于 / 系统 ----------------
+const appVersion = ref('')
+const dataDir = ref('')
+const checkingUpdate = ref(false)
+const updateCheckMsg = ref('')      // 检查后的反馈
+let _updateCheckMsgTimer = null
+
+async function loadAppInfo() {
+    const res = await api.getAppVersion()
+    if (res.ok && res.data) {
+        appVersion.value = res.data.version
+        dataDir.value = res.data.data_dir
+    }
+}
+
+async function handleOpenDataDir() {
+    await api.openDataDirectory()
+}
+
+// ---- 切换数据目录 ----
+const changeDirBusy = ref(false)
+const changeDirNotice = ref('')        // 操作结果展示（红/绿）
+const showRestartModal = ref(false)
+let _changeDirNoticeTimer = null
+
+async function handleChangeDataDir() {
+    changeDirBusy.value = true
+    try {
+        const r1 = await api.pickDataDirectory()
+        if (!r1.ok || r1.data?.cancelled) return
+
+        const newPath = r1.data.path
+        const ok = await askConfirm({
+            title: '切换数据目录',
+            message: `确认要把数据目录改为：\n\n${newPath}\n\n` +
+                     `当前数据将自动迁移过去（自选 / 持仓 / 激活码 / 偏好）。\n` +
+                     `应用需要重启才能生效。`,
+            confirmText: '确认切换',
+        })
+        if (!ok) return
+
+        const r2 = await api.changeDataDirectory(newPath, true)
+        if (!r2.ok) {
+            showNotice('切换失败：' + (r2.error || ''), 'error')
+            return
+        }
+        // 成功 → 提示重启
+        dataDir.value = r2.data.new_path
+        showRestartModal.value = true
+    } finally {
+        changeDirBusy.value = false
+    }
+}
+
+async function handleResetDataDir() {
+    const ok = await askConfirm({
+        title: '恢复默认数据目录',
+        message: '将把数据目录恢复为 %APPDATA%\\InvestTool\\。\n' +
+                 '当前自定义目录里的数据不会被自动搬回——如需保留请先手动备份。\n' +
+                 '应用需要重启。',
+        confirmText: '确认恢复',
+    })
+    if (!ok) return
+    const r = await api.resetDataDirectory()
+    if (r.ok) {
+        showRestartModal.value = true
+    }
+}
+
+async function handleRestartNow() {
+    showRestartModal.value = false
+    await api.restartApp()
+    // 进程会在 200ms 后退出。用户需手动双击 exe 重启。
+}
+
+function showNotice(msg, kind = 'info') {
+    changeDirNotice.value = `[${kind}] ${msg}`
+    if (_changeDirNoticeTimer) clearTimeout(_changeDirNoticeTimer)
+    _changeDirNoticeTimer = setTimeout(() => { changeDirNotice.value = '' }, 6000)
+}
+
+async function handleCheckUpdate() {
+    checkingUpdate.value = true
+    updateCheckMsg.value = ''
+    if (_updateCheckMsgTimer) clearTimeout(_updateCheckMsgTimer)
+
+    // 让 UpdateBanner 自己拉一次（如果有更新会自动展开模态框）
+    window.dispatchEvent(new CustomEvent('invest-tool:trigger-update-check'))
+
+    // 同步显示 Settings 页内的反馈
+    const res = await api.checkUpdate()
+    checkingUpdate.value = false
+    if (!res.ok || !res.data) {
+        updateCheckMsg.value = '检查失败，请检查网络'
+    } else if (!res.data.configured) {
+        updateCheckMsg.value = '更新功能未配置（联系开发者）'
+    } else if (res.data.error) {
+        updateCheckMsg.value = '检查失败：' + res.data.error
+    } else if (res.data.has_update) {
+        updateCheckMsg.value = `🔔 v${res.data.latest_version} 可用（顶部已弹出详情）`
+    } else {
+        updateCheckMsg.value = `✅ 当前已是最新版本（v${res.data.current_version}）`
+    }
+    _updateCheckMsgTimer = setTimeout(() => { updateCheckMsg.value = '' }, 8000)
+}
+
 // ---------------- 导出（原生"另存为"对话框，可选分区）----------------
 const exporting = ref(false)
 const exportMsg = ref('')
@@ -205,7 +311,7 @@ function formatDisplay(h) {
     return h.split('+').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' + ')
 }
 
-onMounted(() => { loadBossKey() })
+onMounted(() => { loadBossKey(); loadAppInfo() })
 onUnmounted(() => {
     // 若用户在录制中直接离开页面，清理监听
     window.removeEventListener('keydown', onCaptureKeyDown, true)
@@ -241,6 +347,52 @@ function confirmCancel() {
     </div>
 
     <div class="flex-1 px-[24px] py-[20px]">
+
+        <!-- ============ 关于 / 系统 ============ -->
+        <div class="max-w-[760px] mb-[20px] bg-white border border-[#eeeeee] rounded-[8px] shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
+            <div class="px-[20px] py-[14px] border-b border-[#f0f0f0]">
+                <div class="text-[14px] font-bold text-[#111]">关于 / 系统</div>
+                <div class="text-[12px] text-[#999] mt-[2px]">版本信息、数据目录、检查更新</div>
+            </div>
+            <div class="px-[20px] py-[14px] space-y-[12px]">
+
+                <!-- 当前版本 -->
+                <div class="flex items-center gap-[14px]">
+                    <span class="text-[12px] text-[#666] w-[80px] shrink-0">当前版本</span>
+                    <span class="text-[13px] font-mono font-semibold text-[#111] tabular-nums">v{{ appVersion || '...' }}</span>
+                    <button @click="handleCheckUpdate"
+                            :disabled="checkingUpdate"
+                            class="ml-auto text-[12px] font-semibold text-[#dc2626] border border-[#fecaca] hover:bg-[#fff5f5] disabled:opacity-50 disabled:cursor-wait px-[12px] py-[5px] rounded-[4px] transition">
+                        {{ checkingUpdate ? '检查中...' : '检查更新' }}
+                    </button>
+                </div>
+                <div v-if="updateCheckMsg"
+                     class="text-[12px] pl-[94px] -mt-[6px]"
+                     :class="updateCheckMsg.includes('失败') || updateCheckMsg.includes('未配置') ? 'text-[#dc2626]' : 'text-[#059669]'">
+                    {{ updateCheckMsg }}
+                </div>
+
+                <!-- 数据目录 -->
+                <div class="flex items-center gap-[14px]">
+                    <span class="text-[12px] text-[#666] w-[80px] shrink-0">数据目录</span>
+                    <code class="text-[11px] font-mono text-[#475569] bg-[#f8fafc] border border-[#e5e7eb] px-[8px] py-[2px] rounded-[3px] truncate flex-1">{{ dataDir || '...' }}</code>
+                    <button @click="handleOpenDataDir"
+                            class="text-[12px] font-semibold text-[#2563eb] border border-[#bfdbfe] hover:bg-[#eff6ff] px-[12px] py-[5px] rounded-[4px] transition shrink-0">
+                        打开目录
+                    </button>
+                    <button @click="handleChangeDataDir"
+                            :disabled="changeDirBusy"
+                            class="text-[12px] font-semibold text-[#dc2626] border border-[#fecaca] hover:bg-[#fff5f5] disabled:opacity-50 px-[12px] py-[5px] rounded-[4px] transition shrink-0">
+                        {{ changeDirBusy ? '处理中...' : '更改位置' }}
+                    </button>
+                </div>
+                <div class="text-[11px] text-[#aaa] pl-[94px] -mt-[6px] leading-relaxed">
+                    自选 / 持仓 / 激活码 / 偏好都存在这里，升级新版本不会丢失。
+                    <a class="text-[#2563eb] cursor-pointer hover:underline ml-[6px]"
+                       @click="handleResetDataDir">恢复默认</a>
+                </div>
+            </div>
+        </div>
 
         <!-- ============ 数据备份 ============ -->
         <div class="max-w-[760px] bg-white border border-[#eeeeee] rounded-[8px] shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
@@ -366,7 +518,10 @@ function confirmCancel() {
 
         <!-- 提示：手工拷库路径 -->
         <div class="max-w-[760px] mt-[16px] bg-[#fffbeb] border border-[#fde68a] rounded-[6px] px-[14px] py-[10px] text-[12px] text-[#92400e]">
-            💡 应急方案：也可以直接把 <code class="bg-white px-[5px] py-[1px] rounded text-[11px]">invest_data.db</code> 拷贝到另一台电脑的相同路径，但不建议用云盘自动同步（SQLite 锁冲突风险）。
+            💡 数据库位置：<code class="bg-white px-[5px] py-[1px] rounded text-[11px]">%APPDATA%\InvestTool\invest_data.db</code>
+            （在文件管理器地址栏粘贴 <code class="bg-white px-[5px] py-[1px] rounded text-[11px]">%APPDATA%\InvestTool</code> 可直达）。
+            升级新版本会自动保留你的所有数据。也可以直接拷贝这个文件到另一台电脑的相同路径迁移，
+            但不建议放在云盘自动同步目录（SQLite 锁冲突风险）。
         </div>
 
         <!-- ============ 老板键 ============ -->
@@ -431,6 +586,33 @@ function confirmCancel() {
             </div>
         </div>
 
+    </div>
+
+    <!-- ============ 重启提示弹窗 ============ -->
+    <div v-if="showRestartModal"
+         class="fixed inset-0 bg-black/30 z-[80] flex items-center justify-center"
+         @click.self="showRestartModal = false">
+        <div class="bg-white rounded-[10px] w-[380px] shadow-[0_10px_40px_rgba(0,0,0,0.20)] overflow-hidden">
+            <div class="px-[24px] pt-[20px] pb-[14px] flex items-baseline gap-[10px]">
+                <span class="text-[18px]">🔄</span>
+                <div class="text-[15px] font-bold text-[#111]">数据目录已切换</div>
+            </div>
+            <div class="px-[24px] pb-[14px] text-[13px] text-[#555] leading-relaxed">
+                配置已保存到 <code class="text-[12px] bg-[#f5f5f5] px-[4px] py-[1px] rounded">config.json</code>，
+                <strong>需要重启应用才能生效</strong>。<br>
+                数据已自动迁移到新位置（如选择了"迁移"）。
+            </div>
+            <div class="flex justify-end gap-[8px] px-[20px] py-[14px] bg-[#fafafa] border-t border-[#f0f0f0]">
+                <button @click="showRestartModal = false"
+                        class="text-[12px] px-[16px] py-[7px] text-[#444] border border-[#d4d4d4] rounded-[4px] hover:bg-white transition">
+                    稍后手动重启
+                </button>
+                <button @click="handleRestartNow"
+                        class="text-[12px] font-bold text-white bg-[#dc2626] px-[16px] py-[7px] rounded-[4px] hover:bg-[#991b1b] shadow-sm transition">
+                    立即关闭（请手动启动）
+                </button>
+            </div>
+        </div>
     </div>
 
     <!-- ============ 通用确认弹窗 ============ -->

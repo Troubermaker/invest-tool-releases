@@ -1,6 +1,25 @@
 import os
 import sys
 
+# ========= 修复 OPENSSL_Uplink 崩溃（必须最早执行，先于任何 import）=========
+# PyInstaller 把 _internal/libcrypto-3-x64.dll 放在子目录里，Windows 的 DLL
+# 搜索顺序里 PATH 优先级高于子目录，所以如果用户 PATH 里有 miniconda /
+# Git Bash 自带的 libcrypto-3-x64.dll，cryptography 加载到的会是错的那一份，
+# 触发 "OPENSSL_Uplink: no OPENSSL_Applink" 弹窗崩溃。
+# 解决：把 _internal/ 强制加到 DLL 搜索路径最前面。
+if getattr(sys, 'frozen', False):
+    _bundle_dir = os.path.dirname(sys.executable)
+    _internal_dir = os.path.join(_bundle_dir, '_internal')
+    if os.path.isdir(_internal_dir):
+        # AddDllDirectory（Win8+）—— 比改 PATH 更可靠，不污染子进程环境
+        if hasattr(os, 'add_dll_directory'):
+            try:
+                os.add_dll_directory(_internal_dir)
+            except (OSError, ValueError):
+                pass
+        # 双保险：PATH 也前置一下（兼容老的 LoadLibrary 调用）
+        os.environ['PATH'] = _internal_dir + os.pathsep + os.environ.get('PATH', '')
+
 # ========= PyInstaller windowed 模式 stdout 兜底 =========
 # console=False 打包后 sys.stdout / sys.stderr 为 None，任何 print()、pywebview 的
 # debug 日志、scheduler 后台线程的 print 都会"写 None 报错 → 进程崩溃"。

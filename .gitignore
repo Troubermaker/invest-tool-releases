@@ -55,3 +55,37 @@ codes_*.txt
 *.codes.csv
 licenses/
 
+# Cython 编译产物（.pyd / .c / .lib / .exp）—— 平台特定，不入版本库
+services/*.pyd
+services/*.c
+services/*.lib
+services/*.exp
+api_endpoints/*.pyd
+api_endpoints/*.c
+api_endpoints/*.lib
+api_endpoints/*.exp
+# build.py 在意外中断时可能残留 .py.bak（正常退出会自动清理）
+*.py.bak
+
+# 发布产物（zip / 校验和 / 发布说明）
+release/
+
+# Vendored OpenSSL DLLs（从 conda-forge 拉取，二进制不入库）
+# 想拉取：venv/Scripts/python.exe vendor_openssl.py
+vendor/openssl/*.dll
+vendor/openssl/README.txt
+
+# 临时调试 / 试验脚本（防止以后又攒一堆）
+test_*.py
+*_test.py
+scratch/
+*.dump.json
+run_log*.txt
+*.scratch
+debug_*.py
+
+# 根目录前端配置残留（正确位置应在 frontend/）
+/package.json
+/package-lock.json
+/node_modules/
+

@@ -606,6 +606,7 @@ const newsLastSeenTs = ref(0)
 let _newsSeeded = false               // 首次拿到数据时不当作未读（避免开屏就显示 50）
 
 // 后台预拉 + 周期刷新（用户可在 RefreshCountdown 改间隔）
+// ignoreMarketHours: 快讯不受盘外暂停影响——夜盘 / 周末 / 政策新闻盘外才出
 const {
     secondsUntilNext: newsCountdown,
     currentInterval:  newsInterval,
@@ -616,6 +617,7 @@ const {
     {
         baseInterval: 60_000,
         prefKey: 'refresh.fast_news',
+        ignoreMarketHours: true,
         onData: (data) => {
             newsData.value = data || []
             // 首次填充 / 用户已经在看快讯 → 直接标记为已读

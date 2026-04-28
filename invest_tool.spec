@@ -13,8 +13,11 @@ PyInstaller 打包配置。推荐走 build.py 一键脚本，别直接调 pyinst
 关键点：
 - onedir 模式（不是 onefile）：启动快，pywebview + WebView2 兼容性更好
 - 把 frontend/dist 原样打进去，main.py 会 detect 到并加载
-- api_endpoints 内含 _auth.py（cookies）也会一起带上 —— 个人使用没问题，
-  分发给别人前请手工清空 cookie
+- 关键模块由 build.py 调用 setup_cython.py 编译为 .pyd，PyInstaller 阶段
+  对应 .py 已被改名 .py.bak，所以本 spec 看到的是机器码扩展模块，不会
+  把 SECRET / Cookies 以源码形式打入分发包：
+    services/license_service.py    → license_service.cp312-win_amd64.pyd
+    api_endpoints/_auth.py         → _auth.cp312-win_amd64.pyd
 """
 import os
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_all
@@ -28,7 +31,13 @@ block_cipher = None
 # cryptography 自带 OpenSSL DLL，PyInstaller 静态分析会漏掉一些运行时需要的二进制，
 # 导致第一次 HTTPS 请求触发 "OPENSSL_Uplink: no OPENSSL_Applink" 进程崩溃。
 # collect_all 把 datas / binaries / hiddenimports 全拿到，确保不缺件。
-hiddenimports = ['schedule']
+# 显式列出 Cython 编译过的扩展模块。.py 在打包阶段会被改名 .py.bak，
+# PyInstaller 静态分析可能扫不到，加进来保险。
+hiddenimports = [
+    'schedule',
+    'services.license_service',   # Cython 保护：HMAC SECRET
+    'api_endpoints._auth',        # Cython 保护：所有 Cookie / Token
+]
 datas = [('frontend/dist', 'frontend/dist')]  # 前端打包产物
 binaries = []
 

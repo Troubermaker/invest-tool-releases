@@ -1,9 +1,49 @@
 import sqlite3
 import os
+import sys
 import json
+import shutil
 from datetime import datetime, time as dtime, timedelta
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'invest_data.db')
+
+def _resolve_data_dir():
+    """
+    返回放 invest_data.db 的目录。
+
+    - 开发态（python main.py）：项目根目录（与 db.py 同级），便于查看 / 调试
+    - 打包态（dist/.../invest_tool.exe）：从 app_config 读，默认 %APPDATA%\\InvestTool\\
+        用户在 Settings 里改了路径会写到 config.json，下次启动这里读到新路径
+
+    打包态自动迁移：旧版可能把 db 写在 _internal/ 或 exe 同级，启动时自动搬到 data_dir。
+    """
+    if getattr(sys, 'frozen', False):
+        # 从 app_config 读用户配置（含默认值回落）
+        import app_config
+        data_dir = app_config.get_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+
+        # 兼容迁移：旧版残留的 invest_data.db 自动搬到 data_dir
+        target_db = os.path.join(data_dir, 'invest_data.db')
+        if not os.path.exists(target_db):
+            for legacy_dir in (
+                os.path.dirname(os.path.abspath(__file__)),  # _internal/
+                os.path.dirname(sys.executable),              # exe 同级
+            ):
+                legacy_db = os.path.join(legacy_dir, 'invest_data.db')
+                if os.path.exists(legacy_db) and os.path.abspath(legacy_db) != os.path.abspath(target_db):
+                    try:
+                        shutil.copy2(legacy_db, target_db)
+                        break
+                    except OSError:
+                        pass
+
+        return data_dir
+
+    # 开发态：项目根目录
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+DB_PATH = os.path.join(_resolve_data_dir(), 'invest_data.db')
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
