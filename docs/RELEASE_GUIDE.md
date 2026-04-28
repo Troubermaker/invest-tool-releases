@@ -20,7 +20,15 @@ venv\Scripts\python.exe release.py
 venv\Scripts\python.exe release.py --skip-front
 ```
 
-**`--publish` 是什么**：自动把 `release/latest.json` 复制到你预先 clone 好的公开发布仓库，然后 `git pull/add/commit/push` 一条龙。配置见 [`update_config.py`](../update_config.py) 的 `RELEASE_REPO_LOCAL_PATH`。zip 仍需手动到 Gitee 网页上传到 Releases（zip 太大不走 git）。
+**`--publish` 是什么**：自动做两件事：
+1. 把 `release/latest.json` 复制到本地 clone 的公开发布仓库 → `git pull/add/commit/push`
+2. 通过 Gitee Releases API 创建 release（tag = vX.Y.Z）+ 上传 zip 附件
+
+**前置配置**（只需做一次）：
+- `update_config.py` 里设置 `GITEE_USER` / `RELEASE_REPO` / `RELEASE_REPO_LOCAL_PATH`
+- 复制 `release_secret.py.example` → `release_secret.py`，填入你的 Gitee Personal Access Token（见 https://gitee.com/profile/personal_access_tokens ，需勾选 `projects` 权限）
+
+**没配 token 也能用**：`--publish` 仍会做第 1 步，第 2 步自动跳过 + 提示你手动上传 zip。
 
 发布完毕后产物在 `release/` 下：
 ```

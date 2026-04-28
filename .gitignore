@@ -89,3 +89,6 @@ debug_*.py
 /package-lock.json
 /node_modules/
 
+# 发版用的 Gitee Personal Access Token（绝不能提交）
+release_secret.py
+

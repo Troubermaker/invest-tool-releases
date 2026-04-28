@@ -28,12 +28,15 @@ invest_tool 发布脚本（包装 build.py）。
 import argparse
 import datetime
 import hashlib
+import json as _json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -177,14 +180,45 @@ def _git(*args) -> str:
 
 
 def collect_recent_commits(n=20):
-    """获取自上个 tag 起的提交，找不到 tag 就退化为最近 N 条。"""
+    """
+    获取自上个 tag 起的提交，找不到 tag 就退化为最近 N 条。
+    自动过滤噪音：merge commit、chore: bump version、空 subject。
+    """
     last_tag = _git('describe', '--tags', '--abbrev=0')
     if last_tag:
-        log = _git('log', f'{last_tag}..HEAD', '--pretty=format:- %h %s')
-        if log:
-            return f"自 {last_tag} 起：\n{log}"
-    log = _git('log', f'-n{n}', '--pretty=format:- %h %s')
-    return f"最近 {n} 条提交：\n{log}" if log else "（无 git 记录）"
+        log = _git('log', f'{last_tag}..HEAD', '--pretty=format:%h|||%s')
+        prefix = f"自 {last_tag} 起：\n"
+    else:
+        log = _git('log', f'-n{n}', '--pretty=format:%h|||%s')
+        prefix = f"最近 {n} 条提交：\n"
+
+    if not log:
+        return "（无 git 记录）"
+
+    # 过滤噪音
+    NOISE_PATTERNS = [
+        r'^Merge ',                  # merge commits
+        r'^chore:?\s*bump',          # version bump
+        r'^chore:?\s*release',       # release commits
+        r'^WIP\b',                   # work-in-progress
+        r'^wip\b',
+        r'^\[skip ci\]',
+    ]
+    noise_re = re.compile('|'.join(NOISE_PATTERNS), re.IGNORECASE)
+
+    lines = []
+    for raw in log.splitlines():
+        if '|||' not in raw:
+            continue
+        sha, subject = raw.split('|||', 1)
+        subject = subject.strip()
+        if not subject or noise_re.match(subject):
+            continue
+        lines.append(f"- {sha} {subject}")
+
+    if not lines:
+        return "（自上次发版以来无功能性提交）"
+    return prefix + '\n'.join(lines)
 
 
 def write_latest_json(version: str, zip_name: str, zip_path: Path, sha256: str, dest: Path):
@@ -263,6 +297,158 @@ SHA256:   {sha256}
 """
     dest.write_text(body, encoding='utf-8')
     ok(f"发布说明：{dest.name}")
+
+
+# ---- Gitee Releases API（创建 release + 上传 zip）----
+
+def _get_gitee_token():
+    """优先环境变量 GITEE_TOKEN；fallback release_secret.py。"""
+    env_token = os.environ.get('GITEE_TOKEN', '').strip()
+    if env_token:
+        return env_token
+    try:
+        import release_secret
+        token = getattr(release_secret, 'GITEE_TOKEN', '').strip()
+        if token and not token.startswith('REPLACE_'):
+            return token
+    except ImportError:
+        pass
+    return None
+
+
+def upload_zip_to_gitee_release(version: str, zip_path: Path, sha256: str, release_notes: str):
+    """
+    用 Gitee Releases API 创建 release + 上传 zip 附件。
+    需要 PAT（personal access token）—— 见 release_secret.py.example。
+
+    成功返回 True；token 未配置 / 网络失败 / API 报错 都返回 False，
+    调用方继续走"手动上传"提示。
+    """
+    step("自动上传 zip 到 Gitee Releases（API）")
+
+    token = _get_gitee_token()
+    if not token:
+        warn("未找到 Gitee token —— 跳过自动上传")
+        warn("如要启用：cp release_secret.py.example release_secret.py，填入 PAT")
+        return False
+
+    try:
+        import update_config
+    except ImportError:
+        err("update_config 未加载，跳过")
+        return False
+
+    owner = getattr(update_config, 'GITEE_USER', '')
+    repo  = getattr(update_config, 'RELEASE_REPO', '')
+    branch = getattr(update_config, 'RELEASE_BRANCH', 'master')
+    if not update_config.is_configured() or not owner or not repo:
+        err("update_config.GITEE_USER / RELEASE_REPO 未正确配置，跳过")
+        return False
+
+    # 1. 先 query 这个 tag 是否已经存在 release（避免冲突）
+    existing = _gitee_get_release_by_tag(owner, repo, version, token)
+    if existing:
+        warn(f"Gitee 上 v{version} release 已存在（id={existing.get('id')}），跳过创建")
+        warn(f"如要覆盖：先到网页删除该 release，再重跑 release.py --publish")
+        return False
+
+    # 2. 创建 release
+    release_id = _gitee_create_release(owner, repo, version, branch, release_notes, token)
+    if not release_id:
+        return False
+    ok(f"已创建 release v{version}（id={release_id}）")
+
+    # 3. 上传 zip 附件
+    if not _gitee_upload_attachment(owner, repo, release_id, zip_path, token):
+        err("zip 上传失败，但 release 已创建。请手动到网页补传。")
+        return False
+    ok(f"已上传 {zip_path.name}（{zip_path.stat().st_size / 1024 / 1024:.1f} MB）")
+    return True
+
+
+def _gitee_get_release_by_tag(owner, repo, version, token):
+    """根据 tag 查 release。404 返回 None。"""
+    url = f"https://gitee.com/api/v5/repos/{owner}/{repo}/releases/tags/v{version}?access_token={token}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            return _json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        warn(f"查询 release 异常 {e.code}: {e.read().decode('utf-8', errors='replace')[:200]}")
+        return None
+    except Exception as e:
+        warn(f"查询 release 网络异常: {e}")
+        return None
+
+
+def _gitee_create_release(owner, repo, version, branch, body, token):
+    """创建 release，返回 release_id；失败返回 None。"""
+    url = f"https://gitee.com/api/v5/repos/{owner}/{repo}/releases"
+    payload = {
+        'access_token':     token,
+        'tag_name':         f'v{version}',
+        'name':             f'v{version}',
+        'body':             body or f'Release v{version}',
+        'target_commitish': branch,
+    }
+    data = _json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        url, data=data,
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            obj = _json.loads(resp.read())
+            return obj.get('id')
+    except urllib.error.HTTPError as e:
+        body_txt = e.read().decode('utf-8', errors='replace')[:400]
+        err(f"创建 release 失败 HTTP {e.code}: {body_txt}")
+        return None
+    except Exception as e:
+        err(f"创建 release 网络异常: {e}")
+        return None
+
+
+def _gitee_upload_attachment(owner, repo, release_id, file_path: Path, token):
+    """上传文件到 release 的 attach_files。multipart/form-data 手撸（不引 requests 依赖）。"""
+    url = f"https://gitee.com/api/v5/repos/{owner}/{repo}/releases/{release_id}/attach_files?access_token={token}"
+
+    # 手写 multipart body
+    boundary = f"----InvestToolBoundary{int(time.time())}"
+    crlf = b'\r\n'
+    file_bytes = file_path.read_bytes()
+    body_parts = [
+        f'--{boundary}'.encode(),
+        f'Content-Disposition: form-data; name="file"; filename="{file_path.name}"'.encode(),
+        b'Content-Type: application/zip',
+        b'',
+        file_bytes,
+        f'--{boundary}--'.encode(),
+        b'',
+    ]
+    body = crlf.join(body_parts)
+
+    req = urllib.request.Request(
+        url, data=body,
+        headers={
+            'Content-Type': f'multipart/form-data; boundary={boundary}',
+            'Content-Length': str(len(body)),
+        },
+        method='POST',
+    )
+    try:
+        # 上传可能耗时几十秒（25MB），超时给宽
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            return resp.status in (200, 201)
+    except urllib.error.HTTPError as e:
+        body_txt = e.read().decode('utf-8', errors='replace')[:400]
+        err(f"上传附件失败 HTTP {e.code}: {body_txt}")
+        return False
+    except Exception as e:
+        err(f"上传附件网络异常: {e}")
+        return False
 
 
 # ---- Git tag ----
@@ -429,10 +615,18 @@ def main():
     latest_json_path = RELEASE_DIR / 'latest.json'
     write_latest_json(version, zip_name, zip_path, digest, latest_json_path)
 
-    # 8. 可选：自动 push latest.json 到公开发布仓库
+    # 8. 可选：自动 push latest.json + 上传 zip 到 Gitee Releases
     publish_ok = True
+    upload_ok = False
     if args.publish:
         publish_ok = publish_manifest_to_release_repo(version, latest_json_path)
+        # 上传 zip 是独立步骤——可能 publish 成功但 upload 失败，或 upload 跳过
+        upload_ok = upload_zip_to_gitee_release(
+            version=version,
+            zip_path=zip_path,
+            sha256=digest,
+            release_notes=collect_recent_commits(),
+        )
 
     # 9. 可选 git tag
     if args.git_tag:
@@ -447,16 +641,25 @@ def main():
     print(f"  • {notes_path.name}")
     print(f"  • latest.json")
 
-    if args.publish and publish_ok:
-        print(f"\n{_C.BOLD}{_C.G}✓ latest.json 已自动 push 到公开仓库{_C.END}")
-        print(f"\n{_C.BOLD}{_C.Y}最后一步（手动）：{_C.END}")
-        print(f"  打开 https://gitee.com/{__import__('update_config').GITEE_USER}/{__import__('update_config').RELEASE_REPO}/releases")
-        print(f"  → 创建发布版本 → tag v{version} → 上传 {zip_name}")
-        print(f"  上传完成后用户 app 下次启动即检测到新版")
-    elif args.publish and not publish_ok:
-        print(f"\n{_C.R}⚠ --publish 失败，需要你手动操作（详见上方错误日志）{_C.END}")
+    if args.publish:
+        manifest_status = '✓' if publish_ok else '✗'
+        upload_status   = '✓' if upload_ok   else '✗'
+        print(f"\n{_C.BOLD}{_C.G}发布动作：{_C.END}")
+        print(f"  {manifest_status} latest.json push 到公开仓库")
+        print(f"  {upload_status} zip 上传到 Gitee Releases（API）")
+
+        if publish_ok and upload_ok:
+            print(f"\n{_C.BOLD}{_C.G}🎉 全自动发布完成！用户 app 下次启动即检测到 v{version}{_C.END}")
+        elif publish_ok and not upload_ok:
+            uc = __import__('update_config')
+            print(f"\n{_C.BOLD}{_C.Y}zip 没自动传上去，请手动补传：{_C.END}")
+            print(f"  打开 https://gitee.com/{uc.GITEE_USER}/{uc.RELEASE_REPO}/releases")
+            print(f"  → 创建发布版本 → tag v{version} → 上传 {zip_name}")
+            print(f"  （或配置 release_secret.py 启用自动上传，参考 release_secret.py.example）")
+        else:
+            print(f"\n{_C.R}⚠ --publish 部分失败，详见上方错误日志{_C.END}")
     else:
-        print(f"\n{_C.BOLD}{_C.Y}手动发布步骤（或下次加 --publish 自动化）：{_C.END}")
+        print(f"\n{_C.BOLD}{_C.Y}手动发布步骤（或下次加 --publish 一键自动）：{_C.END}")
         print(f"  1. 公开仓库 push latest.json：")
         print(f"     cd <公开仓库本地路径>")
         print(f"     git pull && cp <项目>\\release\\latest.json . && git add latest.json")

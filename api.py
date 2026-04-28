@@ -45,17 +45,60 @@ import ai_service
 
 # 老板键合法性校验：恰好 2 键组合，且必须有 1 个修饰键 + 1 个普通键
 _VALID_MODIFIERS = {'ctrl', 'alt', 'shift'}
+
+# 同义词归一：前端 / 浏览器可能送各种命名，统一成 keyboard 库认的标准名
+_KEY_ALIASES = {
+    # capslock / numlock 类
+    'caps lock':    'capslock',
+    'capital':      'capslock',
+    'caps':         'capslock',
+    'num lock':     'numlock',
+    'scroll lock':  'scrolllock',
+    'scrolllock':   'scrolllock',
+    # 方向键 alias
+    'arrowup':      'up',
+    'arrowdown':    'down',
+    'arrowleft':    'left',
+    'arrowright':   'right',
+    # 其他常见 alias
+    'escape':       'esc',
+    'return':       'enter',
+    ' ':            'space',
+    'spacebar':     'space',
+    'pgup':         'pageup',
+    'pgdn':         'pagedown',
+    'page up':      'pageup',
+    'page down':    'pagedown',
+    'del':          'delete',
+    'ins':          'insert',
+    # 反引号几种写法
+    'backquote':    '`',
+    'grave':        '`',
+}
+
 _VALID_KEYS = set('abcdefghijklmnopqrstuvwxyz0123456789`-=[];\',./') | {
     'space', 'enter', 'tab', 'esc', 'backspace', 'insert', 'delete',
     'home', 'end', 'pageup', 'pagedown', 'up', 'down', 'left', 'right',
-} | {f'f{i}' for i in range(1, 13)}  # F1-F12
+    # 状态切换键（注意：capslock / numlock 跟输入法可能冲突，用户自负）
+    'capslock', 'numlock', 'scrolllock',
+    # 数字小键盘
+    'numpad0', 'numpad1', 'numpad2', 'numpad3', 'numpad4',
+    'numpad5', 'numpad6', 'numpad7', 'numpad8', 'numpad9',
+    'add', 'subtract', 'multiply', 'divide', 'decimal',
+} | {f'f{i}' for i in range(1, 25)}  # F1-F24（高端键盘有，扩开无害）
+
+
+def _normalize_key(k):
+    """把传进来的键名统一成 _VALID_KEYS 里的标准写法。"""
+    k = k.strip().lower()
+    return _KEY_ALIASES.get(k, k)
 
 
 def _validate_two_key_combo(hotkey):
     """只允许 '<修饰键>+<普通键>' 形式，严格 2 个 token。"""
     if not hotkey or not isinstance(hotkey, str):
         raise ValueError("快捷键不能为空")
-    parts = [p.strip().lower() for p in hotkey.split('+')]
+    parts = [_normalize_key(p) for p in hotkey.split('+')]
     if len(parts) != 2:
         raise ValueError(f"必须是 2 键组合（如 ctrl+b），收到 {len(parts)} 键: {hotkey}")
     mod, key = parts
