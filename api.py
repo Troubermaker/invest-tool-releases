@@ -41,6 +41,7 @@ from services import limit_pool_service
 from services import license_service
 from services import update_service
 from services import alert_service
+from services import f10_service
 import ai_service
 
 
@@ -319,6 +320,11 @@ class Api:
     def get_stock_kline(self, code, timeframe):
         """个股 K 线（任意 6 位代码）。timeframe: 分时/5日/日K/周K/月K/年K"""
         return kline_service.get_stock_kline(code, timeframe)
+
+    @api_endpoint
+    def get_stock_f10(self, code):
+        """个股 F10 简版基本面快照：行业/市值/PE/PB/ROE/股息率/主营/简介。"""
+        return f10_service.get_f10(code)
 
     @api_endpoint
     def get_sector_stocks(self, plate_id, date=None):

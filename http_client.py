@@ -197,7 +197,8 @@ def fetch_json(url, *, params=None, headers=None,
     text = _do_request('GET', url, params=params, encoding="utf-8",
                        headers=headers, timeout=timeout, retry=retry, verify=verify)
     try:
-        return json.loads(text)
+        # 部分服务器（如东财部分 F10 端点）会在 JSON 前加 UTF-8 BOM (﻿)，先剥掉
+        return json.loads(text.lstrip('﻿'))
     except Exception as e:
         raise FetchError(f"{url} JSON 解析失败: {e}", code="PARSE_ERROR")
 
@@ -209,6 +210,6 @@ def post_json(url, *, json_body=None, data=None, params=None, headers=None,
                        encoding="utf-8", headers=headers,
                        timeout=timeout, retry=retry, verify=verify)
     try:
-        return json.loads(text)
+        return json.loads(text.lstrip('﻿'))
     except Exception as e:
         raise FetchError(f"{url} JSON 解析失败: {e}", code="PARSE_ERROR")
