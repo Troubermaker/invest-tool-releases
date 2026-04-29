@@ -479,8 +479,8 @@ function shiftToTradingDay(direction) {
                     </thead>
                     <tbody>
                         <tr v-for="stock in filteredStocks" :key="stock.code"
-                            @dblclick="openStockChart(stock.code, stock.name)"
-                            :title="'双击查看 K 线'"
+                            @dblclick="openStockChart(stock.code, stock.name, filteredStocks)"
+                            :title="'双击查看 K 线 · 左侧列表可切换'"
                             class="border-b border-[#f5f5f5] hover:bg-[#f2f8fc] transition-colors group cursor-pointer">
                             <td class="px-[12px] py-[10px] text-[12px] text-[#666] font-mono align-top">{{ stock.code }}</td>
                             <td class="px-[12px] py-[10px] align-top">
@@ -593,8 +593,8 @@ function shiftToTradingDay(direction) {
                 <!-- 股票行：2 列栅格 -->
                 <div class="grid grid-cols-2">
                     <div v-for="(stock, idx) in tier.stocks" :key="stock.code"
-                         @dblclick="openStockChart(stock.code, stock.name)"
-                         :title="'双击查看 K 线'"
+                         @dblclick="openStockChart(stock.code, stock.name, tier.stocks)"
+                         :title="'双击查看 K 线 · 左侧列表可切换'"
                          class="flex flex-col gap-[3px] pl-[14px] pr-[8px] py-[6px] cursor-pointer transition-colors min-w-0 border-b border-[#f5f5f5] hover:bg-[#fff5f5]"
                          :class="{ 'border-l border-[#f5f5f5]': idx % 2 === 1 }">
                         <div class="flex items-center gap-[8px] min-w-0">
@@ -703,8 +703,8 @@ function shiftToTradingDay(direction) {
                         </td>
                     </tr>
                     <tr v-for="s in filteredPoolStocks" :key="s.code"
-                        @dblclick="openStockChart(s.code, s.name)"
-                        :title="'双击查看 K 线'"
+                        @dblclick="openStockChart(s.code, s.name, filteredPoolStocks)"
+                        :title="'双击查看 K 线 · 左侧列表可切换'"
                         class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors cursor-pointer">
                         <td class="px-[14px] py-[8px]">
                             <div class="text-[14px] font-bold text-[#111] leading-tight truncate max-w-[140px]">{{ s.name }}</div>

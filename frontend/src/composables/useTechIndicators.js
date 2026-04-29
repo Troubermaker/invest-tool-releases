@@ -853,6 +853,80 @@ export function computeAccumulationScores(klines, ctx = {}) {
     return out
 }
 
+// ---------------- 缺口（跳空）识别 ----------------
+/**
+ * 自动识别 K 线之间的跳空缺口：
+ *   - 向上缺口：当根 low > 前根 high
+ *   - 向下缺口：当根 high < 前根 low
+ *
+ * 同时判定是否被回补（subsequent bar 价格穿越缺口区间）。
+ *
+ * @param klines
+ * @param opts:
+ *   minSizePct  最小缺口幅度（默认 0.005 = 0.5%；避免过小的缺口）
+ *   recencyBars 只扫最近 N 根
+ * @returns [{ direction, idx, time, prevTime, upper, lower, gapPct, filled, filledIdx, filledTime }]
+ */
+export function detectGaps(klines, opts = {}) {
+    const {
+        minSizePct = 0.005,
+        recencyBars = 250,
+    } = opts
+    if (!klines || klines.length < 2) return []
+    const n = klines.length
+    const startIdx = Math.max(1, n - recencyBars)
+    const out = []
+
+    for (let i = startIdx; i < n; i++) {
+        const prev = klines[i - 1], cur = klines[i]
+        const prevHigh = +prev.high, prevLow = +prev.low
+        const curHigh = +cur.high, curLow = +cur.low
+
+        // 向上缺口
+        if (curLow > prevHigh) {
+            const gapPct = prevHigh > 0 ? (curLow - prevHigh) / prevHigh : 0
+            if (gapPct >= minSizePct) {
+                let filledIdx = null
+                for (let j = i + 1; j < n; j++) {
+                    if (+klines[j].low <= prevHigh) { filledIdx = j; break }
+                }
+                out.push({
+                    direction: 'up',
+                    idx: i, time: cur.time, prevTime: prev.time,
+                    upper: curLow,    // 缺口顶（当根 low）
+                    lower: prevHigh,  // 缺口底（前根 high）
+                    gapPct: gapPct * 100,
+                    filled: filledIdx !== null,
+                    filledIdx,
+                    filledTime: filledIdx !== null ? klines[filledIdx].time : null,
+                })
+            }
+        }
+
+        // 向下缺口
+        if (curHigh < prevLow) {
+            const gapPct = prevLow > 0 ? (prevLow - curHigh) / prevLow : 0
+            if (gapPct >= minSizePct) {
+                let filledIdx = null
+                for (let j = i + 1; j < n; j++) {
+                    if (+klines[j].high >= prevLow) { filledIdx = j; break }
+                }
+                out.push({
+                    direction: 'down',
+                    idx: i, time: cur.time, prevTime: prev.time,
+                    upper: prevLow,   // 缺口顶（前根 low）
+                    lower: curHigh,   // 缺口底（当根 high）
+                    gapPct: gapPct * 100,
+                    filled: filledIdx !== null,
+                    filledIdx,
+                    filledTime: filledIdx !== null ? klines[filledIdx].time : null,
+                })
+            }
+        }
+    }
+    return out
+}
+
 // ---------------- 主升 / 主跌段识别（独立趋势段染色）----------------
 /**
  * 识别价格走势中的"主升段"和"主跌段"——zigzag 相邻 swing 之间的大幅单向波段。

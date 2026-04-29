@@ -1040,9 +1040,9 @@ onUnmounted(() => {
                     </tr>
 
                     <tr v-for="stock in filteredStocks" :key="stock.code"
-                        @dblclick="openStockChart(stock.code, stock.name || quotes[stock.code]?.name)"
+                        @dblclick="openStockChart(stock.code, stock.name || quotes[stock.code]?.name, filteredStocks)"
                         class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors group cursor-pointer"
-                        title="双击查看 K 线">
+                        title="双击查看 K 线 · 左侧列表可切换">
 
                         <td class="px-[12px] py-[8px] align-middle">
                             <div class="text-[14px] font-bold text-[#111] leading-tight truncate">{{ stock.name || quotes[stock.code]?.name || '—' }}</div>

@@ -274,8 +274,8 @@ async function initChart() {
             borderColor: '#e5e7eb',
             timeVisible: true,
             secondsVisible: false,
-            fixRightEdge: true,   // 锁右边沿：禁止拖到最新 bar 之后留白
-            rightOffset: 4,       // 最新 bar 右侧留 4 根 bar 宽度
+            fixLeftEdge:  true,
+            rightOffset:  3,       // 最新 bar 右侧留约 18-24px 呼吸空间
         },
     });
 
@@ -521,7 +521,7 @@ async function renderChartData() {
     if (!isLineMode && defaultBars && total > defaultBars) {
         chartInstance.timeScale().setVisibleLogicalRange({
             from: total - defaultBars,
-            to:   total - 0.5,
+            to:   total - 1 + 3,   // 包含 rightOffset 的留白区，跟主图一致
         })
     } else {
         chartInstance.timeScale().fitContent()
@@ -1116,8 +1116,8 @@ onUnmounted(() => {
                         <tr
                             v-for="stock in filteredStocks"
                             :key="stock.code"
-                            @dblclick="openStockChart(stock.code, stock.name)"
-                            :title="'双击查看 K 线'"
+                            @dblclick="openStockChart(stock.code, stock.name, filteredStocks)"
+                            :title="'双击查看 K 线 · 左侧列表可切换'"
                             class="border-b border-[#f5f5f5] hover:bg-[#f2f8fc] transition-colors group cursor-pointer"
                         >
                             <td class="px-[12px] py-[10px] text-[12px] text-[#666] font-mono align-top">
@@ -1251,8 +1251,8 @@ onUnmounted(() => {
                 <!-- 股票行：2 列栅格，每格内 2 行（name / concept badge）-->
                 <div class="grid grid-cols-2">
                     <div v-for="(stock, idx) in tier.stocks" :key="stock.code"
-                         @dblclick="openStockChart(stock.code, stock.name)"
-                         :title="'双击查看 K 线'"
+                         @dblclick="openStockChart(stock.code, stock.name, tier.stocks)"
+                         :title="'双击查看 K 线 · 左侧列表可切换'"
                          class="flex flex-col gap-[3px] pl-[14px] pr-[8px] py-[6px] cursor-pointer transition-colors min-w-0 border-b border-[#f5f5f5] hover:bg-[#fff5f5] group"
                          :class="{ 'border-l border-[#f5f5f5]': idx % 2 === 1 }">
                         <!-- 第一行：代码 + 名字 + 加自选按钮 -->
@@ -1413,8 +1413,8 @@ onUnmounted(() => {
                         <td colspan="7" class="py-[60px] text-center text-[#aaa] text-[13px]">暂无热榜数据</td>
                     </tr>
                     <tr v-for="s in hotListData" :key="s.code"
-                        @dblclick="openStockChart(s.code, s.name)"
-                        :title="'双击查看 K 线'"
+                        @dblclick="openStockChart(s.code, s.name, hotListData)"
+                        :title="'双击查看 K 线 · 左侧列表可切换'"
                         class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors cursor-pointer group">
                         <td class="px-[14px] py-[8px] text-center">
                             <span class="inline-flex items-center justify-center w-[26px] h-[26px] rounded-[4px] text-[12px] font-bold tabular-nums"
@@ -1630,8 +1630,8 @@ onUnmounted(() => {
                         </td>
                     </tr>
                     <tr v-for="s in filteredPoolStocks" :key="s.code"
-                        @dblclick="openStockChart(s.code, s.name)"
-                        :title="'双击查看 K 线'"
+                        @dblclick="openStockChart(s.code, s.name, filteredPoolStocks)"
+                        :title="'双击查看 K 线 · 左侧列表可切换'"
                         class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors cursor-pointer group">
                         <!-- 股票（名字大字 + 代码小字，垂直堆叠，跟热榜一致）-->
                         <td class="px-[14px] py-[8px]">

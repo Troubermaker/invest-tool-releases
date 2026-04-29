@@ -11,7 +11,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { api } from '../api/client'
-import { computeAll, pickCloses, supportResistance, supportResistanceCluster, detectBoxes, detectPlatforms, detectTrendlines, detectZigzag, detectChannel, detectFibonacci, detectPatterns, detectMainTrends, detectMainRallyStart, clusterResonance, computeMainWaveScores, computeAccumulationScores, volumeRatio } from '../composables/useTechIndicators'
+import { computeAll, pickCloses, supportResistance, supportResistanceCluster, detectBoxes, detectPlatforms, detectTrendlines, detectZigzag, detectChannel, detectFibonacci, detectPatterns, detectMainTrends, detectMainRallyStart, detectGaps, clusterResonance, computeMainWaveScores, computeAccumulationScores, volumeRatio } from '../composables/useTechIndicators'
 
 const props = defineProps({
     code:   { type: String, required: true },
@@ -48,6 +48,7 @@ const allIndicators = [
     { id: 'FIB',  label: '斐波那契' },
     { id: 'PAT',  label: '形态' },
     { id: 'RALLY', label: '🚀 主升启动' },
+    { id: 'GAP',   label: '缺口' },
     { id: 'RESO', label: '共振' },
     { id: 'SIG',  label: '📢 信号' },
     { id: 'MACD', label: 'MACD' },
@@ -194,6 +195,49 @@ function updateMainTrendsPixels() {
     mainTrendsPx.value = out
 }
 
+// ============ 缺口（跳空）overlay ============
+const gaps = ref([])      // [{ direction, time, prevTime, upper, lower, gapPct, filled, filledTime }]
+const gapsPx = ref([])    // 像素坐标
+function updateGapsPixels() {
+    if (!mainChart || !mainSeries || !gaps.value.length || !klines.value.length) {
+        if (gapsPx.value.length) gapsPx.value = []
+        return
+    }
+    const ts = mainChart.timeScale()
+    const lastTime = klines.value[klines.value.length - 1].time
+    const out = []
+    for (const g of gaps.value) {
+        // 缺口产生位置 → 最新 K 线（不延伸到右侧留白区，避免缺口框跑出 K 线区域）
+        const x1 = ts.timeToCoordinate(g.prevTime)
+        const xLast = ts.timeToCoordinate(lastTime)
+        const y1 = mainSeries.priceToCoordinate(g.upper)
+        const y2 = mainSeries.priceToCoordinate(g.lower)
+        if (x1 == null || xLast == null || y1 == null || y2 == null) continue
+        // 已补缺口右端到回补 bar；未补缺口右端到最新 K 线
+        let xEnd
+        if (g.filled && g.filledTime) {
+            const xf = ts.timeToCoordinate(g.filledTime)
+            xEnd = xf != null ? xf : xLast
+        } else {
+            xEnd = xLast
+        }
+        out.push({
+            key: `gap-${g.direction}-${g.time}`,
+            direction: g.direction,
+            filled: g.filled,
+            x: Math.min(x1, xEnd),
+            y: Math.min(y1, y2),
+            width: Math.max(2, Math.abs(xEnd - x1)),
+            height: Math.max(3, Math.abs(y2 - y1)),     // 至少 3px 高，小缺口也能看见
+            gapPct: g.gapPct,
+            // label 文字位置
+            labelX: Math.min(x1, xEnd) + 4,
+            labelY: Math.min(y1, y2) - 2,
+        })
+    }
+    gapsPx.value = out
+}
+
 // ============ 主升 / 主跌 启动信号（横盘后突破）============
 const rallyStarts = ref([])     // [{ direction, consolidation*, breakout*, rallyPct, barsAgo }]
 const rallyStartsPx = ref([])   // 像素坐标 + 渲染信息
@@ -324,6 +368,7 @@ function updateAllOverlays() {
     updateChannelPixels()
     updateMainTrendsPixels()
     updateRallyStartsPixels()
+    updateGapsPixels()
 }
 
 // ============ 矩形 overlay（箱体 / 平台 共用）============
@@ -436,8 +481,9 @@ async function ensureChart() {
             borderColor: '#e2e8f0',
             timeVisible: true,
             secondsVisible: false,
-            fixRightEdge: true,   // 锁死右边沿：禁止拖到最新 bar 之后留白（金融软件惯例）
-            rightOffset: 4,       // 给最新 bar 右侧留 4 根 bar 宽度的呼吸空间
+            fixLeftEdge:  true,   // 锁左边沿：禁止往历史数据之前拖
+            // 不用 fixRightEdge —— 它会吃掉 rightOffset 留白；右边沿改在 subscribeVisibleLogicalRangeChange 里手动 clamp
+            rightOffset:  3,      // 最新 bar 右侧留约 18-24px 呼吸空间
         },
         rightPriceScale: { borderColor: '#e2e8f0', minimumWidth: 60 },  // 与副图统一刻度宽度，避免多图竖直线错位
         crosshair: { mode: 1 /* magnet */ },
@@ -463,9 +509,21 @@ async function ensureChart() {
     })
     _resizeObs.observe(mainEl.value)
 
-    // 主图 timeScale 变化时同步副图 + 重算箱体像素坐标
+    // 主图 timeScale 变化：① 手动 clamp 右边沿（替代 fixRightEdge，保留 rightOffset 留白）
+    //                  ② 同步副图 ③ 重算 overlay 像素坐标
     mainChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
         if (_syncing || !range) return
+        // —— 手动 clamp ——
+        const total = klines.value.length
+        const RIGHT_PADDING_BARS = 3
+        if (total > 0 && range.to > total - 1 + RIGHT_PADDING_BARS) {
+            _syncing = true
+            const span = range.to - range.from
+            const newTo = total - 1 + RIGHT_PADDING_BARS
+            mainChart.timeScale().setVisibleLogicalRange({ from: newTo - span, to: newTo })
+            _syncing = false
+            return
+        }
         _syncing = true
         if (macdChart)  macdChart.timeScale().setVisibleLogicalRange(range)
         if (kdjChart)   kdjChart.timeScale().setVisibleLogicalRange(range)
@@ -558,8 +616,8 @@ async function ensureSubChart(slot /* 'macd' | 'kdj' | 'score' */) {
             timeVisible: true,
             secondsVisible: false,
             visible: false,         // 副图隐藏 x 轴，靠主图驱动
-            fixRightEdge: true,
-            rightOffset: 4,
+            fixLeftEdge:  true,
+            rightOffset:  3,
         },
         rightPriceScale: { borderColor: '#e2e8f0', minimumWidth: 60 },
         crosshair: {
@@ -795,6 +853,13 @@ async function renderAll() {
         for (const r of rallyStarts.value) _rallyByIdx.set(r.breakoutIdx, r)
     } else {
         rallyStarts.value = []
+    }
+
+    // —— 缺口（跳空）—— //
+    if (isCandleMode && activeIndicators.value.includes('GAP')) {
+        gaps.value = detectGaps(klines.value)
+    } else {
+        gaps.value = []
     }
 
 // —— 趋势通道（线性回归拟合上下轨）—— //
@@ -1038,25 +1103,14 @@ async function renderAll() {
     await renderSubPane('kdj',  subPanes.find(p => p.name === 'KDJ'))
 
     // —— 默认视窗 + 拖拉缩放控制 —— //
-    // 蜡烛模式：显示最近 N 根，剩下的可向左拖/缩放查看
-    // 分时/5日：固定显示全部数据，禁用拖拉缩放（同花顺/通达信惯例）
+    // 分时/5日：固定显示全部、禁拖拉
     if (isLineMode.value) {
-        mainChart.timeScale().fitContent()
         mainChart.applyOptions({ handleScroll: false, handleScale: false })
     } else {
         mainChart.applyOptions({ handleScroll: true, handleScale: true })
-        const defaultBars = DEFAULT_VISIBLE_BARS[timeframe.value]
-        const total = klines.value.length
-        if (defaultBars && total > defaultBars) {
-            // 设置主图视窗 → 通过 subscribeVisibleLogicalRangeChange 自动同步到副图
-            mainChart.timeScale().setVisibleLogicalRange({
-                from: total - defaultBars,
-                to:   total - 0.5,  // 右侧留半根 bar 余量
-            })
-        } else {
-            mainChart.timeScale().fitContent()
-        }
     }
+    // 视窗设置延后到 rAF 里跟 equalizePriceScaleWidths 之后，
+    // 避免 priceScale 宽度调整造成的 re-layout 把视窗 drift 掉（首次加载留白丢失的元凶）
 
     // —— 主升浪综合评分（用 _lastComputed 里已算好的 MA/MACD 复用，不重复计算）—— //
     _scoreByIdx.clear()
@@ -1106,9 +1160,25 @@ async function renderAll() {
     await renderScorePane(showScore.value)
 
     // 等浏览器把所有刻度文本布局完成后再对齐价格刻度宽度（保证三图竖直线连成一根）
-    // 同时算箱体像素坐标（依赖最终的视窗 + 价格刻度尺寸）
+    // 然后再设视窗（确保留白稳定）+ 算 overlay 像素坐标
     requestAnimationFrame(() => {
         equalizePriceScaleWidths()
+        // 视窗设置：放在 equalize 之后避免 re-layout drift
+        if (isLineMode.value) {
+            mainChart.timeScale().fitContent()
+        } else {
+            const defaultBars = DEFAULT_VISIBLE_BARS[timeframe.value]
+            const total = klines.value.length
+            const RIGHT_PADDING_BARS = 3
+            if (defaultBars && total > defaultBars) {
+                mainChart.timeScale().setVisibleLogicalRange({
+                    from: total - defaultBars,
+                    to:   total - 1 + RIGHT_PADDING_BARS,
+                })
+            } else {
+                mainChart.timeScale().fitContent()
+            }
+        }
         updateAllOverlays()
     })
 }
@@ -1392,7 +1462,29 @@ onUnmounted(() => {
             <div class="relative bg-white" :style="{ height: mainChartHeight }">
                 <div ref="mainEl" class="w-full h-full"></div>
 
-<!-- 🚀 主升 / 主跌 启动信号（fresh = 鲜艳醒目；historical = 灰色低调）-->
+                <!-- 缺口（跳空）overlay：横条状贯穿带 - 未补=鲜艳，已补=淡色虚框 -->
+                <svg v-if="gapsPx.length"
+                     class="absolute inset-0 pointer-events-none z-[3]"
+                     style="width: 100%; height: 100%;">
+                    <g v-for="g in gapsPx" :key="g.key">
+                        <rect :x="g.x" :y="g.y" :width="g.width" :height="g.height"
+                              :fill="g.direction === 'up'
+                                ? (g.filled ? 'rgba(220, 38, 38, 0.06)' : 'rgba(220, 38, 38, 0.20)')
+                                : (g.filled ? 'rgba(5, 150, 105, 0.06)' : 'rgba(5, 150, 105, 0.22)')"
+                              :stroke="g.direction === 'up' ? '#dc2626' : '#059669'"
+                              :stroke-width="g.filled ? 0.7 : 1.2"
+                              :stroke-dasharray="g.filled ? '3 2' : '0'"
+                              :opacity="g.filled ? 0.5 : 1" />
+                        <text v-if="!g.filled"
+                              :x="g.labelX" :y="g.labelY"
+                              :fill="g.direction === 'up' ? '#dc2626' : '#059669'"
+                              font-size="9" font-weight="bold" font-family="ui-monospace, monospace">
+                            {{ g.direction === 'up' ? '↑' : '↓' }} 缺口 {{ g.gapPct.toFixed(1) }}%
+                        </text>
+                    </g>
+                </svg>
+
+                <!-- 🚀 主升 / 主跌 启动信号（fresh = 鲜艳醒目；historical = 灰色低调）-->
                 <svg v-if="rallyStartsPx.length"
                      class="absolute inset-0 pointer-events-none z-[7]"
                      style="width: 100%; height: 100%;">
