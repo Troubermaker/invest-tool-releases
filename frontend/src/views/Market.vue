@@ -5,7 +5,6 @@ import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
 import RefreshCountdown from '../components/RefreshCountdown.vue'
 import LastRefreshLabel from '../components/LastRefreshLabel.vue'
-import SectorHeatmap from '../components/SectorHeatmap.vue'
 import { openStockChart } from '../composables/useStockChart'
 import { openAddToWatchlist } from '../composables/useAddToWatchlist'
 
@@ -15,7 +14,6 @@ const emit = defineEmits(['openAI'])
 // 加新 tab 只需要：① 在 ALL_SUB_TABS 里加一项 ② 模板里加 v-if 分支
 const ALL_SUB_TABS = [
     { id: 'main',    name: '行情页面' },
-    { id: 'heatmap', name: '板块热力图' },
     { id: 'hotlist', name: '同花顺热榜' },
     { id: 'news',    name: '快讯' },
     { id: 'pools',   name: '涨跌对比' },
@@ -591,48 +589,6 @@ const {
     onData: (data) => { marketSentiment.value = data },
     onError: (err) => console.error("市场情绪拉取失败:", err),
 })
-
-// ---------------- 板块热力图 ----------------
-// 后端返 60-80 个板块，treemap 比"精选板块榜"覆盖广得多
-const heatmapSectors = ref([])
-const heatmapSizeBy = ref('strength')   // 'strength' | 'absChange' | 'absInflow'
-const HEATMAP_SIZE_PREF_KEY = 'heatmap.size_by'
-
-const {
-    secondsUntilNext: heatmapCountdown,
-    currentInterval:  heatmapInterval,
-    setRefreshInterval: setHeatmapInterval,
-    refresh: refreshHeatmap,
-    lastRefreshAt: heatmapLastAt,
-} = useSmartRefresh(
-    () => api.getAllSectors(80),
-    {
-        baseInterval: 30_000,
-        prefKey: 'refresh.heatmap',
-        snapshotKey: 'heatmap_sectors',
-        onData: (data) => { heatmapSectors.value = data || [] },
-    }
-)
-
-// 加载 sizeBy 偏好
-onMounted(async () => {
-    const r = await api.getUserPreference(HEATMAP_SIZE_PREF_KEY, 'strength')
-    if (r.ok && typeof r.data === 'string') heatmapSizeBy.value = r.data
-})
-watch(heatmapSizeBy, async (v) => {
-    await api.setUserPreference(HEATMAP_SIZE_PREF_KEY, v)
-})
-
-// 点热力图方块 → 跳到主行情 tab + 选中该板块（如果在 hotSectors 里）
-function handleHeatmapSelect(sector) {
-    activeTab.value = 'main'
-    // 如果该板块在主行情的精选板块里，直接选中；否则忽略
-    const matched = hotSectors.value.find(s => s.code === sector.code)
-    if (matched) {
-        selectedSector.value = matched
-        loadSectorStocks(matched.code)
-    }
-}
 
 // ---------------- 同花顺热榜 ----------------
 const hotListPeriod = ref('hour')        // 'hour' | 'day'
@@ -1280,66 +1236,6 @@ onUnmounted(() => {
     </template>
     <!-- /行情页面 -->
 
-    <!-- ============ 板块热力图 ============ -->
-    <div v-else-if="activeTab === 'heatmap'" class="flex-1 flex flex-col overflow-hidden bg-white">
-        <!-- 工具栏：sizeBy 切换 + 计数 + 时间戳 + 倒计时 -->
-        <div class="h-[44px] px-[14px] border-b border-[#f0f0f0] flex items-center justify-between bg-white shrink-0">
-            <div class="flex items-center gap-[12px]">
-                <div class="flex bg-[#f5f5f5] rounded-[4px] p-[2px]">
-                    <button @click="heatmapSizeBy = 'strength'"
-                            class="text-[12px] px-[10px] py-[4px] rounded-[3px] font-semibold transition"
-                            :class="heatmapSizeBy === 'strength' ? 'bg-white text-[#dc2626] shadow-sm' : 'text-[#666] hover:text-[#111]'">
-                        按强度
-                    </button>
-                    <button @click="heatmapSizeBy = 'absInflow'"
-                            class="text-[12px] px-[10px] py-[4px] rounded-[3px] font-semibold transition"
-                            :class="heatmapSizeBy === 'absInflow' ? 'bg-white text-[#dc2626] shadow-sm' : 'text-[#666] hover:text-[#111]'">
-                        按资金净流入
-                    </button>
-                    <button @click="heatmapSizeBy = 'absChange'"
-                            class="text-[12px] px-[10px] py-[4px] rounded-[3px] font-semibold transition"
-                            :class="heatmapSizeBy === 'absChange' ? 'bg-white text-[#dc2626] shadow-sm' : 'text-[#666] hover:text-[#111]'">
-                        按涨跌幅
-                    </button>
-                </div>
-                <span class="text-[10px] text-[#999]">方块大小 = 当前选中维度；颜色 = 涨跌幅（红涨绿跌）</span>
-            </div>
-            <div class="flex items-center gap-[10px]">
-                <span class="text-[11px] text-[#999]">{{ heatmapSectors.length }} 个</span>
-                <LastRefreshLabel :timestamp="heatmapLastAt" />
-                <RefreshCountdown :seconds="heatmapCountdown"
-                                  :current-interval="heatmapInterval"
-                                  @pick="setHeatmapInterval"
-                                  @refresh-now="refreshHeatmap" />
-            </div>
-        </div>
-
-        <!-- 主图区域 -->
-        <div class="flex-1 relative bg-[#fafafa] p-[6px]">
-            <div v-if="!heatmapSectors.length"
-                 class="absolute inset-0 flex items-center justify-center text-[#bbb] text-[13px]">
-                加载板块数据中...
-            </div>
-            <SectorHeatmap v-else
-                           :sectors="heatmapSectors"
-                           :size-by="heatmapSizeBy"
-                           @select-sector="handleHeatmapSelect" />
-        </div>
-
-        <!-- 图例：颜色档位说明 -->
-        <div class="h-[34px] px-[14px] border-t border-[#f0f0f0] flex items-center gap-[8px] bg-white shrink-0 text-[10px]">
-            <span class="text-[#666] mr-[2px]">涨跌幅：</span>
-            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#7f1d1d"></span> ≥+5%</span>
-            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#dc2626"></span> +1~5%</span>
-            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#ef4444"></span> 0~+1%</span>
-            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#9ca3af"></span> 0</span>
-            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#86efac"></span> -1~0%</span>
-            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#22c55e"></span> -3~-1%</span>
-            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#15803d"></span> -5~-3%</span>
-            <span class="flex items-center gap-[3px]"><span class="w-[14px] h-[10px] rounded-sm" style="background:#064e3b"></span> ≤-5%</span>
-            <span class="ml-auto text-[#aaa]">点击方块跳转主行情该板块（如有联动股）</span>
-        </div>
-    </div>
 
     <!-- ============ 同花顺热榜 ============ -->
     <div v-else-if="activeTab === 'hotlist'" class="flex-1 flex flex-col overflow-hidden bg-white">
