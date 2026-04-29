@@ -3,18 +3,13 @@
  * 底部滑出的 K 线 drawer。挂在 App.vue 一次，全局可见。
  * 由 useStockChart.openStockChart(code, name) 触发显示。
  */
-import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import StockChart from './StockChart.vue'
-import StockF10 from './StockF10.vue'
 import { stockChartState, closeStockChart } from '../composables/useStockChart'
 
 const visible = computed(() => stockChartState.value.visible)
 const code    = computed(() => stockChartState.value.code)
 const name    = computed(() => stockChartState.value.name)
-
-// 当前视图：'chart'（K 线） / 'f10'（基本面）—— 切股时回到 K 线
-const view = ref('chart')
-watch(code, () => { view.value = 'chart' })
 
 // ESC 关闭
 function onKeydown(e) {
@@ -44,32 +39,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 <div class="w-[40px] h-[3px] rounded-full bg-[#cbd5e1]"></div>
             </div>
 
-            <!-- Tab 切换：K 线 / F10 -->
-            <div class="flex items-center gap-[6px] px-[14px] pt-[2px] pb-[6px] shrink-0 bg-[#fafafa] border-b border-[#f0f0f0]">
-                <button @click="view = 'chart'"
-                        class="text-[12px] px-[14px] py-[5px] rounded-[4px] font-semibold transition"
-                        :class="view === 'chart' ? 'bg-[#dc2626] text-white shadow-sm' : 'bg-white border border-[#e5e7eb] text-[#666] hover:text-[#111]'">
-                    K 线
-                </button>
-                <button @click="view = 'f10'"
-                        class="text-[12px] px-[14px] py-[5px] rounded-[4px] font-semibold transition"
-                        :class="view === 'f10' ? 'bg-[#dc2626] text-white shadow-sm' : 'bg-white border border-[#e5e7eb] text-[#666] hover:text-[#111]'">
-                    F10
-                </button>
-            </div>
-
-            <!-- 内容区：tab 切换；:key 保证切股时重挂载 -->
-            <StockChart v-if="code && view === 'chart'"
-                        :key="`chart-${code}`"
+            <!-- 内容区：K 线（每次开新股都重挂载） -->
+            <StockChart v-if="code"
+                        :key="code"
                         :code="code"
                         :name="name"
                         @close="closeStockChart"
                         class="flex-1 min-h-0" />
-            <StockF10 v-else-if="code && view === 'f10'"
-                      :key="`f10-${code}`"
-                      :code="code"
-                      :name="name"
-                      class="flex-1 min-h-0" />
         </div>
     </Transition>
 </template>

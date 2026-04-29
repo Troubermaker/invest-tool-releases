@@ -11,7 +11,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { api } from '../api/client'
-import { computeAll, pickCloses, supportResistance, detectBoxes, detectPlatforms, detectTrendlines, detectZigzag, detectChannel } from '../composables/useTechIndicators'
+import { computeAll, pickCloses, supportResistance, supportResistanceCluster, detectBoxes, detectPlatforms, detectTrendlines, detectZigzag, detectChannel, detectFibonacci, detectPatterns, detectMainTrends, detectMainRallyStart, clusterResonance, computeMainWaveScores, computeAccumulationScores, volumeRatio } from '../composables/useTechIndicators'
 
 const props = defineProps({
     code:   { type: String, required: true },
@@ -32,22 +32,29 @@ const DEFAULT_VISIBLE_BARS = {
 }
 
 // 指标多选（默认开 MA 三档 + MACD）
+// 简化后的指标 chip 体系（13 个）：
+//   - MA 合成 1 个，开启时显示 MA5/10/20（主流配置），不再单独 chip
+//   - 压/支 自动包含简单 + 聚类两种识别（合并 SR_K）
+//   - 箱体 自动识别平台并换色（合并 PLAT）
+//   - 通道 默认包含上下趋势线（合并 TREND）
+//   - 删除 主升/主跌（信息融入 主升启动 + 波段）
 const allIndicators = [
-    { id: 'MA5',  label: 'MA5'  },
-    { id: 'MA10', label: 'MA10' },
-    { id: 'MA20', label: 'MA20' },
-    { id: 'MA60', label: 'MA60' },
+    { id: 'MA',   label: '均线' },
     { id: 'BOLL', label: 'BOLL' },
     { id: 'SR',   label: '压/支' },
     { id: 'BOX',  label: '箱体' },
-    { id: 'PLAT', label: '平台' },
-    { id: 'TREND', label: '趋势线' },
-    { id: 'ZZ',   label: '波段' },
     { id: 'CHAN', label: '通道' },
+    { id: 'ZZ',   label: '波段' },
+    { id: 'FIB',  label: '斐波那契' },
+    { id: 'PAT',  label: '形态' },
+    { id: 'RALLY', label: '🚀 主升启动' },
+    { id: 'RESO', label: '共振' },
+    { id: 'SIG',  label: '📢 信号' },
     { id: 'MACD', label: 'MACD' },
     { id: 'KDJ',  label: 'KDJ'  },
+    { id: 'SCORE', label: '📊 启动分' },
 ]
-const activeIndicators = ref(['MA5', 'MA10', 'MA20', 'MACD', 'KDJ'])
+const activeIndicators = ref(['MA', 'MACD', 'KDJ'])
 
 const klines = ref([])
 const loading = ref(false)
@@ -57,12 +64,14 @@ const errMsg = ref('')
 const mainEl = ref(null)
 const macdEl = ref(null)
 const kdjEl  = ref(null)
-let mainChart = null, macdChart = null, kdjChart = null
+const scoreEl = ref(null)
+let mainChart = null, macdChart = null, kdjChart = null, scoreChart = null
 let mainSeries = null
 let volumeSeries = null
 const overlaySeriesMap = new Map()  // name → seriesObj
 let macdSeries = null  // {dif, dea, hist}
 let kdjSeries  = null  // {k, d, j}
+let scoreSeries = null  // 评分柱状 series
 
 // ============ Hover 状态 ============
 // hoverIdx：当前十字线对应的索引（-1 表示无 hover，副图 legend 此时回落到最后一根）
@@ -71,6 +80,11 @@ const hoverIdx = ref(-1)
 const hoverSide = ref('left')
 let _lastComputed = null   // { mainOverlays, subPanes }
 let _timeToIdx = new Map() // 时间 → klines 索引
+let _patternByIdx = new Map() // idx → { label, fullName, signal } —— hover 时取完整形态名
+let _signalByIdx = new Map()  // idx → [signal, signal, ...] —— hover 时显示完整信号详情
+let _scoreByIdx = new Map()   // idx → { score, level, reasons, vr } —— 启动分（确认型）
+let _accuByIdx = new Map()    // idx → { score, level, reasons, vr } —— 潜伏分（埋伏型，跟启动分互补）
+let _rallyByIdx = new Map()   // breakoutIdx → rally 事件 —— hover 时取历史启动的交易计划
 
 const displayIdx = computed(() => {
     if (!klines.value.length) return -1
@@ -122,7 +136,13 @@ const displayData = computed(() => {
             }
         }
     }
-    return { k, chg, pct, avg, overlays, subs }
+    const pattern = _patternByIdx.get(idx) || null
+    const signalList = _signalByIdx.get(idx) || null
+    const score = _scoreByIdx.get(idx) || null
+    const accu = _accuByIdx.get(idx) || null
+    const vr = volumeRatio(klines.value, idx, 5)
+    const rally = _rallyByIdx.get(idx) || null
+    return { k, chg, pct, avg, overlays, subs, pattern, signalList, score, accu, vr, rally }
 })
 
 function formatHoverTime(time) {
@@ -148,6 +168,66 @@ function formatVol(vol) {
 let _resizeObs = null
 let _syncing = false  // 防止 timeScale 递归同步
 let _crosshairSyncing = false  // 防止 crosshair 递归同步
+
+// ============ 主升/主跌段背景色块 ============
+const mainTrends = ref([])     // [{ type, startTime, endTime, rangePct, barCount, ... }]
+const mainTrendsPx = ref([])   // 像素坐标 [{ x, width, type, label }]
+function updateMainTrendsPixels() {
+    if (!mainChart || !mainTrends.value.length) {
+        if (mainTrendsPx.value.length) mainTrendsPx.value = []
+        return
+    }
+    const ts = mainChart.timeScale()
+    const out = []
+    for (const t of mainTrends.value) {
+        const x1 = ts.timeToCoordinate(t.startTime)
+        const x2 = ts.timeToCoordinate(t.endTime)
+        if (x1 == null || x2 == null) continue
+        out.push({
+            key: `${t.type}-${t.startIdx}-${t.endIdx}`,
+            type: t.type,
+            x: Math.min(x1, x2),
+            width: Math.max(2, Math.abs(x2 - x1)),
+            label: `${t.type === 'up' ? '↑ +' : '↓ '}${t.rangePct.toFixed(1)}% / ${t.barCount}根`,
+        })
+    }
+    mainTrendsPx.value = out
+}
+
+// ============ 主升 / 主跌 启动信号（横盘后突破）============
+const rallyStarts = ref([])     // [{ direction, consolidation*, breakout*, rallyPct, barsAgo }]
+const rallyStartsPx = ref([])   // 像素坐标 + 渲染信息
+function updateRallyStartsPixels() {
+    if (!mainChart || !mainSeries || !rallyStarts.value.length) {
+        if (rallyStartsPx.value.length) rallyStartsPx.value = []
+        return
+    }
+    const ts = mainChart.timeScale()
+    const out = []
+    for (const r of rallyStarts.value) {
+        const cx1 = ts.timeToCoordinate(r.consolidationStartTime)
+        const cx2 = ts.timeToCoordinate(r.consolidationEndTime)
+        const cy1 = mainSeries.priceToCoordinate(r.consolidationUpper)
+        const cy2 = mainSeries.priceToCoordinate(r.consolidationLower)
+        const bx  = ts.timeToCoordinate(r.breakoutTime)
+        if ([cx1, cx2, cy1, cy2, bx].some(v => v == null)) continue
+        out.push({
+            key: `rally-${r.direction}-${r.breakoutIdx}`,
+            direction: r.direction,
+            isFresh: r.isFresh,
+            cx: Math.min(cx1, cx2),
+            cy: Math.min(cy1, cy2),
+            cw: Math.max(2, Math.abs(cx2 - cx1)),
+            ch: Math.max(2, Math.abs(cy2 - cy1)),
+            bx,
+            barsAgo: r.barsAgo,
+            label: r.direction === 'up' ? '🚀 主升启动' : '⚠ 主跌启动',
+            detail: `${r.consolidationBarCount}根横盘后${r.direction === 'up' ? '突破' : '破位'}，已${r.direction === 'up' ? '涨' : '跌'} ${r.rallyPct.toFixed(1)}% · ${r.barsAgo}根前`,
+            plan: r.plan,
+        })
+    }
+    rallyStartsPx.value = out
+}
 
 // ============ 趋势线 overlay（SVG 斜线）============
 const trendlines = ref([])     // 算法返回的趋势线（基于 idx/time/price 的逻辑数据）
@@ -200,6 +280,14 @@ function updateZigzagPixels() {
     zigzagPx.value = out
 }
 
+// ============ 共振区（多源价位聚类，最高优先级的实战工具）============
+// resonances: [{ price, sources, count, distancePct }] 按 count 倒序
+const resonances = ref([])
+
+// ============ 实时信号（平台突破 / 趋势反转 / 形态+共振）============
+// signals: [{ direction: 'up'|'down', label, detail, idx, barsAgo }]
+const signals = ref([])
+
 // ============ 趋势通道 overlay ============
 const channel = ref(null)        // { lowSlope, lowIntercept, highSlope, highIntercept, startIdx, endIdx, startTime, endTime }
 const channelPx = ref(null)      // { polygon: 'x1,y1 x2,y2 ...', lowLine, highLine }
@@ -234,6 +322,8 @@ function updateAllOverlays() {
     updateTrendlinesPixels()
     updateZigzagPixels()
     updateChannelPixels()
+    updateMainTrendsPixels()
+    updateRallyStartsPixels()
 }
 
 // ============ 矩形 overlay（箱体 / 平台 共用）============
@@ -289,15 +379,17 @@ async function loadData() {
 
 // ============ 切换状态 ============
 const isLineMode = computed(() => timeframe.value === '分时' || timeframe.value === '5日')
-const showMacd = computed(() => activeIndicators.value.includes('MACD'))
-const showKdj  = computed(() => activeIndicators.value.includes('KDJ'))
+const showMacd  = computed(() => activeIndicators.value.includes('MACD'))
+const showKdj   = computed(() => activeIndicators.value.includes('KDJ'))
+const showScore = computed(() => activeIndicators.value.includes('SCORE') && !isLineMode.value)
 
 // 主图高度：根据副图数量动态算（每个副图 110px）
 const mainChartHeight = computed(() => {
-    const subN = (showMacd.value ? 1 : 0) + (showKdj.value ? 1 : 0)
+    const subN = (showMacd.value ? 1 : 0) + (showKdj.value ? 1 : 0) + (showScore.value ? 1 : 0)
     if (subN === 0) return '100%'
     if (subN === 1) return 'calc(100% - 110px)'
-    return 'calc(100% - 220px)'
+    if (subN === 2) return 'calc(100% - 220px)'
+    return 'calc(100% - 330px)'
 })
 
 function toggleIndicator(id) {
@@ -364,6 +456,9 @@ async function ensureChart() {
         if (kdjChart && kdjEl.value) {
             kdjChart.applyOptions({ width: kdjEl.value.clientWidth, height: kdjEl.value.clientHeight })
         }
+        if (scoreChart && scoreEl.value) {
+            scoreChart.applyOptions({ width: scoreEl.value.clientWidth, height: scoreEl.value.clientHeight })
+        }
         updateAllOverlays()
     })
     _resizeObs.observe(mainEl.value)
@@ -372,8 +467,9 @@ async function ensureChart() {
     mainChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
         if (_syncing || !range) return
         _syncing = true
-        if (macdChart) macdChart.timeScale().setVisibleLogicalRange(range)
-        if (kdjChart)  kdjChart.timeScale().setVisibleLogicalRange(range)
+        if (macdChart)  macdChart.timeScale().setVisibleLogicalRange(range)
+        if (kdjChart)   kdjChart.timeScale().setVisibleLogicalRange(range)
+        if (scoreChart) scoreChart.timeScale().setVisibleLogicalRange(range)
         _syncing = false
         updateAllOverlays()
     })
@@ -407,11 +503,13 @@ function syncCrosshairToSubs(time) {
     _crosshairSyncing = true
     try {
         if (time != null) {
-            if (macdChart && macdSeries?.dif) macdChart.setCrosshairPosition(0, time, macdSeries.dif)
-            if (kdjChart  && kdjSeries?.k)    kdjChart.setCrosshairPosition(0, time, kdjSeries.k)
+            if (macdChart  && macdSeries?.dif) macdChart.setCrosshairPosition(0, time, macdSeries.dif)
+            if (kdjChart   && kdjSeries?.k)    kdjChart.setCrosshairPosition(0, time, kdjSeries.k)
+            if (scoreChart && scoreSeries)     scoreChart.setCrosshairPosition(0, time, scoreSeries)
         } else {
-            if (macdChart) macdChart.clearCrosshairPosition()
-            if (kdjChart)  kdjChart.clearCrosshairPosition()
+            if (macdChart)  macdChart.clearCrosshairPosition()
+            if (kdjChart)   kdjChart.clearCrosshairPosition()
+            if (scoreChart) scoreChart.clearCrosshairPosition()
         }
     } finally {
         _crosshairSyncing = false
@@ -424,22 +522,31 @@ function syncCrosshairToMainAndOther(slot, time) {
     try {
         if (time != null) {
             if (mainChart && mainSeries) mainChart.setCrosshairPosition(0, time, mainSeries)
-            if (slot === 'macd' && kdjChart && kdjSeries?.k) kdjChart.setCrosshairPosition(0, time, kdjSeries.k)
-            if (slot === 'kdj'  && macdChart && macdSeries?.dif) macdChart.setCrosshairPosition(0, time, macdSeries.dif)
+            // 同步到所有非自身的副图
+            const others = { macd: macdChart, kdj: kdjChart, score: scoreChart }
+            const otherSeries = { macd: macdSeries?.dif, kdj: kdjSeries?.k, score: scoreSeries }
+            for (const k of ['macd', 'kdj', 'score']) {
+                if (k !== slot && others[k] && otherSeries[k]) {
+                    others[k].setCrosshairPosition(0, time, otherSeries[k])
+                }
+            }
         } else {
             if (mainChart) mainChart.clearCrosshairPosition()
-            if (slot === 'macd' && kdjChart)  kdjChart.clearCrosshairPosition()
-            if (slot === 'kdj'  && macdChart) macdChart.clearCrosshairPosition()
+            const others = { macd: macdChart, kdj: kdjChart, score: scoreChart }
+            for (const k of ['macd', 'kdj', 'score']) {
+                if (k !== slot && others[k]) others[k].clearCrosshairPosition()
+            }
         }
     } finally {
         _crosshairSyncing = false
     }
 }
 
-async function ensureSubChart(slot /* 'macd' | 'kdj' */) {
-    const el = slot === 'macd' ? macdEl.value : kdjEl.value
+async function ensureSubChart(slot /* 'macd' | 'kdj' | 'score' */) {
+    const elMap = { macd: macdEl, kdj: kdjEl, score: scoreEl }
+    const el = elMap[slot]?.value
     if (!el) return null
-    let chart = slot === 'macd' ? macdChart : kdjChart
+    let chart = slot === 'macd' ? macdChart : slot === 'kdj' ? kdjChart : scoreChart
     if (chart) return chart
 
     const { createChart } = await import('lightweight-charts')
@@ -486,8 +593,9 @@ async function ensureSubChart(slot /* 'macd' | 'kdj' */) {
         syncCrosshairToMainAndOther(slot, valid ? param.time : null)
     })
 
-    if (slot === 'macd') macdChart = chart
-    else                 kdjChart = chart
+    if (slot === 'macd')      macdChart = chart
+    else if (slot === 'kdj')  kdjChart = chart
+    else                      scoreChart = chart
     return chart
 }
 
@@ -497,6 +605,9 @@ function disposeSubChart(slot) {
     }
     if (slot === 'kdj' && kdjChart) {
         kdjChart.remove(); kdjChart = null; kdjSeries = null
+    }
+    if (slot === 'score' && scoreChart) {
+        scoreChart.remove(); scoreChart = null; scoreSeries = null
     }
 }
 
@@ -549,9 +660,15 @@ async function renderAll() {
         overlaySeriesMap.set('avg', avgSeries)
     } else {
         mainSeries = mainChart.addCandlestickSeries({
-            upColor: '#dc2626', downColor: '#16a34a',
-            borderUpColor: '#dc2626', borderDownColor: '#16a34a',
-            wickUpColor: '#dc2626', wickDownColor: '#16a34a',
+            // 阳线（红/涨）—— 空心：极淡红底 + 红色边框（视觉"轻"）
+            upColor: 'rgba(220, 38, 38, 0.05)',
+            borderUpColor: '#dc2626',
+            wickUpColor: '#dc2626',
+            // 阴线（绿/跌）—— 实心：整根实心绿（视觉"重"）
+            downColor: '#059669',
+            borderDownColor: '#059669',
+            wickDownColor: '#059669',
+            borderVisible: true,
         })
         mainSeries.setData(klines.value.map(k => ({
             time: k.time,
@@ -559,22 +676,29 @@ async function renderAll() {
         })))
     }
 
-    // —— 量柱（不在分时模式下挂）—— //
-    if (!isLineMode.value) {
-        volumeSeries = mainChart.addHistogramSeries({
-            priceFormat: { type: 'volume' },
-            priceScaleId: 'volume',
-            color: '#94a3b8',
-        })
-        mainChart.priceScale('volume').applyOptions({
-            scaleMargins: { top: 0.78, bottom: 0 },
-        })
-        volumeSeries.setData(klines.value.map(k => ({
+    // —— 量柱（所有模式都显示：蜡烛按 close>=open 染色，分时/5日按 chg>=0 染色）—— //
+    volumeSeries = mainChart.addHistogramSeries({
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'volume',
+        color: '#94a3b8',
+    })
+    mainChart.priceScale('volume').applyOptions({
+        scaleMargins: { top: 0.78, bottom: 0 },
+    })
+    volumeSeries.setData(klines.value.map(k => {
+        // 颜色判定：蜡烛模式用 close vs open；分时/5日用 chg 字段（涨跌相对昨收）
+        const isUp = isLineMode.value
+            ? (+(k.chg ?? 0) >= 0)
+            : (+k.close >= +k.open)
+        return {
             time: k.time,
             value: +(k.vol || 0),
-            color: (+k.close >= +k.open) ? 'rgba(220,38,38,0.45)' : 'rgba(22,163,74,0.45)',
-        })))
-    }
+            // 上涨柱红半透明（视觉"轻"），下跌柱绿不透明（视觉"重"）
+            color: isUp
+                ? 'rgba(220, 38, 38, 0.45)'
+                : 'rgba(5, 150, 105, 0.80)',
+        }
+    }))
 
     // 重建 time → idx 索引（hover 用）
     _timeToIdx = new Map()
@@ -600,50 +724,62 @@ async function renderAll() {
         overlaySeriesMap.set(ovl.name, series)
     }
 
-    // —— 简单压力/支撑位（同花顺/通达信模式：近 N 根高低，各一条）—— //
-    // 红虚线 = 压力（dashed），绿点线 = 支撑（sparseDotted），线型差异化对色弱友好
+    // —— 压力 / 支撑（合并简单 + 聚类）—— //
+    // 同时跑两套算法：简单近 N 根高低 + 聚类被反复试探的档位
+    // 简单档：细虚/点线；聚类强档：粗实线带触及次数 — 视觉区分一目了然
+    let srLevels = []
     if (isCandleMode && activeIndicators.value.includes('SR')) {
         const SR_WINDOW = { '日K': 60, '周K': 26, '月K': 12, '年K': 5 }
         const window = SR_WINDOW[timeframe.value] || 60
+        // 简单版（近 N 根高低）—— 保留 axis label，标题缩短为单字
         const { supports, resistances } = supportResistance(klines.value, { window })
         for (const r of resistances) {
             mainSeries.createPriceLine({
-                price: r.price,
-                color: '#dc2626',
-                lineWidth: 1,
-                lineStyle: 2,
-                axisLabelVisible: true,
-                title: `压·近${window}`,
+                price: r.price, color: '#dc2626', lineWidth: 1, lineStyle: 2,
+                axisLabelVisible: true, title: '压',
             })
+            srLevels.push({ price: r.price, source: '压力' })
         }
         for (const s of supports) {
             mainSeries.createPriceLine({
-                price: s.price,
-                color: '#16a34a',
-                lineWidth: 1,
-                lineStyle: 4,
-                axisLabelVisible: true,
-                title: `支·近${window}`,
+                price: s.price, color: '#16a34a', lineWidth: 1, lineStyle: 4,
+                axisLabelVisible: true, title: '支',
             })
+            srLevels.push({ price: s.price, source: '支撑' })
+        }
+        // 聚类强档 —— 关掉 axis label（避免占右轴宽度），线条 + 颜色 + 粗细本身已能识别
+        const isClose = (a, b) => Math.abs(a - b) / Math.min(a, b) < 0.01
+        const { supports: csups, resistances: cres } = supportResistanceCluster(klines.value)
+        for (const r of cres) {
+            if (resistances.some(x => isClose(x.price, r.price))) continue
+            mainSeries.createPriceLine({
+                price: r.price, color: '#dc2626', lineWidth: 2, lineStyle: 0,
+                axisLabelVisible: false, title: `强压×${r.touches}`,
+            })
+            srLevels.push({ price: r.price, source: `强压×${r.touches}` })
+        }
+        for (const s of csups) {
+            if (supports.some(x => isClose(x.price, s.price))) continue
+            mainSeries.createPriceLine({
+                price: s.price, color: '#16a34a', lineWidth: 2, lineStyle: 0,
+                axisLabelVisible: false, title: `强支×${s.touches}`,
+            })
+            srLevels.push({ price: s.price, source: `强支×${s.touches}` })
         }
     }
 
-    // —— 箱体 / 平台 识别（矩形高亮）—— //
+    // —— 箱体 / 平台（合并版：detectBoxes 自带 quality 字段，platform 自动升级样式）—— //
     const rects = []
     if (isCandleMode && activeIndicators.value.includes('BOX')) {
-        for (const b of detectBoxes(klines.value)) rects.push({ ...b, type: 'box' })
-    }
-    if (isCandleMode && activeIndicators.value.includes('PLAT')) {
-        for (const p of detectPlatforms(klines.value)) rects.push({ ...p, type: 'platform' })
+        for (const b of detectBoxes(klines.value)) {
+            rects.push({ ...b, type: b.quality })   // quality === 'platform' | 'box'
+        }
     }
     rectOverlays.value = rects
 
-    // —— 趋势线识别（SVG 斜线）—— //
-    if (isCandleMode && activeIndicators.value.includes('TREND')) {
-        trendlines.value = detectTrendlines(klines.value)
-    } else {
-        trendlines.value = []
-    }
+    // —— 趋势线（不作为独立 chip — 通道开启时自动显示其上下边线作为趋势线）—— //
+    // 仍保留 trendlines.value 给共振/信号检测内部使用（下面的逻辑会调 detectTrendlines 直接算）
+    trendlines.value = []
 
     // —— Zigzag 波段折线 —— //
     if (isCandleMode && activeIndicators.value.includes('ZZ')) {
@@ -652,19 +788,263 @@ async function renderAll() {
         zigzag.value = []
     }
 
-    // —— 趋势通道（线性回归拟合上下轨）—— //
+    // —— 🚀 主升 / 主跌 启动识别（长横盘后突破，最强信号）—— //
+    _rallyByIdx.clear()
+    if (isCandleMode && activeIndicators.value.includes('RALLY')) {
+        rallyStarts.value = detectMainRallyStart(klines.value)
+        for (const r of rallyStarts.value) _rallyByIdx.set(r.breakoutIdx, r)
+    } else {
+        rallyStarts.value = []
+    }
+
+// —— 趋势通道（线性回归拟合上下轨）—— //
     if (isCandleMode && activeIndicators.value.includes('CHAN')) {
         channel.value = detectChannel(klines.value)
     } else {
         channel.value = null
     }
 
+    // —— 斐波那契回撤（自动识别主波段，画 7 条回撤线）—— //
+    // 关键档（0/50/100）保留 axis label，中间档关掉避免占右轴
+    let fibData = null
+    if (isCandleMode && activeIndicators.value.includes('FIB')) {
+        fibData = detectFibonacci(klines.value)
+        if (fibData) {
+            for (const lv of fibData.levels) {
+                mainSeries.createPriceLine({
+                    price: lv.price,
+                    color: lv.isKey ? '#ec4899' : '#f9a8d4',
+                    lineWidth: 1,
+                    lineStyle: lv.isKey ? 2 : 1,
+                    axisLabelVisible: lv.isKey,            // 只关键档显示右轴价签
+                    title: lv.label,                        // 短标 "38.2%" 而非 "Fib 38.2%"
+                })
+            }
+        }
+    }
+
+    // —— K 线形态识别 + 信号 markers —— 累加到 _allMarkers，最后统一 setMarkers —— //
+    // 形态识别总是跑（O(N) 开销小），_patternByIdx 始终填充给状态条 / hover tooltip 用；
+    // markers 只在 PAT chip 打开时画到 K 线上
+    const _allMarkers = []
+    _patternByIdx.clear()
+    if (isCandleMode) {
+        const patterns = detectPatterns(klines.value)
+        for (const p of patterns) _patternByIdx.set(p.idx, p)
+        if (activeIndicators.value.includes('PAT')) {
+            for (const p of patterns) {
+                if (p.signal === 'bullish') {
+                    _allMarkers.push({ time: p.time, position: 'belowBar', color: '#2563eb', shape: 'arrowUp',   text: p.label, size: 1 })
+                } else if (p.signal === 'bearish') {
+                    _allMarkers.push({ time: p.time, position: 'aboveBar', color: '#ea580c', shape: 'arrowDown', text: p.label, size: 1 })
+                } else {
+                    _allMarkers.push({ time: p.time, position: 'aboveBar', color: '#94a3b8', shape: 'square',    text: p.label, size: 1 })
+                }
+            }
+        }
+    }
+
+    // —— 共振检测：收集所有活跃指标的"当前关键价位"，聚类找多源共振区 —— //
+    if (isCandleMode && activeIndicators.value.includes('RESO')) {
+        const lastIdx = klines.value.length - 1
+        const lastClose = +klines.value[lastIdx].close
+        const lvls = []
+        // S/R
+        lvls.push(...srLevels)
+        // 通道（上下轨在最新 bar 的价格）
+        if (channel.value) {
+            const c = channel.value
+            lvls.push({ price: c.highSlope * lastIdx + c.highIntercept, source: '通道上轨' })
+            lvls.push({ price: c.lowSlope  * lastIdx + c.lowIntercept,  source: '通道下轨' })
+        }
+        // MA / BOLL（最新 bar 的值）
+        if (_lastComputed) {
+            for (const ovl of _lastComputed.mainOverlays) {
+                const v = ovl.values?.[lastIdx]
+                if (v != null) lvls.push({ price: v, source: ovl.name })
+            }
+        }
+        // 箱体 / 平台 上下边
+        for (const r of rectOverlays.value) {
+            const label = r.type === 'platform' ? '平台' : '箱体'
+            lvls.push({ price: r.upper, source: `${label}顶` })
+            lvls.push({ price: r.lower, source: `${label}底` })
+        }
+        // 趋势线（外推到最新 bar 的价格）
+        for (const tl of trendlines.value) {
+            const slope = (tl.endPrice - tl.startPrice) / (tl.endIdx - tl.startIdx)
+            const projected = tl.startPrice + slope * (lastIdx - tl.startIdx)
+            lvls.push({ price: projected, source: tl.type === 'high' ? '下降趋势线' : '上升趋势线' })
+        }
+        // 斐波那契回撤（每个档位一个 source，关键档单标，其他档归类为 Fib）
+        if (fibData) {
+            for (const lv of fibData.levels) {
+                if (lv.isKey || lv.ratio === 0.382 || lv.ratio === 0.618) {
+                    // 0/38.2/50/61.8/100 当独立 source（这几个最强）
+                    lvls.push({ price: lv.price, source: `Fib${lv.label}` })
+                }
+            }
+        }
+        // 聚类 + 加距现价百分比
+        resonances.value = clusterResonance(lvls).map(r => ({
+            ...r,
+            distancePct: lastClose > 0 ? ((r.price / lastClose - 1) * 100) : 0,
+        }))
+    } else {
+        resonances.value = []
+    }
+
+    // —— 实时信号检测：平台突破 / 趋势反转 / 形态在关键位 —— //
+    // 全历史扫描，所有信号都画 marker；左下角面板只显最近 5 条做摘要
+    let allSigs = []
+    if (isCandleMode && activeIndicators.value.includes('SIG')) {
+        const lastIdx = klines.value.length - 1
+
+        // ① 平台突破 —— 扫所有平台，不限"最近"
+        const platforms = detectPlatforms(klines.value)
+        for (const p of platforms) {
+            if (p.endIdx >= lastIdx) continue   // 还在进行中的不算
+            for (let i = p.endIdx + 1; i <= lastIdx; i++) {
+                const close = +klines.value[i].close
+                if (close > p.upper) {
+                    allSigs.push({
+                        direction: 'up',
+                        label: '📈 平台向上突破',
+                        detail: `站上 ${p.upper.toFixed(2)} · 平台${p.endIdx - p.startIdx + 1}根缩量`,
+                        idx: i, barsAgo: lastIdx - i,
+                    })
+                    break
+                }
+                if (close < p.lower) {
+                    allSigs.push({
+                        direction: 'down',
+                        label: '📉 平台向下破位',
+                        detail: `跌破 ${p.lower.toFixed(2)} · 平台${p.endIdx - p.startIdx + 1}根`,
+                        idx: i, barsAgo: lastIdx - i,
+                    })
+                    break
+                }
+            }
+        }
+
+        // ② 趋势线突破/跌破 —— 扫整段确认后区间
+        const tlines = detectTrendlines(klines.value)
+        for (const tl of tlines) {
+            const slope = (tl.endPrice - tl.startPrice) / (tl.endIdx - tl.startIdx)
+            for (let i = tl.endIdx + 1; i <= lastIdx; i++) {
+                const lineY = tl.startPrice + slope * (i - tl.startIdx)
+                if (lineY <= 0) continue
+                const close = +klines.value[i].close
+                if (tl.type === 'low' && close < lineY * 0.992) {
+                    allSigs.push({
+                        direction: 'down',
+                        label: '📉 上升趋势告破',
+                        detail: `收盘 ${close.toFixed(2)} 跌破支撑线 ${lineY.toFixed(2)}`,
+                        idx: i, barsAgo: lastIdx - i,
+                    })
+                    break
+                }
+                if (tl.type === 'high' && close > lineY * 1.008) {
+                    allSigs.push({
+                        direction: 'up',
+                        label: '📈 下降趋势反转',
+                        detail: `收盘 ${close.toFixed(2)} 突破压力线 ${lineY.toFixed(2)}`,
+                        idx: i, barsAgo: lastIdx - i,
+                    })
+                    break
+                }
+            }
+        }
+
+        // ③ K 线形态在关键位 —— 扫所有形态（不限最近）
+        // 不依赖 RESO chip —— 内部独立收集 key levels
+        const keyLevels = []
+        const SR_W = { '日K': 60, '周K': 26, '月K': 12, '年K': 5 }[timeframe.value] || 60
+        const sr = supportResistance(klines.value, { window: SR_W })
+        for (const x of sr.resistances) keyLevels.push({ price: x.price, source: '压力' })
+        for (const x of sr.supports)    keyLevels.push({ price: x.price, source: '支撑' })
+        const ch = detectChannel(klines.value)
+        if (ch) {
+            keyLevels.push({ price: ch.highSlope * lastIdx + ch.highIntercept, source: '通道上轨' })
+            keyLevels.push({ price: ch.lowSlope  * lastIdx + ch.lowIntercept,  source: '通道下轨' })
+        }
+        if (_lastComputed) {
+            for (const ovl of _lastComputed.mainOverlays) {
+                const v = ovl.values?.[lastIdx]
+                if (v != null) keyLevels.push({ price: v, source: ovl.name })
+            }
+        }
+        const fib = detectFibonacci(klines.value)
+        if (fib) {
+            for (const lv of fib.levels) {
+                if (lv.isKey || lv.ratio === 0.382 || lv.ratio === 0.618) {
+                    keyLevels.push({ price: lv.price, source: `Fib${lv.label}` })
+                }
+            }
+        }
+
+        const patterns = detectPatterns(klines.value)
+        // 全部形态（不限最近 N 根）—— 让历史的形态信号也可见
+        for (const p of patterns) {
+            if (p.signal === 'neutral') continue
+            const refPrice = +klines.value[p.idx].close
+            const nearby = keyLevels.filter(lv => Math.abs(lv.price - refPrice) / refPrice < 0.015)
+            if (nearby.length === 0) continue
+            const uniqSources = [...new Set(nearby.map(lv => lv.source))]
+            const isMulti = uniqSources.length >= 2
+            const tag = p.signal === 'bullish'
+                ? (isMulti ? '主升' : '反转')
+                : (isMulti ? '主跌' : '反转')
+            allSigs.push({
+                direction: p.signal === 'bullish' ? 'up' : 'down',
+                label: `${p.signal === 'bullish' ? '📈' : '📉'} ${tag}信号：${p.fullName}`,
+                detail: `${p.fullName} + ${uniqSources.slice(0, 3).join('/')}`,
+                idx: p.idx, barsAgo: lastIdx - p.idx,
+            })
+        }
+
+        // 按时间倒序，左下角面板只显最近 5 条做摘要
+        signals.value = [...allSigs].sort((a, b) => b.idx - a.idx).slice(0, 5)
+    } else {
+        signals.value = []
+    }
+
+    // —— 把所有信号挂成 markers + 索引到 _signalByIdx（全历史，不止最近 5 条） —— //
+    _signalByIdx.clear()
+    for (const s of allSigs) {
+        const arr = _signalByIdx.get(s.idx) || []
+        arr.push(s)
+        _signalByIdx.set(s.idx, arr)
+    }
+    // 同一根 K 线只画一次 marker（取该 bar 的第一条信号决定颜色/方向）
+    for (const [idx, sigList] of _signalByIdx) {
+        const s = sigList[0]
+        const time = klines.value[idx].time
+        const isUp = s.direction === 'up'
+        _allMarkers.push({
+            time,
+            position: isUp ? 'belowBar' : 'aboveBar',
+            color:    isUp ? '#dc2626' : '#16a34a',
+            shape:    'circle',
+            text:     '!',
+            size:     1.6,
+        })
+    }
+    // 统一一次性 setMarkers（PAT + SIG）
+    mainSeries.setMarkers(_allMarkers)
+
     // —— 副图：MACD / KDJ —— //
     await renderSubPane('macd', subPanes.find(p => p.name === 'MACD'))
     await renderSubPane('kdj',  subPanes.find(p => p.name === 'KDJ'))
 
-    // —— 默认视窗：蜡烛模式只显示最近 N 根，剩下的用户自己向左拖/缩放查看 —— //
-    if (!isLineMode.value) {
+    // —— 默认视窗 + 拖拉缩放控制 —— //
+    // 蜡烛模式：显示最近 N 根，剩下的可向左拖/缩放查看
+    // 分时/5日：固定显示全部数据，禁用拖拉缩放（同花顺/通达信惯例）
+    if (isLineMode.value) {
+        mainChart.timeScale().fitContent()
+        mainChart.applyOptions({ handleScroll: false, handleScale: false })
+    } else {
+        mainChart.applyOptions({ handleScroll: true, handleScale: true })
         const defaultBars = DEFAULT_VISIBLE_BARS[timeframe.value]
         const total = klines.value.length
         if (defaultBars && total > defaultBars) {
@@ -678,6 +1058,53 @@ async function renderAll() {
         }
     }
 
+    // —— 主升浪综合评分（用 _lastComputed 里已算好的 MA/MACD 复用，不重复计算）—— //
+    _scoreByIdx.clear()
+    if (isCandleMode) {
+        const ma5O  = _lastComputed?.mainOverlays?.find(o => o.name === 'MA5')
+        const ma10O = _lastComputed?.mainOverlays?.find(o => o.name === 'MA10')
+        const ma20O = _lastComputed?.mainOverlays?.find(o => o.name === 'MA20')
+        const macdPane = _lastComputed?.subPanes?.find(p => p.name === 'MACD')
+        const difLine = macdPane?.lines?.find(l => l.name === 'DIF')
+        const deaLine = macdPane?.lines?.find(l => l.name === 'DEA')
+        // 共振按 idx 索引（用 hoverIdx 对应位置查询）—— 简化为最新一根的共振
+        const resByIdx = new Map()
+        if (resonances.value.length) {
+            const lastIdx = klines.value.length - 1
+            for (const r of resonances.value) resByIdx.set(lastIdx, r)
+        }
+        const scores = computeMainWaveScores(klines.value, {
+            ma5Arr:  ma5O?.values,
+            ma10Arr: ma10O?.values,
+            ma20Arr: ma20O?.values,
+            difArr:  difLine?.values,
+            deaArr:  deaLine?.values,
+            histArr: macdPane?.histogram?.values,
+            resonancesByIdx: resByIdx,
+        })
+        for (const [idx, s] of scores) _scoreByIdx.set(idx, s)
+
+        // 潜伏分（独立维度，跟启动分互补）—— 复用同样的 ctx 但需要 KDJ 数据
+        _accuByIdx.clear()
+        const kdjPane = _lastComputed?.subPanes?.find(p => p.name === 'KDJ')
+        const kLine = kdjPane?.lines?.find(l => l.name === 'K')
+        const jLine = kdjPane?.lines?.find(l => l.name === 'J')
+        const ma60O = _lastComputed?.mainOverlays?.find(o => o.name === 'MA60')
+        const accuScores = computeAccumulationScores(klines.value, {
+            ma20Arr: ma20O?.values,
+            ma60Arr: ma60O?.values,
+            difArr:  difLine?.values,
+            histArr: macdPane?.histogram?.values,
+            kArr:    kLine?.values,
+            jArr:    jLine?.values,
+            resonancesByIdx: resByIdx,
+        })
+        for (const [idx, s] of accuScores) _accuByIdx.set(idx, s)
+    }
+
+    // —— 评分曲线副图（依赖 _scoreByIdx 已填充）—— //
+    await renderScorePane(showScore.value)
+
     // 等浏览器把所有刻度文本布局完成后再对齐价格刻度宽度（保证三图竖直线连成一根）
     // 同时算箱体像素坐标（依赖最终的视窗 + 价格刻度尺寸）
     requestAnimationFrame(() => {
@@ -688,7 +1115,7 @@ async function renderAll() {
 
 // 三张 chart 价格刻度宽度对齐：取最大宽度回写为 minimumWidth，避免竖直十字线分段错位
 function equalizePriceScaleWidths() {
-    const charts = [mainChart, macdChart, kdjChart].filter(Boolean)
+    const charts = [mainChart, macdChart, kdjChart, scoreChart].filter(Boolean)
     if (charts.length < 2) return
     let maxW = 0
     for (const c of charts) {
@@ -738,7 +1165,7 @@ async function renderSubPane(slot, paneData) {
             const strong = prev == null ? true : (v >= 0 ? v >= prev : v <= prev)
             const color = v >= 0
                 ? (strong ? 'rgba(220, 38, 38, 0.90)' : 'rgba(220, 38, 38, 0.28)')
-                : (strong ? 'rgba(22, 163, 74, 0.90)' : 'rgba(22, 163, 74, 0.28)')
+                : (strong ? 'rgba(5, 150, 105, 0.90)'  : 'rgba(5, 150, 105, 0.28)')
             return { time: k.time, value: v, color }
         }))
         newRefs.hist = histSeries
@@ -762,6 +1189,42 @@ async function renderSubPane(slot, paneData) {
     else                 kdjSeries  = newRefs
 }
 
+// 评分副图：单根柱状（按当日评分上色），加 70/50/30 三条参考线
+async function renderScorePane(active) {
+    if (!active) {
+        disposeSubChart('score')
+        return
+    }
+    const chart = await ensureSubChart('score')
+    if (!chart) return
+
+    if (scoreSeries) {
+        try { chart.removeSeries(scoreSeries) } catch {}
+    }
+    scoreSeries = chart.addHistogramSeries({
+        priceFormat: { type: 'price', precision: 0, minMove: 1 },
+        color: '#94a3b8',
+        priceLineVisible: false,
+    })
+    // 数据：所有 K 线都画（无评分的用 whitespace）；按等级染色
+    scoreSeries.setData(klines.value.map((k, idx) => {
+        const s = _scoreByIdx.get(idx)
+        if (!s) return { time: k.time }
+        const color = s.score >= 70 ? 'rgba(220, 38, 38, 0.90)'
+                    : s.score >= 50 ? 'rgba(234, 88, 12, 0.85)'
+                    : s.score >= 30 ? 'rgba(59, 130, 246, 0.75)'
+                                    : 'rgba(148, 163, 184, 0.60)'
+        return { time: k.time, value: s.score, color }
+    }))
+    // 参考线（70 强买 / 50 关注 / 30 中性）
+    scoreSeries.createPriceLine({ price: 70, color: '#dc2626', lineWidth: 1, lineStyle: 2,
+        axisLabelVisible: true, title: '强买' })
+    scoreSeries.createPriceLine({ price: 50, color: '#ea580c', lineWidth: 1, lineStyle: 2,
+        axisLabelVisible: true, title: '关注' })
+    scoreSeries.createPriceLine({ price: 30, color: '#3b82f6', lineWidth: 1, lineStyle: 2,
+        axisLabelVisible: true, title: '中性' })
+}
+
 // ============ Watchers ============
 watch(() => [props.code, timeframe.value], loadData)
 watch(activeIndicators, renderAll, { deep: true })
@@ -771,8 +1234,9 @@ onMounted(() => loadData())
 onUnmounted(() => {
     if (_resizeObs) { _resizeObs.disconnect(); _resizeObs = null }
     if (mainChart) { mainChart.remove(); mainChart = null }
-    if (macdChart) { macdChart.remove(); macdChart = null }
-    if (kdjChart)  { kdjChart.remove();  kdjChart  = null }
+    if (macdChart)  { macdChart.remove();  macdChart  = null }
+    if (kdjChart)   { kdjChart.remove();   kdjChart   = null }
+    if (scoreChart) { scoreChart.remove(); scoreChart = null }
 })
 </script>
 
@@ -842,6 +1306,81 @@ onUnmounted(() => {
             </div>
         </div>
 
+        <!-- 状态条：常驻显示当前/hover 行的关键数据（量比 + 主升评分），不依赖 hover -->
+        <div v-if="displayData && !isLineMode"
+             class="h-[26px] px-[12px] bg-[#fafafa] border-b border-[#f0f0f0] shrink-0
+                    flex items-center gap-[14px] text-[11px] tabular-nums font-mono whitespace-nowrap overflow-x-auto">
+            <span class="text-[#888]">{{ formatHoverTime(displayData.k.time) }}</span>
+            <span class="flex items-baseline gap-[3px]">
+                <span class="text-[#888]">收</span>
+                <span class="font-bold"
+                      :class="displayData.chg >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">
+                    {{ (+displayData.k.close).toFixed(2) }}
+                </span>
+                <span class="text-[10px]"
+                      :class="displayData.chg >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">
+                    {{ displayData.chg >= 0 ? '+' : '' }}{{ displayData.pct.toFixed(2) }}%
+                </span>
+            </span>
+            <span v-if="displayData.vr != null" class="flex items-baseline gap-[3px]">
+                <span class="text-[#888]">量比</span>
+                <span class="font-bold"
+                      :class="displayData.vr >= 2.5 ? 'text-[#dc2626]'
+                            : displayData.vr >= 1.8 ? 'text-[#ea580c]'
+                            : displayData.vr >= 1.2 ? 'text-[#f59e0b]'
+                            : displayData.vr < 0.8  ? 'text-[#16a34a]'
+                            : 'text-[#475569]'">
+                    {{ displayData.vr.toFixed(2) }}×
+                </span>
+            </span>
+            <span v-if="displayData.score" class="flex items-baseline gap-[4px] pl-[8px] border-l border-[#e5e7eb]">
+                <span class="text-[#888]">📊 启动</span>
+                <span class="font-bold text-[12px]"
+                      :class="displayData.score.score >= 70 ? 'text-[#dc2626]'
+                            : displayData.score.score >= 50 ? 'text-[#ea580c]'
+                            : displayData.score.score >= 30 ? 'text-[#3b82f6]'
+                            : 'text-[#94a3b8]'">
+                    {{ displayData.score.score }}
+                </span>
+                <span class="text-[10px] font-semibold px-[4px] py-[1px] rounded-[3px]"
+                      :class="displayData.score.score >= 70 ? 'bg-[#fee2e2] text-[#dc2626]'
+                            : displayData.score.score >= 50 ? 'bg-[#ffedd5] text-[#ea580c]'
+                            : displayData.score.score >= 30 ? 'bg-[#dbeafe] text-[#3b82f6]'
+                            : 'bg-[#f1f5f9] text-[#94a3b8]'">
+                    {{ displayData.score.level }}
+                </span>
+            </span>
+            <span v-if="displayData.accu" class="flex items-baseline gap-[4px] pl-[6px]">
+                <span class="text-[#888]">🌱 潜伏</span>
+                <span class="font-bold text-[12px]"
+                      :class="displayData.accu.score >= 70 ? 'text-[#16a34a]'
+                            : displayData.accu.score >= 55 ? 'text-[#15803d]'
+                            : displayData.accu.score >= 40 ? 'text-[#0891b2]'
+                            : displayData.accu.score >= 25 ? 'text-[#64748b]'
+                            : 'text-[#94a3b8]'">
+                    {{ displayData.accu.score }}
+                </span>
+                <span class="text-[10px] font-semibold px-[4px] py-[1px] rounded-[3px]"
+                      :class="displayData.accu.score >= 70 ? 'bg-[#dcfce7] text-[#16a34a]'
+                            : displayData.accu.score >= 55 ? 'bg-[#bbf7d0] text-[#15803d]'
+                            : displayData.accu.score >= 40 ? 'bg-[#cffafe] text-[#0891b2]'
+                            : displayData.accu.score >= 25 ? 'bg-[#f1f5f9] text-[#64748b]'
+                            : 'bg-[#f1f5f9] text-[#94a3b8]'">
+                    {{ displayData.accu.level }}
+                </span>
+            </span>
+            <span v-if="displayData.score?.reasons?.length"
+                  class="text-[10px] text-[#666] truncate flex-1 min-w-0">
+                {{ displayData.score.reasons.slice(0, 5).join(' · ') }}
+            </span>
+            <span v-if="displayData.pattern" class="text-[10px] text-[#94a3b8] shrink-0">
+                · 形态: <span class="font-semibold"
+                              :class="displayData.pattern.signal === 'bullish' ? 'text-[#2563eb]'
+                                    : displayData.pattern.signal === 'bearish' ? 'text-[#ea580c]'
+                                    : 'text-[#94a3b8]'">{{ displayData.pattern.fullName }}</span>
+            </span>
+        </div>
+
         <!-- Charts area -->
         <div class="flex-1 flex flex-col overflow-hidden relative">
             <div v-if="errMsg && !klines.length"
@@ -853,18 +1392,123 @@ onUnmounted(() => {
             <div class="relative bg-white" :style="{ height: mainChartHeight }">
                 <div ref="mainEl" class="w-full h-full"></div>
 
-                <!-- 趋势线 overlay（SVG 斜线；上升 = 蓝色实线、下降 = 橙色虚线，色弱友好的 hue + 线型双重区分）-->
-                <svg v-if="trendlinesPx.length"
-                     class="absolute inset-0 pointer-events-none z-[5]"
+<!-- 🚀 主升 / 主跌 启动信号（fresh = 鲜艳醒目；historical = 灰色低调）-->
+                <svg v-if="rallyStartsPx.length"
+                     class="absolute inset-0 pointer-events-none z-[7]"
                      style="width: 100%; height: 100%;">
-                    <line v-for="tl in trendlinesPx" :key="tl.key"
-                          :x1="tl.x1" :y1="tl.y1" :x2="tl.x2" :y2="tl.y2"
-                          :stroke="tl.type === 'high' ? '#ea580c' : '#2563eb'"
-                          stroke-width="1.5"
-                          :stroke-dasharray="tl.type === 'high' ? '5 3' : '0'" />
+                    <g v-for="r in rallyStartsPx" :key="r.key">
+                        <!-- 横盘期虚框（fresh = 实色 + 透明底；historical = 灰色虚框，比之前清晰）-->
+                        <rect :x="r.cx" :y="r.cy" :width="r.cw" :height="r.ch"
+                              :fill="r.isFresh
+                                    ? (r.direction === 'up' ? 'rgba(220, 38, 38, 0.05)' : 'rgba(22, 163, 74, 0.05)')
+                                    : 'rgba(148, 163, 184, 0.18)'"
+                              :stroke="r.isFresh
+                                     ? (r.direction === 'up' ? '#dc2626' : '#16a34a')
+                                     : '#64748b'"
+                              :stroke-width="r.isFresh ? 1.5 : 1.3"
+                              stroke-dasharray="4 2"
+                              :opacity="r.isFresh ? 1 : 0.85" />
+                        <!-- 突破点竖虚线（fresh = 红/绿粗；historical = 深灰细）-->
+                        <line :x1="r.bx" y1="0" :x2="r.bx" y2="100%"
+                              :stroke="r.isFresh
+                                     ? (r.direction === 'up' ? '#dc2626' : '#16a34a')
+                                     : '#64748b'"
+                              :stroke-width="r.isFresh ? 2.5 : 1.4"
+                              stroke-dasharray="6 3"
+                              :opacity="r.isFresh ? 0.85 : 0.7" />
+                        <!-- 历史事件方向 + 时效小标签 -->
+                        <text v-if="!r.isFresh"
+                              :x="r.bx + 4" y="14"
+                              fill="#475569"
+                              font-size="11" font-weight="bold"
+                              font-family="ui-monospace, monospace">
+                            {{ r.direction === 'up' ? '↑' : '↓' }} {{ r.barsAgo }}前
+                        </text>
+                    </g>
                 </svg>
+                <!-- 顶部高亮 banner（仅在最新 fresh 事件时出现）+ 交易计划（止损/目标价）-->
+                <div v-if="rallyStartsPx.find(r => r.isFresh)"
+                     class="absolute top-[5px] left-1/2 -translate-x-1/2 z-[12] pointer-events-none
+                            text-[12px] font-bold tabular-nums leading-[1.4]
+                            shadow-[0_2px_12px_rgba(0,0,0,0.18)] rounded-[5px]
+                            px-[14px] py-[6px] flex flex-col items-center gap-[2px] min-w-[280px]"
+                     :class="rallyStartsPx.find(r => r.isFresh).direction === 'up'
+                       ? 'bg-gradient-to-r from-[#fef2f2] to-[#fee2e2] border-2 border-[#dc2626] text-[#dc2626]'
+                       : 'bg-gradient-to-r from-[#f0fdf4] to-[#dcfce7] border-2 border-[#16a34a] text-[#16a34a]'">
+                    <span class="text-[14px]">{{ rallyStartsPx.find(r => r.isFresh).label }}</span>
+                    <span class="text-[10px] font-normal opacity-90">{{ rallyStartsPx.find(r => r.isFresh).detail }}</span>
+                    <!-- 交易计划：入场/止损/目标 -->
+                    <div v-if="rallyStartsPx.find(r => r.isFresh).plan"
+                         class="mt-[3px] pt-[3px] border-t border-current/30 w-full text-[10px] font-mono">
+                        <div class="flex justify-between gap-2">
+                            <span>💎 入场 {{ rallyStartsPx.find(r => r.isFresh).plan.entryPrice }}</span>
+                            <span>止损 {{ rallyStartsPx.find(r => r.isFresh).plan.stopLoss }} ({{ rallyStartsPx.find(r => r.isFresh).plan.stopLossPct.toFixed(1) }}%)</span>
+                        </div>
+                        <div class="flex justify-between gap-2 mt-[1px]">
+                            <span>🎯 目标₁ {{ rallyStartsPx.find(r => r.isFresh).plan.target1 }} ({{ rallyStartsPx.find(r => r.isFresh).plan.target1Pct >= 0 ? '+' : '' }}{{ rallyStartsPx.find(r => r.isFresh).plan.target1Pct.toFixed(1) }}%)</span>
+                            <span>目标₂ {{ rallyStartsPx.find(r => r.isFresh).plan.target2 }} ({{ rallyStartsPx.find(r => r.isFresh).plan.target2Pct >= 0 ? '+' : '' }}{{ rallyStartsPx.find(r => r.isFresh).plan.target2Pct.toFixed(1) }}%)</span>
+                        </div>
+                        <div v-if="rallyStartsPx.find(r => r.isFresh).plan.riskRewardRatio"
+                             class="text-center mt-[1px]">
+                            盈亏比 {{ rallyStartsPx.find(r => r.isFresh).plan.riskRewardRatio }}:1
+                        </div>
+                    </div>
+                </div>
 
-                <!-- Zigzag 波段折线 —— 分段着色：上行段（low→high）蓝色实线、下行段（high→low）橙色虚线 -->
+<!-- 实时信号 mini 摘要（左下角）—— 总览，K 线上有红/绿 ! 圆点 marker，hover 看详情 -->
+                <div v-if="activeIndicators.includes('SIG') && !isLineMode"
+                     class="absolute bottom-[10px] left-[10px] z-[8] pointer-events-none
+                            bg-white/95 backdrop-blur-[2px] border-[1.5px] rounded-[5px]
+                            shadow-[0_2px_8px_rgba(0,0,0,0.10)]
+                            px-[9px] py-[5px] text-[11px] tabular-nums leading-[1.4]"
+                     :class="signals.length === 0 ? 'border-[#cbd5e1]'
+                           : signals[0].direction === 'up' ? 'border-[#dc2626]/50' : 'border-[#16a34a]/50'">
+                    <div v-if="signals.length === 0" class="text-[#888]">
+                        📢 暂无活跃信号
+                    </div>
+                    <div v-else class="flex flex-col gap-[1px]">
+                        <span class="font-bold"
+                              :class="signals[0].direction === 'up' ? 'text-[#dc2626]' : 'text-[#16a34a]'">
+                            📢 {{ signals.length }} 条信号 · 最近 {{ signals[0].barsAgo === 0 ? '当前' : signals[0].barsAgo + '根前' }}
+                        </span>
+                        <span class="text-[10px] text-[#666]">
+                            {{ signals[0].label.replace(/^[📈📉]\s*/, '') }}
+                        </span>
+                        <span class="text-[9px] text-[#999]">点 K 线上的 <span class="font-bold"
+                              :class="signals[0].direction === 'up' ? 'text-[#dc2626]' : 'text-[#16a34a]'">!</span> 圆点查看详情</span>
+                    </div>
+                </div>
+
+                <!-- 共振区面板（右上角常驻；列出多源信号汇聚的关键价位 + 距现价百分比）-->
+                <div v-if="resonances.length"
+                     class="absolute top-[6px] right-[10px] z-[8] pointer-events-none
+                            bg-white/95 backdrop-blur-[2px] border-[1.5px] border-[#dc2626]/40 rounded-[5px]
+                            shadow-[0_2px_8px_rgba(220,38,38,0.15)]
+                            px-[9px] py-[6px] text-[11px] tabular-nums font-mono leading-[1.45] min-w-[180px] max-w-[260px]">
+                    <div class="font-bold text-[#dc2626] mb-[4px] pb-[3px] border-b border-[#fee2e2] flex items-center gap-[4px]">
+                        ⚡ 共振区
+                        <span class="text-[10px] text-[#999] font-normal">{{ resonances.length }} 处</span>
+                    </div>
+                    <div v-for="(r, i) in resonances.slice(0, 6)" :key="i"
+                         class="mb-[4px] last:mb-0">
+                        <div class="flex items-baseline justify-between gap-[6px]">
+                            <span class="text-[13px] font-bold tabular-nums"
+                                  :class="r.distancePct >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">
+                                {{ r.price.toFixed(2) }}
+                            </span>
+                            <span class="text-[10px] tabular-nums"
+                                  :class="r.distancePct >= 0 ? 'text-[#dc2626]' : 'text-[#16a34a]'">
+                                {{ r.distancePct >= 0 ? '+' : '' }}{{ r.distancePct.toFixed(2) }}%
+                            </span>
+                            <span class="text-[10px] text-[#dc2626] font-bold">×{{ r.count }}</span>
+                        </div>
+                        <div class="text-[10px] text-[#666] leading-tight truncate" :title="r.sources.join(' + ')">
+                            {{ r.sources.join(' + ') }}
+                        </div>
+                    </div>
+                </div>
+
+<!-- Zigzag 波段折线 —— 分段着色：上行段（low→high）蓝色实线、下行段（high→low）橙色虚线 -->
                 <svg v-if="zigzagPx.length >= 2"
                      class="absolute inset-0 pointer-events-none z-[5]"
                      style="width: 100%; height: 100%;">
@@ -966,6 +1610,86 @@ onUnmounted(() => {
                             <div class="flex justify-between gap-3"><span>成交量</span>
                                 <span class="text-[#475569]">{{ formatVol(displayData.k.vol) }}</span>
                             </div>
+                            <div v-if="displayData.vr != null" class="flex justify-between gap-3"><span>量比</span>
+                                <span class="font-semibold"
+                                      :class="displayData.vr >= 2.5 ? 'text-[#dc2626]'
+                                            : displayData.vr >= 1.8 ? 'text-[#ea580c]'
+                                            : displayData.vr >= 1.2 ? 'text-[#f59e0b]'
+                                            : displayData.vr < 0.8  ? 'text-[#16a34a]'
+                                            : 'text-[#475569]'">
+                                    {{ displayData.vr.toFixed(2) }}×
+                                </span>
+                            </div>
+                            <!-- K 线形态（如果当前 bar 命中形态）-->
+                            <div v-if="displayData.pattern"
+                                 class="flex justify-between gap-3 mt-[3px] pt-[3px] border-t border-[#f1f5f9]">
+                                <span>形态</span>
+                                <span class="font-semibold"
+                                      :class="displayData.pattern.signal === 'bullish' ? 'text-[#2563eb]'
+                                            : displayData.pattern.signal === 'bearish' ? 'text-[#ea580c]'
+                                            : 'text-[#94a3b8]'">
+                                    {{ displayData.pattern.signal === 'bullish' ? '↑ ' : displayData.pattern.signal === 'bearish' ? '↓ ' : '◇ ' }}{{ displayData.pattern.fullName }}
+                                </span>
+                            </div>
+                            <!-- 实时信号（如果当前 bar 是信号触发位置）-->
+                            <div v-if="displayData.signalList"
+                                 class="mt-[3px] pt-[3px] border-t border-[#f1f5f9]">
+                                <div v-for="(s, i) in displayData.signalList" :key="i"
+                                     class="flex flex-col gap-[1px]" :class="i > 0 ? 'mt-[3px]' : ''">
+                                    <span class="font-semibold"
+                                          :class="s.direction === 'up' ? 'text-[#dc2626]' : 'text-[#16a34a]'">
+                                        {{ s.label }}
+                                    </span>
+                                    <span class="text-[10px] text-[#666] leading-tight">{{ s.detail }}</span>
+                                </div>
+                            </div>
+                            <!-- 主升启动交易计划（hover 该启动的突破点 K 线时展示，历史/fresh 都看得到）-->
+                            <div v-if="displayData.rally && displayData.rally.plan"
+                                 class="mt-[3px] pt-[3px] border-t-[2px]"
+                                 :class="displayData.rally.direction === 'up' ? 'border-[#dc2626]' : 'border-[#16a34a]'">
+                                <div class="font-bold mb-[2px]"
+                                     :class="displayData.rally.direction === 'up' ? 'text-[#dc2626]' : 'text-[#16a34a]'">
+                                    {{ displayData.rally.direction === 'up' ? '🚀 主升启动' : '⚠ 主跌启动' }}
+                                    <span class="text-[9px] font-normal text-[#888]">
+                                        ({{ displayData.rally.isFresh ? 'fresh' : displayData.rally.barsAgo + '根前' }})
+                                    </span>
+                                </div>
+                                <div class="text-[10px] text-[#666] mb-[3px]">
+                                    {{ displayData.rally.consolidationBarCount }}根横盘 · 已{{ displayData.rally.direction === 'up' ? '涨' : '跌' }} {{ displayData.rally.rallyPct.toFixed(1) }}%
+                                </div>
+                                <div class="flex flex-col gap-[1px] text-[10px] tabular-nums leading-[1.5]">
+                                    <div class="flex justify-between gap-3">
+                                        <span class="text-[#888]">💎 入场</span>
+                                        <span class="font-semibold text-[#111]">{{ displayData.rally.plan.entryPrice }}</span>
+                                    </div>
+                                    <div class="flex justify-between gap-3">
+                                        <span class="text-[#888]">止损</span>
+                                        <span class="font-semibold text-[#16a34a]">
+                                            {{ displayData.rally.plan.stopLoss }}
+                                            ({{ displayData.rally.plan.stopLossPct.toFixed(1) }}%)
+                                        </span>
+                                    </div>
+                                    <div class="flex justify-between gap-3">
+                                        <span class="text-[#888]">🎯 目标₁</span>
+                                        <span class="font-semibold text-[#dc2626]">
+                                            {{ displayData.rally.plan.target1 }}
+                                            ({{ displayData.rally.plan.target1Pct >= 0 ? '+' : '' }}{{ displayData.rally.plan.target1Pct.toFixed(1) }}%)
+                                        </span>
+                                    </div>
+                                    <div class="flex justify-between gap-3">
+                                        <span class="text-[#888]">目标₂</span>
+                                        <span class="font-semibold text-[#dc2626]">
+                                            {{ displayData.rally.plan.target2 }}
+                                            ({{ displayData.rally.plan.target2Pct >= 0 ? '+' : '' }}{{ displayData.rally.plan.target2Pct.toFixed(1) }}%)
+                                        </span>
+                                    </div>
+                                    <div v-if="displayData.rally.plan.riskRewardRatio"
+                                         class="flex justify-between gap-3 pt-[2px] border-t border-[#f5f5f5]">
+                                        <span class="text-[#888]">盈亏比</span>
+                                        <span class="font-bold text-[#dc2626]">{{ displayData.rally.plan.riskRewardRatio }} : 1</span>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
 
                         <!-- 主图叠加（MA / BOLL）—— MACD/KDJ 已挪到各自副图 legend，不在卡片中显示 -->
@@ -1037,6 +1761,27 @@ onUnmounted(() => {
                     </template>
                 </div>
                 <div ref="kdjEl" class="w-full" style="height: 110px"></div>
+            </div>
+
+            <!-- 评分副图 + 行内 legend -->
+            <div v-if="showScore" class="border-t border-[#e5e7eb] relative">
+                <div class="absolute top-[3px] left-[10px] z-[10] pointer-events-none
+                            text-[10px] tabular-nums font-mono leading-[1.4]
+                            flex flex-wrap items-center gap-x-[8px]
+                            bg-white/85 backdrop-blur-[1px] px-[4px] py-[1px] rounded-[3px]">
+                    <span class="text-[#666] font-semibold">📊 主升评分</span>
+                    <template v-if="displayData?.score">
+                        <span class="font-bold"
+                              :class="displayData.score.score >= 70 ? 'text-[#dc2626]'
+                                    : displayData.score.score >= 50 ? 'text-[#ea580c]'
+                                    : displayData.score.score >= 30 ? 'text-[#3b82f6]'
+                                    : 'text-[#94a3b8]'">
+                            {{ displayData.score.score }}/100
+                        </span>
+                        <span class="text-[#666]">{{ displayData.score.level }}</span>
+                    </template>
+                </div>
+                <div ref="scoreEl" class="w-full" style="height: 110px"></div>
             </div>
         </div>
     </div>

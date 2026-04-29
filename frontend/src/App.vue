@@ -6,6 +6,7 @@ import ActivationGate from './components/ActivationGate.vue'
 import UpdateBanner from './components/UpdateBanner.vue'
 import Toaster from './components/Toaster.vue'
 import StockChartDrawer from './components/StockChartDrawer.vue'
+import AddToWatchlistModal from './components/AddToWatchlistModal.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
@@ -42,14 +43,15 @@ async function pollAlerts() {
             ids.push(a.id)
             const dir = a.alert_type === 'above' ? '↑ 上涨' : '↓ 下跌'
             const name = a.name || a.code
+            // dedupKey 用警报 id，每条独立 —— 避免前端 30s 去重把后端真触发的多条吞掉
             pushWarn(
                 `🔔 ${name} ${dir}至 ${Number(a.triggered_price).toFixed(2)}（阈值 ${Number(a.threshold).toFixed(2)}）`,
-                { dedupKey: `alert_${a.code}_${a.alert_type}`, ttlMs: 8000 }
+                { dedupKey: `alert_id_${a.id}`, ttlMs: 8000 }
             )
         }
         if (ids.length) await api.ackAlerts(ids)
     } catch (e) {
-        // 静默：网络 / 后端短暂异常不影响主流程
+        console.warn('[alerts] pollAlerts 异常:', e)
     }
 }
 
@@ -112,6 +114,9 @@ onUnmounted(() => {
 
     <!-- 全局 K 线 drawer（任意页双击股票行触发）-->
     <StockChartDrawer />
+
+    <!-- 全局"添加到自选" modal（任意页股票行点 + 触发）-->
+    <AddToWatchlistModal />
 
     <!-- 底部固定免责声明（22px，常驻不可关）-->
     <div class="fixed bottom-0 left-0 right-0 h-[22px] z-[150]

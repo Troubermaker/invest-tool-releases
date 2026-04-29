@@ -19,6 +19,22 @@ export function pickCloses(klines) {
     return klines.map(k => +k.close)
 }
 
+// ---------------- 量比（A 股短线核心指标）----------------
+// vol_ratio = 当日成交量 / 前 lookback 日均量
+export function volumeRatio(klines, idx, lookback = 5) {
+    if (!klines || idx < 1 || !klines[idx]) return null
+    const start = Math.max(0, idx - lookback)
+    let sum = 0, count = 0
+    for (let i = start; i < idx; i++) {
+        const v = +klines[i].vol
+        if (v > 0) { sum += v; count++ }
+    }
+    if (count === 0) return null
+    const avg = sum / count
+    const cur = +klines[idx].vol
+    return avg > 0 ? cur / avg : null
+}
+
 // ---------------- MA (Simple Moving Average) ----------------
 export function ma(values, period) {
     const out = new Array(values.length).fill(null)
@@ -128,14 +144,18 @@ export function computeAll(klines, activeIndicators) {
     const mainOverlays = []
     const subPanes = []
 
-    // MA：MA5/10/20/30/60
+    // 均线：'MA' chip 展开为 MA5/10/20（默认主流配置）；
+    //       同时兼容旧式 'MA5'/'MA10'/...（手工指定单条）
     const MA_COLORS = { 5: '#1f77b4', 10: '#ff7f0e', 20: '#9467bd', 30: '#2ca02c', 60: '#dc2626' }
+    const periodsToShow = new Set()
+    if (activeIndicators.includes('MA')) [5, 10, 20, 30, 60].forEach(p => periodsToShow.add(p))
     for (const ind of activeIndicators) {
         const m = /^MA(\d+)$/.exec(ind)
-        if (!m) continue
-        const p = +m[1]
+        if (m) periodsToShow.add(+m[1])
+    }
+    for (const p of [...periodsToShow].sort((a, b) => a - b)) {
         mainOverlays.push({
-            name: ind,
+            name: `MA${p}`,
             values: ma(closes, p),
             color: MA_COLORS[p] || '#888',
         })
@@ -281,12 +301,57 @@ export function detectBoxes(klines, opts = {}) {
             if (newM <= 0 || (newU - newL) / newM > rangePctThreshold) break
             upper = newU; lower = newL; end = j
         }
+        // 朋友的质量评分：触碰次数 + 量能递减 bonus + 收盘价居中度
+        const span = end - i + 1
+        const range = (upper - lower) / ((upper + lower) / 2)
+        let upperTouches = 0, lowerTouches = 0
+        let inBox = 0
+        for (let k = i; k <= end; k++) {
+            const h = +klines[k].high, l = +klines[k].low, c = +klines[k].close
+            if (h > upper * 0.997) upperTouches++
+            if (l < lower * 1.003) lowerTouches++
+            if (c >= lower * 0.998 && c <= upper * 1.002) inBox++
+        }
+        // 量能递减检查（前半 vs 后半）
+        let firstHalfVol = 0, firstHalfCount = 0
+        let secondHalfVol = 0, secondHalfCount = 0
+        const mid = i + Math.floor(span / 2)
+        for (let k = i; k < mid; k++) {
+            const v = +klines[k].vol
+            if (v > 0) { firstHalfVol += v; firstHalfCount++ }
+        }
+        for (let k = mid; k <= end; k++) {
+            const v = +klines[k].vol
+            if (v > 0) { secondHalfVol += v; secondHalfCount++ }
+        }
+        const volDeclining = firstHalfCount > 0 && secondHalfCount > 0
+            && (secondHalfVol / secondHalfCount) < (firstHalfVol / firstHalfCount)
+
+        // quality 判定：满足"长 + 窄 + 量能递减 + 双轨触碰"则升级为 platform
+        const inBoxRatio = span > 0 ? inBox / span : 0
+        const isPlatform = span >= 20
+            && range <= 0.10
+            && inBoxRatio >= 0.7
+            && upperTouches >= 2
+            && lowerTouches >= 2
+            && volDeclining
+
+        // 评分（朋友的公式）
+        let score = (upperTouches + lowerTouches) * 2
+                  + (1 - range / rangePctThreshold) * 10
+                  + span * 0.5
+        if (volDeclining) score *= 1.3
+
         boxes.push({
             startIdx: i,
             endIdx:   end,
             startTime: klines[i].time,
             endTime:   klines[end].time,
             upper, lower,
+            quality: isPlatform ? 'platform' : 'box',
+            score,
+            upperTouches, lowerTouches,
+            volDeclining,
         })
         i = end + 1   // 不允许重叠
     }
@@ -308,6 +373,533 @@ export function detectBoxes(klines, opts = {}) {
  *   priorBars          用平台之前多少根 K 的均量做对照
  * @returns 跟 detectBoxes 相同结构
  */
+// ---------------- 稳健主升 / 稳健主跌（持续推进式）—— 已弃用 ----------------
+// 历史保留代码（不再被任何 chip 调用）；如需重新启用，参考 git 历史 checkout 对应的 chip 注册
+function _unused_detectSteadyRally(klines, opts = {}) {
+    const {
+        minBars = 30,
+        minTotalGainPct = 0.10,    // 累计涨/跌幅 ≥ 10%
+        ma5CompliancePct = 0.6,    // 沿 MA5 爬升 —— close 站上 MA5 的占比 ≥ 60%
+        ma20BreakDeepPct = 0.02,   // close < MA20 × (1-2%) 视为"有效跌破" MA20
+    } = opts
+    if (!klines || klines.length < minBars + 20) return null
+    const n = klines.length
+    const lastIdx = n - 1
+    const closes = klines.map(k => +k.close)
+    const ma5Arr  = ma(closes, 5)
+    const ma20Arr = ma(closes, 20)
+    if (ma20Arr[lastIdx] == null) return null
+
+    // === 稳健主升：找最近一次"有效跌破 MA20"的 bar，从其后开始算 rally ===
+    let upStartIdx = -1
+    for (let i = lastIdx; i >= 1; i--) {
+        if (ma20Arr[i] == null) break
+        if (closes[i] < ma20Arr[i] * (1 - ma20BreakDeepPct)) {
+            upStartIdx = i + 1
+            break
+        }
+    }
+    if (upStartIdx < 0) upStartIdx = 1
+
+    const upSpan = lastIdx - upStartIdx
+    if (upSpan >= minBars) {
+        const startPrice = +klines[upStartIdx].close
+        const endPrice   = +klines[lastIdx].close
+        const gainPct    = startPrice > 0 ? (endPrice - startPrice) / startPrice : 0
+        if (gainPct >= minTotalGainPct) {
+            // 沿 MA5 爬升：close > MA5 的占比
+            let aboveMA5 = 0, count = 0
+            for (let i = upStartIdx; i <= lastIdx; i++) {
+                if (ma5Arr[i] == null) continue
+                count++
+                if (closes[i] > ma5Arr[i]) aboveMA5++
+            }
+            const compliance = count > 0 ? aboveMA5 / count : 0
+            // MA20 趋势向上（首尾比较）
+            const ma20Start = ma20Arr[upStartIdx], ma20End = ma20Arr[lastIdx]
+            if (compliance >= ma5CompliancePct && ma20End > ma20Start) {
+                return {
+                    direction: 'up',
+                    startIdx: upStartIdx, endIdx: lastIdx,
+                    startTime: klines[upStartIdx].time,
+                    endTime: klines[lastIdx].time,
+                    startPrice, endPrice,
+                    gainPct: gainPct * 100,
+                    ma5CompliancePct: compliance * 100,
+                    barCount: upSpan + 1,
+                }
+            }
+        }
+    }
+
+    // === 稳健主跌：找最近一次"有效突破 MA20 向上"的 bar，从其后开始算 ===
+    let downStartIdx = -1
+    for (let i = lastIdx; i >= 1; i--) {
+        if (ma20Arr[i] == null) break
+        if (closes[i] > ma20Arr[i] * (1 + ma20BreakDeepPct)) {
+            downStartIdx = i + 1
+            break
+        }
+    }
+    if (downStartIdx < 0) downStartIdx = 1
+
+    const downSpan = lastIdx - downStartIdx
+    if (downSpan >= minBars) {
+        const startPrice = +klines[downStartIdx].close
+        const endPrice   = +klines[lastIdx].close
+        const dropPct    = startPrice > 0 ? (startPrice - endPrice) / startPrice : 0
+        if (dropPct >= minTotalGainPct) {
+            let belowMA5 = 0, count = 0
+            for (let i = downStartIdx; i <= lastIdx; i++) {
+                if (ma5Arr[i] == null) continue
+                count++
+                if (closes[i] < ma5Arr[i]) belowMA5++
+            }
+            const compliance = count > 0 ? belowMA5 / count : 0
+            const ma20Start = ma20Arr[downStartIdx], ma20End = ma20Arr[lastIdx]
+            if (compliance >= ma5CompliancePct && ma20End < ma20Start) {
+                return {
+                    direction: 'down',
+                    startIdx: downStartIdx, endIdx: lastIdx,
+                    startTime: klines[downStartIdx].time,
+                    endTime: klines[lastIdx].time,
+                    startPrice, endPrice,
+                    gainPct: dropPct * 100,
+                    ma5CompliancePct: compliance * 100,
+                    barCount: downSpan + 1,
+                }
+            }
+        }
+    }
+    return null
+}
+
+// ---------------- 主升浪 / 主跌浪 启动识别（横盘后突破，最强信号）----------------
+/**
+ * 识别"长期横盘 → 趋势反转启动"这类稀缺形态。条件：
+ *   ① 找到一段长横盘（≥30 根 K 线、振幅 ≤10%）
+ *   ② 横盘后向上突破上沿（主升启动）或向下跌破下沿（主跌启动）
+ *   ③ 突破后的运动有显著幅度（≥8%）
+ *   ④ 突破发生在最近 N 根之内（默认 30），且当前价仍在新趋势中
+ *
+ * @returns [{ direction: 'up'|'down', consolidationStartTime, consolidationEndTime,
+ *            consolidationUpper, consolidationLower, consolidationBarCount,
+ *            breakoutIdx, breakoutTime, breakoutPrice, rallyPct, barsAgo }]
+ */
+export function detectMainRallyStart(klines, opts = {}) {
+    const {
+        consolidationMinBars = 30,
+        consolidationMaxRangePct = 0.10,
+        rallyMinPctAfter = 0.08,
+        freshWithinBars = 30,    // 30 根内 + 当前价仍在新趋势中 = "正在进行"
+        historicalWithinBars = 150,  // 历史事件只保留 150 根内，更老的不显示（避免视觉负担）
+    } = opts
+    if (!klines || klines.length < consolidationMinBars + 5) return []
+    const n = klines.length
+    const lastIdx = n - 1
+    const lastClose = +klines[lastIdx].close
+    const out = []
+
+    // 扫整段历史（500 根）找长横盘
+    const boxes = detectBoxes(klines, {
+        minBars: consolidationMinBars,
+        maxBars: 200,
+        rangePctThreshold: consolidationMaxRangePct,
+        recencyBars: 500,
+    })
+
+    for (const box of boxes) {
+        if (box.endIdx >= lastIdx) continue
+
+        // 找突破点（向上/向下，取先发生的）
+        let upBreak = null, downBreak = null
+        for (let i = box.endIdx + 1; i <= lastIdx; i++) {
+            const close = +klines[i].close
+            if (upBreak == null && close > box.upper) upBreak = i
+            if (downBreak == null && close < box.lower) downBreak = i
+            if (upBreak != null || downBreak != null) break
+        }
+
+        const buildEntry = (direction, breakIdx, refLevel, peakOrTrough) => {
+            const isUp = direction === 'up'
+            const pct = isUp ? (peakOrTrough - refLevel) / refLevel
+                             : (refLevel - peakOrTrough) / refLevel
+            if (pct < rallyMinPctAfter) return null
+            const barsAgo = lastIdx - breakIdx
+            const stillInTrend = isUp ? lastClose >= box.upper * 0.97
+                                      : lastClose <= box.lower * 1.03
+            const isFresh = barsAgo <= freshWithinBars && stillInTrend
+            // 交易计划（基于横盘高度做 Fib 1.618/2.618 目标 + 反向 ×0.97 止损）
+            const breakoutPrice = +klines[breakIdx].close
+            const boxHeight = box.upper - box.lower
+            let plan = null
+            if (boxHeight > 0) {
+                if (isUp) {
+                    const stopLoss = box.lower * 0.97
+                    const target1  = breakoutPrice + boxHeight * 1.618
+                    const target2  = breakoutPrice + boxHeight * 2.618
+                    const risk     = breakoutPrice - stopLoss
+                    const reward1  = target1 - breakoutPrice
+                    plan = {
+                        entryPrice: +breakoutPrice.toFixed(2),
+                        stopLoss:   +stopLoss.toFixed(2),
+                        stopLossPct: ((stopLoss - breakoutPrice) / breakoutPrice * 100),
+                        target1:    +target1.toFixed(2),
+                        target1Pct: ((target1 - breakoutPrice) / breakoutPrice * 100),
+                        target2:    +target2.toFixed(2),
+                        target2Pct: ((target2 - breakoutPrice) / breakoutPrice * 100),
+                        riskRewardRatio: risk > 0 ? +(reward1 / risk).toFixed(1) : null,
+                    }
+                } else {
+                    const stopLoss = box.upper * 1.03
+                    const target1  = breakoutPrice - boxHeight * 1.618
+                    const target2  = breakoutPrice - boxHeight * 2.618
+                    const risk     = stopLoss - breakoutPrice
+                    const reward1  = breakoutPrice - target1
+                    plan = {
+                        entryPrice: +breakoutPrice.toFixed(2),
+                        stopLoss:   +stopLoss.toFixed(2),
+                        stopLossPct: ((stopLoss - breakoutPrice) / breakoutPrice * 100),
+                        target1:    +target1.toFixed(2),
+                        target1Pct: ((target1 - breakoutPrice) / breakoutPrice * 100),
+                        target2:    +target2.toFixed(2),
+                        target2Pct: ((target2 - breakoutPrice) / breakoutPrice * 100),
+                        riskRewardRatio: risk > 0 ? +(reward1 / risk).toFixed(1) : null,
+                    }
+                }
+            }
+            return {
+                direction, isFresh,
+                consolidationStartIdx: box.startIdx,
+                consolidationEndIdx:   box.endIdx,
+                consolidationStartTime: box.startTime,
+                consolidationEndTime:   box.endTime,
+                consolidationUpper:    box.upper,
+                consolidationLower:    box.lower,
+                consolidationBarCount: box.endIdx - box.startIdx + 1,
+                breakoutIdx:   breakIdx,
+                breakoutTime:  klines[breakIdx].time,
+                breakoutPrice,
+                rallyPct:      pct * 100,
+                barsAgo,
+                plan,
+            }
+        }
+
+        if (upBreak != null) {
+            let peak = 0
+            for (let i = upBreak; i <= lastIdx; i++) {
+                const h = +klines[i].high
+                if (h > peak) peak = h
+            }
+            const e = buildEntry('up', upBreak, box.upper, peak)
+            if (e) out.push(e)
+        }
+        if (downBreak != null) {
+            let trough = Infinity
+            for (let i = downBreak; i <= lastIdx; i++) {
+                const l = +klines[i].low
+                if (l < trough) trough = l
+            }
+            const e = buildEntry('down', downBreak, box.lower, trough)
+            if (e) out.push(e)
+        }
+    }
+    // 时间倒序 + 过滤太老的历史事件
+    return out
+        .filter(e => e.barsAgo <= historicalWithinBars)
+        .sort((a, b) => b.breakoutIdx - a.breakoutIdx)
+}
+
+// ---------------- 主升浪综合评分（0-100，5 维度加权）----------------
+/**
+ * 对每根 K 线计算"主升浪概率"评分。基于 5 个维度（共最高 ~115 分，截断到 100）：
+ *   - 形态 (0-25)：突破创高 + 大阳线 + 实体饱满
+ *   - 量能 (0-25)：量比放大 + 量价齐升 - 缩量涨警告
+ *   - 均线 (0-25)：多头排列 + 金叉 + 发散
+ *   - MACD (0-25)：零轴上 + 金叉 + 红柱放大
+ *   - 共振 (0-15)：当日价格附近的多源共振区
+ *
+ * @param klines K 线数组
+ * @param ctx    可选的预计算上下文 { ma5Arr, ma10Arr, ma20Arr, difArr, deaArr, histArr, resonancesByIdx }
+ *               未提供则内部计算（每次 hover 重算性能差，建议预算好传入）
+ * @returns Map: idx → { score, level, reasons }
+ */
+export function computeMainWaveScores(klines, ctx = {}) {
+    if (!klines || klines.length < 25) return new Map()
+    const closes = klines.map(k => +k.close)
+    const ma5Arr  = ctx.ma5Arr  || ma(closes, 5)
+    const ma10Arr = ctx.ma10Arr || ma(closes, 10)
+    const ma20Arr = ctx.ma20Arr || ma(closes, 20)
+    const macdRes = (ctx.difArr && ctx.deaArr && ctx.histArr)
+        ? { dif: ctx.difArr, dea: ctx.deaArr, hist: ctx.histArr }
+        : macd(closes)
+    const { dif: difArr, dea: deaArr, hist: histArr } = macdRes
+    const resByIdx = ctx.resonancesByIdx || null
+
+    const out = new Map()
+    for (let i = 25; i < klines.length; i++) {
+        const k = klines[i]
+        const open = +k.open, close = +k.close, high = +k.high, low = +k.low
+        const prevClose = +klines[i - 1].close
+        if (!(prevClose > 0)) continue
+        const change = (close - prevClose) / prevClose
+        const reasons = []
+        let score = 0
+
+        // === 形态 (0-25) ===
+        let recentHigh = 0
+        for (let j = Math.max(0, i - 20); j < i; j++) {
+            if (+klines[j].high > recentHigh) recentHigh = +klines[j].high
+        }
+        if (close > recentHigh * 1.01) { score += 10; reasons.push('突破创高') }
+        else if (close > recentHigh * 0.99) score += 3
+
+        if (change > 0.05) { score += 8; reasons.push(`大阳${(change * 100).toFixed(1)}%`) }
+        else if (change > 0.03) score += 4
+
+        const range = high - low, body = Math.abs(close - open)
+        if (range > 0 && body / range > 0.7) { score += 7; reasons.push('实体饱满') }
+
+        // === 量能 (0-25) ===
+        const vr = volumeRatio(klines, i, 5)
+        if (vr != null) {
+            if (vr > 2.5) { score += 15; reasons.push(`巨量${vr.toFixed(1)}×`) }
+            else if (vr > 1.8) { score += 10; reasons.push(`放量${vr.toFixed(1)}×`) }
+            else if (vr > 1.2) score += 5
+
+            if (change > 0 && vr > 1.5) { score += 5; reasons.push('量价齐升') }
+            else if (change > 0.03 && vr < 0.8) { score -= 8; reasons.push('缩量涨⚠') }
+        }
+
+        // === 均线 (0-25) ===
+        const m5 = ma5Arr[i], m10 = ma10Arr[i], m20 = ma20Arr[i]
+        if (m5 != null && m10 != null && m20 != null) {
+            if (m5 > m10 && m10 > m20) { score += 10; reasons.push('多头排列') }
+            else if (close > m5 && m5 > m10) score += 5
+            const pm5 = ma5Arr[i - 1], pm10 = ma10Arr[i - 1]
+            if (pm5 != null && pm10 != null && m5 > m10 && pm5 <= pm10) {
+                score += 10; reasons.push('均线金叉')
+            }
+        }
+
+        // === MACD (0-25) ===
+        const dif = difArr[i], dea = deaArr[i]
+        if (dif != null && dea != null) {
+            if (dif > 0 && dea > 0) { score += 8; reasons.push('MACD零轴上') }
+            const pDif = difArr[i - 1], pDea = deaArr[i - 1]
+            if (pDif != null && pDea != null && dif > dea && pDif <= pDea && dif > 0) {
+                score += 12; reasons.push('零轴上金叉')
+            }
+            const h = histArr[i], hp = histArr[i - 1]
+            if (h != null && hp != null && h > hp && h > 0) {
+                score += 5; reasons.push('红柱放大')
+            }
+        }
+
+        // === 共振 (0-15) ===
+        if (resByIdx) {
+            const r = resByIdx.get(i)
+            if (r) { score += Math.min(15, r.count * 5); reasons.push(`共振×${r.count}`) }
+        }
+
+        score = Math.max(0, Math.min(100, score))
+        let level
+        if (score >= 70) level = '强买'
+        else if (score >= 50) level = '关注'
+        else if (score >= 30) level = '中性'
+        else level = '观望'
+
+        out.set(i, { score, level, reasons, vr })
+    }
+    return out
+}
+
+// ---------------- 潜伏分（识别"何时埋伏"，跟主升评分（启动分）互补）----------------
+/**
+ * 潜伏分高 = 适合潜伏布局，跟主升评分（确认型滞后指标）反向。
+ * 5 维度（共最高 ~100，截断到 100）：
+ *   - 位置 (0-30)：紧贴 MA20 + 共振支撑区 + 趋势完好（在 MA60 上）
+ *   - 量能 (0-25)：缩量、连续缩量；放量爆发 → 扣分
+ *   - 超卖反转 (0-25)：KDJ J 超卖 / J 反转向上 / K < 30
+ *   - 动能反转 (0-15)：MACD 零轴下绿柱转红 / 绿柱缩短
+ *   - 形态加分 (0-15)：下影长、实体收缩
+ *   - 扣分项：涨过 MA20 5% / 破 MA60 / 量比 > 2
+ */
+export function computeAccumulationScores(klines, ctx = {}) {
+    if (!klines || klines.length < 25) return new Map()
+    const closes = klines.map(k => +k.close)
+    const ma20Arr = ctx.ma20Arr || ma(closes, 20)
+    const ma60Arr = ctx.ma60Arr || ma(closes, 60)
+    const macdRes = (ctx.difArr && ctx.histArr)
+        ? { dif: ctx.difArr, hist: ctx.histArr }
+        : macd(closes)
+    const kdjRes = (ctx.kArr && ctx.jArr)
+        ? { k: ctx.kArr, j: ctx.jArr }
+        : kdj(klines)
+    const { hist: histArr } = macdRes
+    const { k: kArr, j: jArr } = kdjRes
+    const resByIdx = ctx.resonancesByIdx || null
+
+    const out = new Map()
+    for (let i = 25; i < klines.length; i++) {
+        const cb = klines[i]
+        const open = +cb.open, close = +cb.close, high = +cb.high, low = +cb.low
+        const reasons = []
+        let score = 0
+
+        // === 横盘特征 (0-30) —— 潜伏的核心信号 ===
+        // 近 20 根 K 线波动率（核心：跌不下去也涨不上去 = 潜伏）
+        let win20High = 0, win20Low = Infinity
+        for (let j = Math.max(0, i - 19); i >= 0 && j <= i; j++) {
+            const h = +klines[j].high, l = +klines[j].low
+            if (h > win20High) win20High = h
+            if (l < win20Low)  win20Low = l
+        }
+        const vol20 = win20Low > 0 ? (win20High - win20Low) / win20Low : 1
+        if (vol20 <= 0.10)      { score += 20; reasons.push('窄幅横盘') }
+        else if (vol20 <= 0.15) { score += 12; reasons.push('震荡中') }
+        else if (vol20 <= 0.20) { score += 6 }
+
+        // 近 30 根没创新低（不在下跌通道里）
+        const lookback30 = Math.min(30, i)
+        let madeNewLow = false
+        const recentLow = +klines[i].low
+        const earlyLowsStart = Math.max(0, i - lookback30)
+        for (let j = earlyLowsStart; j < i; j++) {
+            if (+klines[j].low > recentLow * 1.02) {  // 当前低 < 早期低 = 在创新低
+                madeNewLow = true; break
+            }
+        }
+        if (!madeNewLow && lookback30 >= 20) { score += 10; reasons.push('未创新低') }
+
+        // === 量能维度 (0-25) ===
+        const vr = volumeRatio(klines, i, 5)
+        if (vr != null) {
+            if (vr < 0.7)      { score += 12; reasons.push(`缩量${vr.toFixed(1)}×`) }
+            else if (vr < 0.9) { score += 8 }
+            else if (vr < 1.1) { score += 4 }
+        }
+        // 5 日均量 vs 20 日均量（更宏观的缩量趋势）
+        let sum5 = 0, n5 = 0, sum20 = 0, n20 = 0
+        for (let j = Math.max(0, i - 4); j <= i; j++) {
+            const v = +klines[j].vol; if (v > 0) { sum5 += v; n5++ }
+        }
+        for (let j = Math.max(0, i - 19); j <= i; j++) {
+            const v = +klines[j].vol; if (v > 0) { sum20 += v; n20++ }
+        }
+        if (n5 >= 3 && n20 >= 10) {
+            const ratio = (sum5 / n5) / (sum20 / n20)
+            if (ratio < 0.7)      { score += 13; reasons.push('5日均量持续萎缩') }
+            else if (ratio < 0.85){ score += 8;  reasons.push('5日均量小缩') }
+        }
+
+        // === 位置健康 (0-20) ===
+        const m20 = ma20Arr[i], m60 = ma60Arr[i]
+        if (m20 != null) {
+            const dist = (close - m20) / m20
+            if (Math.abs(dist) <= 0.05) { score += 10; reasons.push('紧贴MA20') }
+            else if (Math.abs(dist) <= 0.10) { score += 5 }
+        }
+        if (m60 != null && close > m60) { score += 5; reasons.push('守住MA60') }
+        if (resByIdx) {
+            const r = resByIdx.get(i)
+            if (r && r.price <= close * 1.01) {
+                score += Math.min(10, r.count * 4)
+                reasons.push(`支撑共振×${r.count}`)
+            }
+        }
+
+        // === 反转征兆 (0-15) ===
+        const j = jArr[i], k = kArr[i]
+        if (j != null && j < 30) { score += 5; reasons.push('J<30') }
+        const jPrev = jArr[i - 1]
+        if (j != null && jPrev != null && k != null && k < 50 && j > jPrev) {
+            score += 8; reasons.push('KDJ反转↑')
+        }
+        const histV = histArr[i], histP = histArr[i - 1]
+        if (histV != null && histP != null) {
+            if (histV >= 0 && histP < 0) { score += 7; reasons.push('MACD转红') }
+            else if (histV < 0 && histV > histP) { score += 3; reasons.push('绿柱缩') }
+        }
+
+        // === 形态加分 (0-10) ===
+        const range = high - low, body = Math.abs(close - open)
+        const lowerShadow = Math.min(open, close) - low
+        if (range > 0 && body > 0) {
+            if (lowerShadow > body * 2 && body / range < 0.3) {
+                score += 5; reasons.push('下影长')
+            }
+            if (body / range < 0.3 && open > 0 && range / open < 0.025) {
+                score += 5; reasons.push('实体收缩')
+            }
+        }
+
+        // === 扣分项（仅明显已脱离潜伏期）===
+        if (m20 != null && close > m20 * 1.08) { score -= 8;  reasons.push('涨过MA20⚠') }
+        if (m60 != null && close < m60 * 0.95) { score -= 10; reasons.push('破MA60⚠') }
+        if (vr != null && vr > 2)              { score -= 12; reasons.push('已爆发⚠') }
+
+        score = Math.max(0, Math.min(100, score))
+        let level
+        if (score >= 70) level = '深度潜伏'
+        else if (score >= 55) level = '潜伏中'
+        else if (score >= 40) level = '可关注'
+        else if (score >= 25) level = '观望'
+        else level = '不适合'
+
+        out.set(i, { score, level, reasons, vr })
+    }
+    return out
+}
+
+// ---------------- 主升 / 主跌段识别（独立趋势段染色）----------------
+/**
+ * 识别价格走势中的"主升段"和"主跌段"——zigzag 相邻 swing 之间的大幅单向波段。
+ * 用于"不开任何指标"的纯净视图下，依然能看清哪段是主升、哪段是主跌。
+ *
+ * @param klines
+ * @param opts:
+ *   pivotWindow   zigzag 检测窗口
+ *   recencyBars   扫描范围
+ *   minRangePct   最低涨跌幅（默认 15%，太小不算主升/主跌）
+ *   minBars       最少持续根数
+ * @returns [{ type: 'up'|'down', startIdx, endIdx, startTime, endTime, startPrice, endPrice, rangePct, barCount }]
+ */
+export function detectMainTrends(klines, opts = {}) {
+    const {
+        pivotWindow = 10,
+        recencyBars = 300,
+        minRangePct = 0.15,
+        minBars = 10,
+    } = opts
+    if (!klines || klines.length < pivotWindow * 2 + 1) return []
+    const zz = detectZigzag(klines, { pivotWindow, recencyBars })
+    if (zz.length < 2) return []
+
+    const trends = []
+    for (let i = 0; i < zz.length - 1; i++) {
+        const a = zz[i], b = zz[i + 1]
+        const span = b.idx - a.idx
+        if (span < minBars) continue
+        const isUp  = b.price > a.price
+        const range = Math.abs(b.price - a.price) / Math.min(a.price, b.price)
+        if (range < minRangePct) continue
+        trends.push({
+            type:       isUp ? 'up' : 'down',
+            startIdx:   a.idx,
+            endIdx:     b.idx,
+            startTime:  a.time,
+            endTime:    b.time,
+            startPrice: a.price,
+            endPrice:   b.price,
+            rangePct:   range * 100,
+            barCount:   span,
+        })
+    }
+    return trends
+}
+
 // ---------------- Zigzag 波段折线 ----------------
 /**
  * 把价格走势压缩成"高→低→高→低"的折线骨架，揭示波段结构。
@@ -359,6 +951,297 @@ export function detectZigzag(klines, opts = {}) {
     return out
 }
 
+// ---------------- 聚类版支撑/压力（高级模式）----------------
+/**
+ * 跟简单版（近 N 根高/低）互补：用滑窗 swing + 价格聚类找"被反复试探"的关键档位。
+ * 触及越多次、越近期 → 越强。
+ *
+ * @param klines
+ * @param opts:
+ *   pivotWindow       swing 检测窗口（左右各 N 根）
+ *   clusterTolerance  价差 ≤ 此比例归并为同档
+ *   minTouches        最少触及次数
+ *   topK              支撑/压力各取 Top N
+ *   recencyHalfLife   时间衰减半衰期（多少根 K 线前权重减半）
+ *   maxDistancePct    离现价超过此比例剔除
+ * @returns { supports: [{price, touches, score}], resistances: [...] }
+ */
+export function supportResistanceCluster(klines, opts = {}) {
+    const {
+        pivotWindow = 5,
+        clusterTolerance = 0.015,
+        minTouches = 2,
+        topK = 3,
+        recencyHalfLife = 30,
+        maxDistancePct = 0.25,
+        volumeConfirm = true,    // 量能确认：拐点附近均量 ≥ 全局均量 × 0.8 才算有效
+        volumeRatio = 0.8,
+    } = opts
+    if (!klines || klines.length < pivotWindow * 2 + 1) {
+        return { supports: [], resistances: [] }
+    }
+    const n = klines.length
+
+    // 全局均量（用于量能确认）
+    let globalAvgVol = 0
+    if (volumeConfirm) {
+        let sum = 0, count = 0
+        for (const k of klines) {
+            const v = +k.vol
+            if (v > 0) { sum += v; count++ }
+        }
+        globalAvgVol = count > 0 ? sum / count : 0
+    }
+    function passVolume(idx) {
+        if (!volumeConfirm || globalAvgVol === 0) return true
+        let sum = 0, count = 0
+        for (let i = Math.max(0, idx - 2); i < Math.min(n, idx + 3); i++) {
+            const v = +klines[i].vol
+            if (v > 0) { sum += v; count++ }
+        }
+        if (count === 0) return true
+        return sum / count >= globalAvgVol * volumeRatio
+    }
+
+    // 1. 找 swing 高/低（带量能确认）
+    let highs = []
+    let lows  = []
+    for (let i = pivotWindow; i < n - pivotWindow; i++) {
+        const h = +klines[i].high, l = +klines[i].low
+        let isHigh = true, isLow = true
+        for (let j = 1; j <= pivotWindow; j++) {
+            if (h <= +klines[i - j].high || h <= +klines[i + j].high) isHigh = false
+            if (l >= +klines[i - j].low  || l >= +klines[i + j].low)  isLow  = false
+            if (!isHigh && !isLow) break
+        }
+        if (isHigh) highs.push({ idx: i, price: h })
+        if (isLow)  lows.push({ idx: i, price: l })
+    }
+    // 量能过滤；如果过滤完全为空，回退到原始（避免完全没结果）
+    if (volumeConfirm) {
+        const fHighs = highs.filter(p => passVolume(p.idx))
+        const fLows  = lows.filter(p => passVolume(p.idx))
+        if (fHighs.length >= minTouches) highs = fHighs
+        if (fLows.length  >= minTouches) lows  = fLows
+    }
+
+    // 2. 价格聚类
+    function cluster(pivots) {
+        if (!pivots.length) return []
+        const sorted = [...pivots].sort((a, b) => a.price - b.price)
+        const clusters = []
+        let cur = { prices: [sorted[0].price], idxs: [sorted[0].idx] }
+        for (let i = 1; i < sorted.length; i++) {
+            const ref = cur.prices.reduce((a, b) => a + b, 0) / cur.prices.length
+            if (ref > 0 && Math.abs(sorted[i].price - ref) / ref <= clusterTolerance) {
+                cur.prices.push(sorted[i].price)
+                cur.idxs.push(sorted[i].idx)
+            } else {
+                clusters.push(cur)
+                cur = { prices: [sorted[i].price], idxs: [sorted[i].idx] }
+            }
+        }
+        clusters.push(cur)
+        const last = n - 1
+        return clusters
+            .filter(c => c.prices.length >= minTouches)
+            .map(c => {
+                const meanPrice = c.prices.reduce((a, b) => a + b, 0) / c.prices.length
+                const newest   = Math.max(...c.idxs)
+                const recency  = Math.pow(0.5, (last - newest) / recencyHalfLife)
+                return {
+                    price: meanPrice,
+                    touches: c.prices.length,
+                    score: c.prices.length * recency,
+                }
+            })
+            .sort((a, b) => b.score - a.score)
+    }
+
+    const lastClose = +klines[n - 1].close
+    const nearEnough = c => Math.abs(c.price - lastClose) / lastClose <= maxDistancePct
+
+    return {
+        resistances: cluster(highs).filter(c => c.price >= lastClose && nearEnough(c)).slice(0, topK),
+        supports:    cluster(lows ).filter(c => c.price <= lastClose && nearEnough(c)).slice(0, topK),
+    }
+}
+
+// ---------------- K 线形态识别（5 种短线敏感形态）----------------
+/**
+ * 识别短线最敏感的 5 种形态：
+ *   - 锤子线 hammer        ：底部反转信号，下影 > 实体×2.2、上影 < 实体×0.4
+ *   - 射击之星 shootingStar ：顶部反转信号，上影 > 实体×2.2、下影 < 实体×0.4
+ *   - 看涨吞没 bullishEngulfing：前阴后阳，后实体完全包裹前实体
+ *   - 看跌吞没 bearishEngulfing：前阳后阴，后实体完全包裹前实体
+ *   - 十字星 doji           ：犹豫 / 反转预警，实体 < 振幅×8%
+ *
+ * @param klines
+ * @param opts:
+ *   recencyBars  只扫最近 N 根（默认 200）
+ * @returns [{ idx, time, type, signal: 'bullish'|'bearish'|'neutral', label }]
+ */
+export function detectPatterns(klines, opts = {}) {
+    const { recencyBars = 200 } = opts
+    if (!klines || klines.length < 2) return []
+    const n = klines.length
+    const startIdx = Math.max(1, n - recencyBars)
+    const out = []
+
+    for (let i = startIdx; i < n; i++) {
+        const k = klines[i]
+        const open  = +k.open
+        const close = +k.close
+        const high  = +k.high
+        const low   = +k.low
+        const body  = Math.abs(close - open)
+        const upperShadow = high - Math.max(open, close)
+        const lowerShadow = Math.min(open, close) - low
+        const range = high - low
+        if (range <= 0) continue
+
+        // —— 锤子线 / 射击之星（单根 K 线）——
+        if (body > 0) {
+            if (lowerShadow > body * 2.2 && upperShadow < body * 0.4) {
+                out.push({ idx: i, time: k.time, type: 'hammer', signal: 'bullish', label: '锤', fullName: '锤子线' })
+                continue
+            }
+            if (upperShadow > body * 2.2 && lowerShadow < body * 0.4) {
+                out.push({ idx: i, time: k.time, type: 'shootingStar', signal: 'bearish', label: '星', fullName: '射击之星' })
+                continue
+            }
+        }
+
+        // —— 十字星（单根 K 线）——
+        if (body < range * 0.08) {
+            out.push({ idx: i, time: k.time, type: 'doji', signal: 'neutral', label: '十', fullName: '十字星' })
+            continue
+        }
+
+        // —— 吞没形态（前后两根）——
+        if (i > 0) {
+            const prev = klines[i - 1]
+            const pOpen  = +prev.open
+            const pClose = +prev.close
+            const pBody  = Math.abs(pClose - pOpen)
+            if (pBody > 0 && body > pBody) {
+                const prevBull = pClose > pOpen
+                const curBull  = close > open
+
+                // 看涨吞没：前阴后阳 + 后实体包裹前实体
+                if (!prevBull && curBull && open <= pClose && close >= pOpen) {
+                    out.push({ idx: i, time: k.time, type: 'bullishEngulfing', signal: 'bullish', label: '吞', fullName: '看涨吞没' })
+                    continue
+                }
+                // 看跌吞没：前阳后阴 + 后实体包裹前实体
+                if (prevBull && !curBull && open >= pClose && close <= pOpen) {
+                    out.push({ idx: i, time: k.time, type: 'bearishEngulfing', signal: 'bearish', label: '吞', fullName: '看跌吞没' })
+                    continue
+                }
+            }
+        }
+    }
+
+    return out
+}
+
+// ---------------- 斐波那契回撤（自动识别主波段 + 7 条经典回撤位）----------------
+/**
+ * 找最近最大的 zigzag 段作为锚点，画 0% / 23.6% / 38.2% / 50% / 61.8% / 78.6% / 100% 七条回撤线。
+ * 短线核心用法：上涨回撤到 38.2% / 50% / 61.8% 是经典低吸点。
+ *
+ * @param klines
+ * @param opts:
+ *   recencyBars     扫描范围
+ *   pivotWindow     zigzag 检测窗口
+ *   minRangePct     主波段振幅至少多少（默认 10%，太小没回撤价值）
+ * @returns null 或 { direction, startIdx, endIdx, startTime, endTime, high, low, levels: [{ratio, price, label}] }
+ */
+export function detectFibonacci(klines, opts = {}) {
+    const { recencyBars = 250, pivotWindow = 10, minRangePct = 0.10 } = opts
+    if (!klines || klines.length < pivotWindow * 2 + 1) return null
+
+    const zz = detectZigzag(klines, { pivotWindow, recencyBars })
+    if (zz.length < 2) return null
+
+    // 找相邻 swing 中振幅最大的一段
+    let best = null
+    let bestRange = 0
+    for (let i = 0; i < zz.length - 1; i++) {
+        const a = zz[i], b = zz[i + 1]
+        const range = Math.abs(b.price - a.price) / Math.min(a.price, b.price)
+        if (range > bestRange) {
+            bestRange = range
+            best = { from: a, to: b }
+        }
+    }
+    if (!best || bestRange < minRangePct) return null
+
+    const isUp = best.to.price > best.from.price
+    const high = Math.max(best.from.price, best.to.price)
+    const low  = Math.min(best.from.price, best.to.price)
+    const range = high - low
+
+    // 7 个经典回撤比例
+    const ratios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+    const levels = ratios.map(r => ({
+        ratio: r,
+        price: high - r * range,                 // 0% = 高、100% = 低
+        label: r === 0 ? '0%' : r === 1 ? '100%' : `${(r * 100).toFixed(1)}%`,
+        isKey: r === 0 || r === 0.5 || r === 1,  // 0/50/100 视为关键档位
+    }))
+
+    return {
+        direction: isUp ? 'up' : 'down',
+        startIdx:  best.from.idx,
+        endIdx:    best.to.idx,
+        startTime: best.from.time,
+        endTime:   best.to.time,
+        high, low,
+        levels,
+    }
+}
+
+// ---------------- 共振检测（多源价位聚类）----------------
+/**
+ * 把多个独立指标产生的"关键价位"聚到一起，找出多源信号汇聚的"共振区"。
+ *
+ * @param levels    [{ price, source }] 各类指标产生的关键价位（同一价位可来自多个 source）
+ * @param tolerancePct  聚类容差（价差 / 中位 ≤ 此比例归并为同一区，默认 1.2%）
+ * @param minSources    至少多少个不同来源才算共振（默认 2）
+ * @returns [{ price, sources: [...], count, distancePct }] 按 count 倒序
+ *           （distancePct 需要外面传 currentPrice 才能算，这里返回不带 distance 版本）
+ */
+export function clusterResonance(levels, tolerancePct = 0.012, minSources = 2) {
+    if (!levels?.length) return []
+    const sorted = [...levels].sort((a, b) => a.price - b.price)
+    const clusters = []
+    let cur = { prices: [sorted[0].price], sources: [sorted[0].source] }
+    for (let i = 1; i < sorted.length; i++) {
+        const ref = cur.prices.reduce((a, b) => a + b, 0) / cur.prices.length
+        if (ref > 0 && Math.abs(sorted[i].price - ref) / ref <= tolerancePct) {
+            cur.prices.push(sorted[i].price)
+            cur.sources.push(sorted[i].source)
+        } else {
+            clusters.push(cur)
+            cur = { prices: [sorted[i].price], sources: [sorted[i].source] }
+        }
+    }
+    clusters.push(cur)
+
+    return clusters
+        .map(c => {
+            const uniqueSources = [...new Set(c.sources)]
+            return {
+                price: c.prices.reduce((a, b) => a + b, 0) / c.prices.length,
+                sources: uniqueSources,
+                count: uniqueSources.length,
+            }
+        })
+        .filter(c => c.count >= minSources)
+        .sort((a, b) => b.count - a.count)
+}
+
 // ---------------- 趋势通道（Raff 平行通道：包络法）----------------
 /**
  * 主流"趋势通道"做法：先确定通道斜率，再用同斜率做上下平行线包住所有 swing 点。
@@ -375,9 +1258,10 @@ export function detectZigzag(klines, opts = {}) {
 export function detectChannel(klines, opts = {}) {
     const {
         pivotWindow = 10,
-        recencyBars = 200,
-        maxPivots = 5,
+        recencyBars = 150,    // 200 → 150：更聚焦近期趋势，避免老波段污染
+        maxPivots = 4,         // 5 → 4：用更少的最近 swing，更响应当下
         minPivots = 3,
+        maxDisplayBars = 100,  // 通道显示最多回看 N 根，超过的部分裁剪掉（避免视觉上"飞出去"）
     } = opts
     const zz = detectZigzag(klines, { pivotWindow, recencyBars })
     if (!zz.length) return null
@@ -418,14 +1302,17 @@ export function detectChannel(klines, opts = {}) {
     }
     if (!isFinite(highIntercept) || !isFinite(lowIntercept)) return null
 
-    const startIdx = Math.min(lows[0].idx, highs[0].idx)
-    const endIdx   = klines.length - 1
+    // 通道几何 startIdx 是用于拟合的最早 swing；
+    // 但显示时不让通道往左延伸超过 maxDisplayBars 根（防止数据有结构性突变时通道飞出价格区间）
+    const fitStartIdx = Math.min(lows[0].idx, highs[0].idx)
+    const endIdx      = klines.length - 1
+    const displayStartIdx = Math.max(fitStartIdx, endIdx - maxDisplayBars)
     return {
         // 平行通道：lowSlope === highSlope === slope
         lowSlope: slope, lowIntercept,
         highSlope: slope, highIntercept,
-        startIdx, endIdx,
-        startTime: klines[startIdx].time,
+        startIdx: displayStartIdx, endIdx,
+        startTime: klines[displayStartIdx].time,
         endTime:   klines[endIdx].time,
     }
 }
@@ -455,6 +1342,9 @@ export function detectTrendlines(klines, opts = {}) {
         topK = 1,
         touchTolerancePct = 0.012,
         touchMinCount = 2,
+        // 新增：角度过滤（朋友的算法）
+        minSlopePct = 0.0003,    // |斜率| / 起点价 至少 0.03%（避免太平）
+        maxSlopePct = 0.05,      // 至多 5%（避免太陡的伪线）
     } = opts
     if (!klines || klines.length < minSpanBars + pivotWindow * 2) return []
     const n = klines.length
@@ -484,9 +1374,13 @@ export function detectTrendlines(klines, opts = {}) {
             const span = p2.idx - p1.idx
             if (span < minSpanBars) continue
             const slope = (p2.price - p1.price) / span
+            // 角度过滤：剔除太平 / 太陡的无意义线
+            const slopePct = p1.price > 0 ? Math.abs(slope) / p1.price : 0
+            if (slopePct < minSlopePct || slopePct > maxSlopePct) continue
             const isHighLine = p1.type === 'high'
 
             let touches = 2, broken = false
+            const deviations = []
             for (let i = p1.idx + 1; i < n; i++) {
                 if (i === p2.idx) continue
                 const lineY = p1.price + slope * (i - p1.idx)
@@ -494,21 +1388,28 @@ export function detectTrendlines(klines, opts = {}) {
                 if (isHighLine) {
                     const h = +klines[i].high
                     if (h > lineY * (1 + touchTolerancePct)) { broken = true; break }
-                    if (Math.abs(h - lineY) / lineY <= touchTolerancePct) touches++
+                    const dev = Math.abs(h - lineY) / lineY
+                    if (dev <= touchTolerancePct) { touches++; deviations.push(dev) }
                 } else {
                     const l = +klines[i].low
                     if (l < lineY * (1 - touchTolerancePct)) { broken = true; break }
-                    if (Math.abs(l - lineY) / lineY <= touchTolerancePct) touches++
+                    const dev = Math.abs(l - lineY) / lineY
+                    if (dev <= touchTolerancePct) { touches++; deviations.push(dev) }
                 }
             }
 
             if (!broken && touches >= touchMinCount) {
+                // 朋友的评分公式：touches² × span / (avgDeviation + ε) —— 平方权重 + 偏差惩罚
+                const avgDev = deviations.length > 0
+                    ? deviations.reduce((a, b) => a + b, 0) / deviations.length
+                    : 0
+                const score = (touches * touches) * span / (avgDev + 0.0001)
                 candidates.push({
                     type: p1.type,
                     startIdx: p1.idx, endIdx: p2.idx,
                     startTime: klines[p1.idx].time, endTime: klines[p2.idx].time,
                     startPrice: p1.price, endPrice: p2.price,
-                    touches, span, score: touches * span,
+                    touches, span, score,
                 })
             }
         }

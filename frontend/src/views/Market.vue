@@ -7,6 +7,7 @@ import RefreshCountdown from '../components/RefreshCountdown.vue'
 import LastRefreshLabel from '../components/LastRefreshLabel.vue'
 import SectorHeatmap from '../components/SectorHeatmap.vue'
 import { openStockChart } from '../composables/useStockChart'
+import { openAddToWatchlist } from '../composables/useAddToWatchlist'
 
 const emit = defineEmits(['openAI'])
 
@@ -1119,7 +1120,15 @@ onUnmounted(() => {
                             :title="'双击查看 K 线'"
                             class="border-b border-[#f5f5f5] hover:bg-[#f2f8fc] transition-colors group cursor-pointer"
                         >
-                            <td class="px-[12px] py-[10px] text-[12px] text-[#666] font-mono align-top">{{ stock.code }}</td>
+                            <td class="px-[12px] py-[10px] text-[12px] text-[#666] font-mono align-top">
+                                <div class="flex items-center gap-[4px]">
+                                    <span>{{ stock.code }}</span>
+                                    <button @click.stop="openAddToWatchlist(stock.code, stock.name, stock.price)"
+                                            class="opacity-0 group-hover:opacity-100 text-[#dc2626] bg-[#fee2e2] hover:bg-[#fecaca]
+                                                   w-[16px] h-[16px] rounded text-[12px] font-bold transition flex items-center justify-center shrink-0"
+                                            title="加入自选">+</button>
+                                </div>
+                            </td>
                             <td class="px-[12px] py-[10px] align-top">
                                 <div class="flex items-center gap-[6px] flex-wrap">
                                     <svg v-if="stock.isLimitUp"
@@ -1244,12 +1253,16 @@ onUnmounted(() => {
                     <div v-for="(stock, idx) in tier.stocks" :key="stock.code"
                          @dblclick="openStockChart(stock.code, stock.name)"
                          :title="'双击查看 K 线'"
-                         class="flex flex-col gap-[3px] pl-[14px] pr-[8px] py-[6px] cursor-pointer transition-colors min-w-0 border-b border-[#f5f5f5] hover:bg-[#fff5f5]"
+                         class="flex flex-col gap-[3px] pl-[14px] pr-[8px] py-[6px] cursor-pointer transition-colors min-w-0 border-b border-[#f5f5f5] hover:bg-[#fff5f5] group"
                          :class="{ 'border-l border-[#f5f5f5]': idx % 2 === 1 }">
-                        <!-- 第一行：代码 + 名字 -->
+                        <!-- 第一行：代码 + 名字 + 加自选按钮 -->
                         <div class="flex items-center gap-[8px] min-w-0">
                             <span class="text-[12px] text-[#666] font-mono tabular-nums shrink-0">{{ stock.code }}</span>
                             <span class="text-[14px] font-bold text-[#111] truncate">{{ stock.name }}</span>
+                            <button @click.stop="openAddToWatchlist(stock.code, stock.name)"
+                                    class="opacity-0 group-hover:opacity-100 ml-auto text-[#dc2626] bg-[#fee2e2] hover:bg-[#fecaca]
+                                           w-[18px] h-[18px] rounded text-[12px] font-bold transition flex items-center justify-center shrink-0"
+                                    title="加入自选">+</button>
                         </div>
                         <!-- 第二行：涨停池原始涨停原因（+号分隔灰色文字，作为辅助信息不抢主角戏份）-->
                         <div v-if="stock.reasonAll"
@@ -1402,7 +1415,7 @@ onUnmounted(() => {
                     <tr v-for="s in hotListData" :key="s.code"
                         @dblclick="openStockChart(s.code, s.name)"
                         :title="'双击查看 K 线'"
-                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors cursor-pointer">
+                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors cursor-pointer group">
                         <td class="px-[14px] py-[8px] text-center">
                             <span class="inline-flex items-center justify-center w-[26px] h-[26px] rounded-[4px] text-[12px] font-bold tabular-nums"
                                   :class="s.rank <= 3
@@ -1412,8 +1425,16 @@ onUnmounted(() => {
                             </span>
                         </td>
                         <td class="px-[12px] py-[8px]">
-                            <div class="text-[14px] font-bold text-[#111] leading-tight">{{ s.name }}</div>
-                            <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">{{ s.code }}</div>
+                            <div class="flex items-center gap-[6px]">
+                                <div class="flex-1 min-w-0">
+                                    <div class="text-[14px] font-bold text-[#111] leading-tight">{{ s.name }}</div>
+                                    <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">{{ s.code }}</div>
+                                </div>
+                                <button @click.stop="openAddToWatchlist(s.code, s.name)"
+                                        class="opacity-0 group-hover:opacity-100 text-[#dc2626] bg-[#fee2e2] hover:bg-[#fecaca]
+                                               w-[18px] h-[18px] rounded text-[12px] font-bold transition flex items-center justify-center shrink-0"
+                                        title="加入自选">+</button>
+                            </div>
                         </td>
                         <td class="px-[10px] py-[8px] text-right tabular-nums">
                             <span class="text-[13px] font-bold"
@@ -1611,11 +1632,19 @@ onUnmounted(() => {
                     <tr v-for="s in filteredPoolStocks" :key="s.code"
                         @dblclick="openStockChart(s.code, s.name)"
                         :title="'双击查看 K 线'"
-                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors cursor-pointer">
+                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors cursor-pointer group">
                         <!-- 股票（名字大字 + 代码小字，垂直堆叠，跟热榜一致）-->
                         <td class="px-[14px] py-[8px]">
-                            <div class="text-[14px] font-bold text-[#111] leading-tight truncate max-w-[140px]">{{ s.name }}</div>
-                            <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">{{ s.code }}</div>
+                            <div class="flex items-center gap-[6px]">
+                                <div class="flex-1 min-w-0">
+                                    <div class="text-[14px] font-bold text-[#111] leading-tight truncate max-w-[140px]">{{ s.name }}</div>
+                                    <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">{{ s.code }}</div>
+                                </div>
+                                <button @click.stop="openAddToWatchlist(s.code, s.name, s.price)"
+                                        class="opacity-0 group-hover:opacity-100 text-[#dc2626] bg-[#fee2e2] hover:bg-[#fecaca]
+                                               w-[18px] h-[18px] rounded text-[12px] font-bold transition flex items-center justify-center shrink-0"
+                                        title="加入自选">+</button>
+                            </div>
                         </td>
                         <td v-if="colHas.price"
                             class="px-[10px] py-[8px] text-right tabular-nums text-[13px] font-semibold text-[#111]">

@@ -93,16 +93,10 @@ def job_eod_snapshot():
 
 def job_alert_check():
     """
-    周期性检查价格警报。盘外不调用上游接口（quote_service 缓存挡住），
-    所以这个 job 即便每 30s 跑也不打 EM。
+    周期性检查价格警报。每 30s 跑一次。
+    盘外 quote_service 走缓存（上次拉的快照），不会真的调 EM；
+    所以这个 job 不限制工作日/session — 让用户在任何时候设警报都能立即被触发到。
     """
-    now = datetime.now()
-    if not db.is_trading_day(now.date()):
-        return
-    t = now.time()
-    in_session = (dtime(9, 30) <= t <= dtime(11, 35)) or (dtime(13, 0) <= t <= dtime(15, 0))
-    if not in_session:
-        return
     try:
         n = alert_service.check_alerts()
         if n > 0:

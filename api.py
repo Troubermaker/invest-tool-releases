@@ -41,7 +41,6 @@ from services import limit_pool_service
 from services import license_service
 from services import update_service
 from services import alert_service
-from services import f10_service
 import ai_service
 
 
@@ -322,11 +321,6 @@ class Api:
         return kline_service.get_stock_kline(code, timeframe)
 
     @api_endpoint
-    def get_stock_f10(self, code):
-        """个股 F10 简版基本面快照：行业/市值/PE/PB/ROE/股息率/主营/简介。"""
-        return f10_service.get_f10(code)
-
-    @api_endpoint
     def get_sector_stocks(self, plate_id, date=None):
         """根据 KPL 板块 ID 返回该板块精选联动股票列表。date 历史日期 'YYYY-MM-DD'。"""
         return sector_stocks_service.get_sector_stocks(plate_id, date=date)
@@ -458,6 +452,11 @@ class Api:
     def ack_alerts(self, ids):
         """前端展示完成后调，标记为已展示。"""
         return alert_service.ack_alerts(ids or [])
+
+    @api_endpoint
+    def force_check_alerts(self):
+        """立即检查所有警报（绕过 scheduler 节奏）。返回本次触发数。"""
+        return alert_service.check_alerts()
 
     @api_endpoint
     def search_stocks(self, query, limit=20):

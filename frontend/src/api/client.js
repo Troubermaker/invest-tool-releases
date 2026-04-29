@@ -77,9 +77,6 @@ export const api = {
   /** 个股 K 线 / 分时。code = 6 位股票代码 */
   getStockKline: (code, timeframe) => call('get_stock_kline', code, timeframe),
 
-  /** 个股 F10 简版基本面快照 */
-  getStockF10: (code) => call('get_stock_f10', code),
-
   /** 板块联动个股。plateId: KPL 板块代码；date='YYYY-MM-DD' 切历史 */
   getSectorStocks: (plateId, date = null) => call('get_sector_stocks', plateId, date),
 
@@ -190,6 +187,8 @@ export const api = {
   getPendingAlerts: (limit = 20) => call('get_pending_alerts', limit),
   /** 标记 ack（前端展示后调）*/
   ackAlerts: (ids) => call('ack_alerts', ids || []),
+  /** 立即检查警报（绕过 scheduler，用于测试）*/
+  forceCheckAlerts: () => call('force_check_alerts'),
 
   // -------- 持仓 Portfolio --------
   /** 所有持仓账户（按顺序，含 count）*/
