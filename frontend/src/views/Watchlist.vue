@@ -5,6 +5,9 @@ import Sortable from 'sortablejs'
 import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
 import { openStockChart } from '../composables/useStockChart'
+import ScanSignalsModal from '../components/ScanSignalsModal.vue'
+import { useUserRole } from '../composables/useUserRole'
+const { isAdmin } = useUserRole()
 
 // ---------------- 数据状态 ----------------
 const groups = ref([])
@@ -44,6 +47,7 @@ const COLUMN_META = {
     price:        { label: '最新价',    width: 80,  align: 'right',  sizeCls: 'text-[13px]', weightCls: 'font-bold',    colorBy: 'changePct', sortable: false },
     changePct:    { label: '涨幅',      width: 70,  align: 'right',  sizeCls: 'text-[13px]', weightCls: 'font-bold',    colorBy: 'changePct', sortable: true },
     speedPct:     { label: '涨速',      width: 70,  align: 'right',  sizeCls: 'text-[12px]', weightCls: 'font-medium',  colorBy: 'speedPct',  sortable: true },
+    ytdPct:       { label: '年初至今',  width: 80,  align: 'right',  sizeCls: 'text-[12px]', weightCls: 'font-medium',  colorBy: 'ytdPct',    sortable: true },
     amplitude:    { label: '振幅',      width: 70,  align: 'right',  sizeCls: 'text-[12px]', weightCls: '',             staticColorCls: 'text-[#475569]' },
     turnoverRate: { label: '换手率',    width: 70,  align: 'right',  sizeCls: 'text-[12px]', weightCls: '',             staticColorCls: 'text-[#475569]' },
     amount:       { label: '成交额',    width: 90,  align: 'right',  sizeCls: 'text-[12px]', weightCls: '',             staticColorCls: 'text-[#475569]' },
@@ -60,6 +64,12 @@ const columnOrder = ref([...DEFAULT_COLUMN_ORDER])
 
 // 编辑股票弹窗
 const editingStock = ref(null)
+
+// 三维启动信号扫描器
+const showScanModal = ref(false)
+const scanStocksList = computed(() =>
+    stocks.value.map(s => ({ code: s.code, name: s.name }))
+)
 
 // 通用确认弹窗：askConfirm({title, message, confirmText}) → Promise<boolean>
 const confirmState = ref({ show: false, title: '', message: '', confirmText: '确定', _resolve: null })
@@ -366,6 +376,7 @@ function getCellRender(key, stock) {
         case 'price':        text = fmtPrice(q.price); break
         case 'changePct':    text = fmtPercent(q.changePct); break
         case 'speedPct':     text = fmtPercent(q.speedPct); break
+        case 'ytdPct':       text = fmtPercent(q.ytdPct); break
         case 'amplitude':    text = fmtPercent(q.amplitude); break
         case 'turnoverRate': text = fmtPercent(q.turnoverRate); break
         case 'amount':       text = fmtAmount(q.amount); break
@@ -940,6 +951,21 @@ onUnmounted(() => {
                         </svg>
                     </button>
                 </div>
+                <!-- 三维启动扫描（仅管理员）-->
+                <button v-if="isAdmin"
+                        @click="showScanModal = true"
+                        :disabled="!stocks.length"
+                        title="扫描当前分组的三维启动信号（蓄势→试盘→突破）"
+                        class="text-[12px] px-[10px] py-[4px] rounded-[4px] border border-[#dc2626]/40
+                               text-[#dc2626] bg-white hover:bg-[#fff5f5] hover:border-[#dc2626]
+                               disabled:opacity-40 disabled:cursor-not-allowed transition
+                               flex items-center gap-[4px] shrink-0">
+                    <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-.293.707L12 11.414V15a1 1 0 01-.293.707l-2 2A1 1 0 018 17v-5.586L3.293 6.707A1 1 0 013 6V4z" />
+                    </svg>
+                    <span>扫描信号</span>
+                </button>
+
                 <!-- 搜索并添加股票（支持代码/中文名/拼音）-->
                 <div ref="addBoxRef" class="relative">
                     <div class="flex items-center relative">
@@ -1357,6 +1383,11 @@ onUnmounted(() => {
             </div>
         </div>
     </div>
+
+    <!-- ============ 三维启动信号扫描器 ============ -->
+    <ScanSignalsModal :open="showScanModal"
+                      :stocks="scanStocksList"
+                      @close="showScanModal = false" />
 
   </div>
 </template>

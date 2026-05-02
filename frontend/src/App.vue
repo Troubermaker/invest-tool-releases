@@ -7,6 +7,7 @@ import UpdateBanner from './components/UpdateBanner.vue'
 import Toaster from './components/Toaster.vue'
 import StockChartDrawer from './components/StockChartDrawer.vue'
 import AddToWatchlistModal from './components/AddToWatchlistModal.vue'
+import AdminUnlockModal from './components/AdminUnlockModal.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
@@ -14,6 +15,7 @@ import Review from './views/Review.vue'
 import Settings from './views/Settings.vue'
 import { api } from './api/client'
 import { pushWarn } from './composables/useNotifications'
+import { useUserRole } from './composables/useUserRole'
 
 const currentTab = ref('market')
 const isAIDrawerOpen = ref(false)
@@ -21,10 +23,31 @@ const isAIDrawerOpen = ref(false)
 // 激活门禁状态：null=检查中（首屏空白片刻），false=未激活（显示 Gate），true=已激活
 const isActivated = ref(null)
 
+// 管理员模式 + 隐藏解锁 modal
+const { refresh: refreshUserRole } = useUserRole()
+const showAdminModal = ref(false)
+
 onMounted(async () => {
     const res = await api.isActivated()
     isActivated.value = !!(res.ok && res.data === true)
 })
+
+// 已激活后拉一次 admin 状态（未激活时不调，避免门禁拦截）
+watch(isActivated, (v) => {
+    if (v === true) refreshUserRole()
+}, { immediate: true })
+
+// 隐藏快捷键 Ctrl+Shift+A：唤起管理员解锁 modal
+function onGlobalKeydown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'A' || e.key === 'a')) {
+        e.preventDefault()
+        if (isActivated.value === true) {
+            showAdminModal.value = true
+        }
+    }
+}
+onMounted(() => window.addEventListener('keydown', onGlobalKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown))
 
 function handleNavigate(tabId) {
     currentTab.value = tabId
@@ -117,6 +140,9 @@ onUnmounted(() => {
 
     <!-- 全局"添加到自选" modal（任意页股票行点 + 触发）-->
     <AddToWatchlistModal />
+
+    <!-- 管理员解锁 modal（Ctrl+Shift+A 唤起）-->
+    <AdminUnlockModal :open="showAdminModal" @close="showAdminModal = false" />
 
     <!-- 底部固定免责声明（22px，常驻不可关）-->
     <div class="fixed bottom-0 left-0 right-0 h-[22px] z-[150]

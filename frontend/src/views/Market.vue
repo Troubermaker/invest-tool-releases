@@ -7,6 +7,10 @@ import RefreshCountdown from '../components/RefreshCountdown.vue'
 import LastRefreshLabel from '../components/LastRefreshLabel.vue'
 import { openStockChart } from '../composables/useStockChart'
 import { openAddToWatchlist } from '../composables/useAddToWatchlist'
+import ScanCandidatesModal from '../components/ScanCandidatesModal.vue'
+import ScanSignalsModal from '../components/ScanSignalsModal.vue'
+import { useUserRole } from '../composables/useUserRole'
+const { isAdmin } = useUserRole()
 
 const emit = defineEmits(['openAI'])
 
@@ -93,6 +97,37 @@ const filteredStocks = computed(() => {
         (s.code && s.code.includes(q))
     )
 })
+
+// 三维启动「找候选」扫描器
+const showScanCandidatesModal = ref(false)
+const scanCandidatesStocks = computed(() =>
+    (filteredStocks.value || []).map(s => ({ code: s.code, name: s.name }))
+)
+const scanCandidatesTitle = computed(() =>
+    selectedSector.value ? `${selectedSector.value.name} · 找候选` : '三维启动「找候选」'
+)
+
+// 三维启动「找发车」扫描器（热榜 / 涨跌对比池子复用）
+const showScanFreshModal = ref(false)
+const scanFreshSource = ref(null)   // 'hotlist' | 'pool'
+const scanFreshStocks = computed(() => {
+    if (scanFreshSource.value === 'hotlist') {
+        return (hotListData.value || []).map(s => ({ code: s.code, name: s.name }))
+    }
+    if (scanFreshSource.value === 'pool') {
+        return (filteredPoolStocks.value || []).map(s => ({ code: s.code, name: s.name }))
+    }
+    return []
+})
+const scanFreshTitle = computed(() => {
+    if (scanFreshSource.value === 'hotlist') return '同花顺热榜 · 找发车'
+    if (scanFreshSource.value === 'pool')    return `${activePool.value?.label || '涨停池'} · 找发车`
+    return '三维启动「找发车」'
+})
+function openScanFresh(source) {
+    scanFreshSource.value = source
+    showScanFreshModal.value = true
+}
 
 // 连板天梯数据（按 height 降序分组）—— 后端返全量，前端按 ladderIncludeSt 过滤显示
 const ladderTiersRaw = ref([])
@@ -1038,6 +1073,20 @@ onUnmounted(() => {
                     </div>
                 </div>
                 <div class="flex gap-[8px] items-center shrink-0 relative">
+                    <!-- 三维启动「找候选」（仅管理员）-->
+                    <button v-if="isAdmin"
+                            @click="showScanCandidatesModal = true"
+                            :disabled="!sectorStocks.length"
+                            title="在当前板块联动股里找蓄势/试盘候选，加入自选监控"
+                            class="text-[12px] px-[10px] py-[4px] rounded-[4px] border border-[#dc2626]/40
+                                   text-[#dc2626] bg-white hover:bg-[#fff5f5] hover:border-[#dc2626]
+                                   disabled:opacity-40 disabled:cursor-not-allowed transition
+                                   flex items-center gap-[4px] shrink-0">
+                        <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                        </svg>
+                        <span>找候选</span>
+                    </button>
                     <input v-model="stockFilter"
                            type="text"
                            placeholder="筛选 名称 / 代码..."
@@ -1260,6 +1309,20 @@ onUnmounted(() => {
                 </div>
             </div>
             <div class="flex items-center gap-[10px]">
+                <!-- 三维启动「找发车」（仅管理员）-->
+                <button v-if="isAdmin"
+                        @click="openScanFresh('hotlist')"
+                        :disabled="!hotListData.length"
+                        title="在热榜里扫描刚突破的三维启动信号（fresh Stage 3）"
+                        class="text-[12px] px-[10px] py-[4px] rounded-[4px] border border-[#dc2626]/40
+                               text-[#dc2626] bg-white hover:bg-[#fff5f5] hover:border-[#dc2626]
+                               disabled:opacity-40 disabled:cursor-not-allowed transition
+                               flex items-center gap-[4px] shrink-0">
+                    <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-.293.707L12 11.414V15a1 1 0 01-.293.707l-2 2A1 1 0 018 17v-5.586L3.293 6.707A1 1 0 013 6V4z" />
+                    </svg>
+                    <span>找发车</span>
+                </button>
                 <span class="text-[11px] text-[#999]">{{ hotListData.length }} 只</span>
                 <LastRefreshLabel :timestamp="hotListLastAt" />
                 <RefreshCountdown :seconds="hotListCountdown"
@@ -1454,6 +1517,22 @@ onUnmounted(() => {
             </div>
 
             <div class="flex items-center gap-[10px] shrink-0">
+                <!-- 三维启动「找发车」（仅管理员；跌停池禁用，语义不符）-->
+                <button v-if="isAdmin"
+                        @click="openScanFresh('pool')"
+                        :disabled="!filteredPoolStocks.length || activePoolKey === 'limitDown'"
+                        :title="activePoolKey === 'limitDown'
+                            ? '跌停池不适合三维启动扫描'
+                            : '在当前池子里扫描刚突破的三维启动信号（fresh Stage 3）'"
+                        class="text-[12px] px-[10px] py-[4px] rounded-[4px] border border-[#dc2626]/40
+                               text-[#dc2626] bg-white hover:bg-[#fff5f5] hover:border-[#dc2626]
+                               disabled:opacity-40 disabled:cursor-not-allowed transition
+                               flex items-center gap-[4px] shrink-0">
+                    <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-.293.707L12 11.414V15a1 1 0 01-.293.707l-2 2A1 1 0 018 17v-5.586L3.293 6.707A1 1 0 013 6V4z" />
+                    </svg>
+                    <span>找发车</span>
+                </button>
                 <span v-if="activePool" class="text-[11px] text-[#999] tabular-nums">
                     <template v-if="poolFilter">{{ filteredPoolStocks.length }} / {{ activePool.count }}</template>
                     <template v-else>{{ activePool.count }} 只</template>
@@ -1674,6 +1753,17 @@ onUnmounted(() => {
     <Transition name="fade">
         <div v-if="showIndexDrawer" @click="closeIndexChart" class="absolute inset-0 bg-black/10 z-40 backdrop-blur-[1px]"></div>
     </Transition>
+    <!-- ============ 三维启动「找候选」扫描器（板块联动）============ -->
+    <ScanCandidatesModal :open="showScanCandidatesModal"
+                         :stocks="scanCandidatesStocks"
+                         :title="scanCandidatesTitle"
+                         @close="showScanCandidatesModal = false" />
+
+    <!-- ============ 三维启动「找发车」扫描器（热榜 / 涨跌池）============ -->
+    <ScanSignalsModal :open="showScanFreshModal"
+                      :stocks="scanFreshStocks"
+                      :title="scanFreshTitle"
+                      @close="showScanFreshModal = false" />
   </div>
 </template>
 

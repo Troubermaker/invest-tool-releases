@@ -489,10 +489,11 @@ function _unused_detectSteadyRally(klines, opts = {}) {
 export function detectMainRallyStart(klines, opts = {}) {
     const {
         consolidationMinBars = 30,
-        consolidationMaxRangePct = 0.10,
+        consolidationMaxRangePct = 0.15,  // 0.10 → 0.15：更宽容
         rallyMinPctAfter = 0.08,
-        freshWithinBars = 30,    // 30 根内 + 当前价仍在新趋势中 = "正在进行"
-        historicalWithinBars = 150,  // 历史事件只保留 150 根内，更老的不显示（避免视觉负担）
+        freshWithinBars = 30,
+        historicalWithinBars = 150,
+        closeInRangeRatio = 0.80,     // 至少 80% 收盘价在中位数 ±15% 内（容忍少量插针）
     } = opts
     if (!klines || klines.length < consolidationMinBars + 5) return []
     const n = klines.length
@@ -500,13 +501,48 @@ export function detectMainRallyStart(klines, opts = {}) {
     const lastClose = +klines[lastIdx].close
     const out = []
 
-    // 扫整段历史（500 根）找长横盘
-    const boxes = detectBoxes(klines, {
-        minBars: consolidationMinBars,
-        maxBars: 200,
-        rangePctThreshold: consolidationMaxRangePct,
-        recencyBars: 500,
-    })
+    // 宽容横盘检测：基于收盘价中位数 + 占比，容忍单根插针/跳空
+    // 步长 = 5 根（性能优化，不每根都试），找尽可能长的横盘段
+    const boxes = []
+    const startScan = Math.max(0, n - 500)
+    let i = startScan
+    while (i <= n - consolidationMinBars) {
+        let bestEnd = -1, bestUpper = 0, bestLower = 0
+        for (let e = i + consolidationMinBars; e < n && e - i < 200; e += 5) {
+            const closes = []
+            for (let k = i; k <= e; k++) closes.push(+klines[k].close)
+            const sorted = [...closes].sort((a, b) => a - b)
+            const median = sorted[Math.floor(sorted.length / 2)]
+            if (median <= 0) break
+            let inRange = 0
+            for (const c of closes) {
+                if (Math.abs(c - median) / median <= consolidationMaxRangePct) inRange++
+            }
+            if (inRange / closes.length >= closeInRangeRatio) {
+                bestEnd = e
+                // upper/lower 用 95/5 百分位忽略极端插针
+                const highs = []
+                const lows  = []
+                for (let k = i; k <= e; k++) { highs.push(+klines[k].high); lows.push(+klines[k].low) }
+                highs.sort((a, b) => a - b)
+                lows.sort((a, b) => a - b)
+                bestUpper = highs[Math.floor(highs.length * 0.95)]
+                bestLower = lows [Math.floor(lows.length  * 0.05)]
+            } else if (bestEnd > 0) {
+                break  // 已找到合格段，当前 e 失格 → 停止扩展，保留最长有效
+            }
+        }
+        if (bestEnd > 0) {
+            boxes.push({
+                startIdx: i, endIdx: bestEnd,
+                startTime: klines[i].time, endTime: klines[bestEnd].time,
+                upper: bestUpper, lower: bestLower,
+            })
+            i = bestEnd + 1
+        } else {
+            i++
+        }
+    }
 
     for (const box of boxes) {
         if (box.endIdx >= lastIdx) continue
@@ -925,6 +961,439 @@ export function detectGaps(klines, opts = {}) {
         }
     }
     return out
+}
+
+// ---------------- 找发车信号 S/A/B/C 强度评级 ----------------
+/**
+ * 给一只 fresh Stage 3 的票打分并定级（S/A/B/C）。
+ *
+ * 评分四维度（满分 100）：
+ *   - 形态 (0-30)：距黄金买点远近 + Stage 3 实体饱满度
+ *   - 量能 (0-25)：突破当日量比合理 + 预突破温和放量铺垫
+ *   - 均线 (0-25)：MA60 加分项；MA5>10>20>60 强势多头给满分
+ *   - 大盘 (0-20)：大盘环境 score 线性映射
+ *
+ * 分级：
+ *   - ≥ 85: S 级（黄金买点附近 + 量能 + 均线 + 大盘 多重共振）
+ *   - 70-84: A 级（主力意图明显，可重仓）
+ *   - 55-69: B 级（信号成立但有瑕疵）
+ *   - < 55:  C 级（观望，参考即可）
+ *
+ * @param klines  日 K
+ * @param event   detectThreeStageLaunch 返回的单条事件（必须 currentStage === 3）
+ * @param distancePct  现价 vs 黄金买点的偏离 % （从扫描器算好传入）
+ * @param marketEnv  computeMarketEnvScore 返回值（可选，没有就给中性 50）
+ * @returns { grade: 'S'|'A'|'B'|'C', score, breakdown: {form, vol, ma, env}, reasons: [] }
+ */
+export function gradeFreshSignal(klines, event, distancePct, marketEnv) {
+    if (!klines || !event || event.currentStage !== 3) return null
+    const closes = klines.map(k => +k.close)
+    const ma5Arr  = ma(closes, 5)
+    const ma10Arr = ma(closes, 10)
+    const ma20Arr = ma(closes, 20)
+    const ma60Arr = ma(closes, 60)
+    const lastIdx = closes.length - 1
+    const reasons = []
+
+    // === 形态分 (0-30) ===
+    let formScore = 0
+    const absDist = Math.abs(distancePct ?? 999)
+    if      (absDist <= 1.5) { formScore += 22; reasons.push('黄金买点附近') }
+    else if (distancePct < 0 && distancePct >= -5) { formScore += 18; reasons.push('折扣区') }
+    else if (distancePct > 0 && distancePct <= 5)  { formScore += 14; reasons.push('追涨区') }
+    else if (distancePct < -5)                      { formScore += 10; reasons.push('深度折扣') }
+    else                                            { formScore += 4;  reasons.push('已涨过 >5%') }
+
+    // Stage 3 实体饱满度（突破 K 的 body/range）
+    if (event.s3Idx >= 0) {
+        const k = klines[event.s3Idx]
+        const range = +k.high - +k.low
+        const body  = Math.abs(+k.close - +k.open)
+        if (range > 0) {
+            const ratio = body / range
+            if      (ratio >= 0.75) { formScore += 8; reasons.push('实体饱满') }
+            else if (ratio >= 0.55) { formScore += 5 }
+            else                    { formScore += 2 }
+        }
+    }
+    formScore = Math.min(30, formScore)
+
+    // === 量能分 (0-25) ===
+    let volScore = 0
+    if (event.s3Idx >= 0) {
+        const vr = volumeRatio(klines, event.s3Idx, 5)
+        if (vr != null) {
+            if      (vr >= 1.5 && vr <= 2.5) { volScore += 15; reasons.push(`突破量比 ${vr.toFixed(1)}× 健康`) }
+            else if (vr > 2.5  && vr <= 3.5) { volScore += 10; reasons.push(`突破量比 ${vr.toFixed(1)}× 偏高`) }
+            else if (vr >= 1.3)              { volScore += 8 }
+        }
+    }
+    // 预突破温和放量铺垫
+    const preBars = event.preBreakoutVolBars || 0
+    if      (preBars >= 3) { volScore += 10; reasons.push(`突破前 ${preBars} 根温和放量铺垫`) }
+    else if (preBars >= 2) { volScore += 7;  reasons.push(`突破前 ${preBars} 根温和放量`) }
+    else if (preBars >= 1) { volScore += 4 }
+    volScore = Math.min(25, volScore)
+
+    // === 均线分 (0-25) — MA60 作为评级加分项，不做硬过滤 ===
+    let maScore = 0
+    const m5  = ma5Arr [lastIdx]
+    const m10 = ma10Arr[lastIdx]
+    const m20 = ma20Arr[lastIdx]
+    const m60 = ma60Arr[lastIdx]
+    const close = closes[lastIdx]
+    if (m5 != null && m20 != null) {
+        if (close > m20 && m5 > m20) maScore += 10  // 基础多头（detector 已要求）
+        if (m10 != null && m5 > m10 && m10 > m20) { maScore += 8; reasons.push('MA5>10>20 标准多头') }
+        if (m60 != null && m20 > m60) { maScore += 4; reasons.push('MA20 > MA60') }
+        if (m60 != null && m5 > m10 && m10 > m20 && m20 > m60) {
+            maScore += 3
+            // 把"标准多头"提升为"强势多头"
+            const idx = reasons.indexOf('MA5>10>20 标准多头')
+            if (idx >= 0) reasons[idx] = 'MA5>10>20>60 强势多头'
+        }
+    }
+    maScore = Math.min(25, maScore)
+
+    // === 大盘分 (0-20) ===
+    const envScore01 = marketEnv && typeof marketEnv.score === 'number'
+        ? marketEnv.score / 100
+        : 0.5
+    const envScore = Math.round(envScore01 * 20)
+    if (marketEnv) reasons.push(`大盘${marketEnv.level}`)
+
+    // === 总分 + 评级 ===
+    const score = formScore + volScore + maScore + envScore
+    let grade
+    if      (score >= 85) grade = 'S'
+    else if (score >= 70) grade = 'A'
+    else if (score >= 55) grade = 'B'
+    else                  grade = 'C'
+
+    return {
+        grade,
+        score,
+        breakdown: { form: formScore, vol: volScore, ma: maScore, env: envScore },
+        reasons,
+    }
+}
+
+// ---------------- 大盘环境评分（沪深300 / 上证指数 等指数日K）----------------
+/**
+ * 基于指数 K 线给"大盘环境"打分（0-100），用于给"找发车"信号置信度做折损。
+ * 大盘破位时即使个股形态完美，胜率也会大幅打折，所以信号要降级。
+ *
+ * 评分维度：
+ *   - close vs MA20         ±15 分
+ *   - close vs MA60         ±20 分
+ *   - MA20 近 5 根斜率       ±10 分
+ *   - MA60 近 10 根斜率      ±5  分
+ *
+ * @returns { score, level, reasons, close, ma20, ma60 } 或 null（数据不足）
+ */
+export function computeMarketEnvScore(klines) {
+    if (!klines || klines.length < 60) return null
+    const closes = klines.map(k => +k.close)
+    const ma20Arr = ma(closes, 20)
+    const ma60Arr = ma(closes, 60)
+    const last = closes.length - 1
+    const close = closes[last]
+    const m20 = ma20Arr[last]
+    const m60 = ma60Arr[last]
+    if (m20 == null || m60 == null) return null
+
+    let score = 50        // 中性基线
+    const reasons = []
+
+    // close vs MA20 (±15)
+    if (close > m20 * 1.02)      { score += 15; reasons.push('指数收盘 > MA20') }
+    else if (close < m20 * 0.98) { score -= 15; reasons.push('指数收盘 < MA20') }
+
+    // close vs MA60 (±20) — 中长期方向，权重高于 MA20
+    if (close > m60 * 1.02)      { score += 20; reasons.push('指数收盘 > MA60') }
+    else if (close < m60 * 0.98) { score -= 20; reasons.push('指数收盘 < MA60') }
+
+    // MA20 近 5 根斜率 (±10)
+    const m20Prev5 = last >= 5 ? ma20Arr[last - 5] : null
+    if (m20Prev5 != null) {
+        if (m20 > m20Prev5 * 1.005)      { score += 10; reasons.push('MA20 上行') }
+        else if (m20 < m20Prev5 * 0.995) { score -= 10; reasons.push('MA20 下行') }
+    }
+
+    // MA60 近 10 根斜率 (±5)
+    const m60Prev10 = last >= 10 ? ma60Arr[last - 10] : null
+    if (m60Prev10 != null) {
+        if (m60 > m60Prev10 * 1.005)      { score += 5; reasons.push('MA60 上行') }
+        else if (m60 < m60Prev10 * 0.995) { score -= 5; reasons.push('MA60 下行') }
+    }
+
+    score = Math.max(0, Math.min(100, score))
+
+    let level
+    if      (score >= 75) level = '强势'
+    else if (score >= 55) level = '良好'
+    else if (score >= 40) level = '震荡'
+    else if (score >= 25) level = '弱势'
+    else                  level = '破位'
+
+    return { score, level, reasons, close, ma20: m20, ma60: m60 }
+}
+
+// ---------------- 🎯 三维启动（蓄势→试盘→突破 完整序列）----------------
+/**
+ * 三阶段三维度框架完整识别。比 detectMainRallyStart 严格得多 —— 必须按
+ * 蓄势→试盘→突破时间顺序触发，每阶段满足 K 线 + MA + 量能多重条件。
+ *
+ * Stage 1 蓄势：长横盘（≥30 根）+ MA 粘合 + 地量 + 振幅收窄
+ * Stage 2 试盘：长上影/下影 + ≥2.5 倍量
+ * Stage 3 突破：放量阳线突破前高/箱顶 + MA 多头排列 + 量在合理区间
+ *
+ * @returns [{ s1Start/End, s1Upper/Lower, s2Idx, s3Idx, currentStage, isFresh, ... }]
+ */
+export function detectThreeStageLaunch(klines, opts = {}) {
+    const {
+        // Stage 1
+        s1MinBars         = 20,      // 20-120 统一阈值
+        s1MaxBars         = 120,     // 80 → 120（给"超长横盘后启动"机会，A 股不少票横半年才动）
+        s1MaxRangePct     = 0.15,
+        s1InRangeRatio    = 0.80,
+        s1MaxMaSpreadPct  = 0.07,    // MA5/10/20 间距 < 7%
+        s1ShrinkRatio     = 0.85,    // 后半振幅 / 前半振幅 < 0.85（轻度收窄即可）
+        // 趋势位置过滤（防阴跌假蓄势）
+        trendLookback     = 250,
+        trendMinRatio     = 1.30,
+        // Stage 2
+        s2WithinBars      = 25,      // 15 → 25（蓄势结束到试盘可以更慢一点）
+        s2VolRatioMin     = 2.5,
+        s2ShadowRatio     = 1.5,
+        // Stage 3
+        s3WithinBars      = 30,      // 15 → 30（试盘后慢启动型常需 20-40 根才突破）
+        s3VolRatioMin     = 1.3,
+        s3VolRatioMax     = 3.5,
+        s3BodyRatioMin    = 0.55,
+        // 新鲜度
+        freshWithinBars   = 30,
+    } = opts
+
+    if (!klines || klines.length < 100) return []
+    const n = klines.length
+    const closes = klines.map(k => +k.close)
+    const ma5Arr  = ma(closes, 5)
+    const ma10Arr = ma(closes, 10)
+    const ma20Arr = ma(closes, 20)
+
+    const events = []
+    let i = Math.max(0, n - 400)
+
+    while (i <= n - s1MinBars - 5) {
+        // === 股性振幅探测（蓄势开始前的 60 根日均涨跌幅）===
+        // 蓄势区本身波动小，不能在蓄势内测；用蓄势前的窗口反映"该股的天然股性"
+        // 高股性 → 蓄势可允许更宽，低股性 → 蓄势必须更窄
+        let dynMaxRange = s1MaxRangePct
+        {
+            const hvEnd   = Math.max(0, i - 1)
+            const hvStart = Math.max(1, hvEnd - 60 + 1)
+            let sumAbs = 0, cnt = 0
+            for (let k = hvStart; k <= hvEnd; k++) {
+                const prev = +klines[k - 1].close
+                if (prev > 0) {
+                    sumAbs += Math.abs(+klines[k].close - prev) / prev
+                    cnt++
+                }
+            }
+            if (cnt >= 30) {
+                const avgDailyMove = sumAbs / cnt
+                if      (avgDailyMove > 0.030) dynMaxRange = 0.20  // 高波动（题材/小盘）
+                else if (avgDailyMove < 0.015) dynMaxRange = 0.10  // 低波动（蓝筹/大盘）
+                else                           dynMaxRange = 0.15  // 中等
+            }
+        }
+
+        // === Stage 1 蓄势检测：找尽可能长的合格段 ===
+        let s1End = -1
+        for (let e = i + s1MinBars; e < n && e - i <= s1MaxBars; e += 5) {
+            // 收盘价中位数 ±dynMaxRange 占比 ≥ 80%
+            const slice = closes.slice(i, e + 1)
+            const sorted = [...slice].sort((a, b) => a - b)
+            const median = sorted[Math.floor(sorted.length / 2)]
+            if (!(median > 0)) break
+            let inRange = 0
+            for (const c of slice) {
+                if (Math.abs(c - median) / median <= dynMaxRange) inRange++
+            }
+            if (inRange / slice.length < s1InRangeRatio) {
+                if (s1End > 0) break
+                continue
+            }
+            // 振幅收窄（后半 / 前半）
+            const mid = Math.floor((i + e) / 2)
+            let fMax = 0, fMin = Infinity, sMax = 0, sMin = Infinity
+            for (let k = i; k < mid; k++) {
+                const h = +klines[k].high, l = +klines[k].low
+                if (h > fMax) fMax = h; if (l < fMin) fMin = l
+            }
+            for (let k = mid; k <= e; k++) {
+                const h = +klines[k].high, l = +klines[k].low
+                if (h > sMax) sMax = h; if (l < sMin) sMin = l
+            }
+            const fRange = fMin > 0 ? (fMax - fMin) / fMin : 0
+            const sRange = sMin > 0 ? (sMax - sMin) / sMin : 0
+            if (fRange <= 0 || sRange / fRange > s1ShrinkRatio) {
+                if (s1End > 0) break
+                continue
+            }
+            // MA 粘合（段末附近）
+            const m5 = ma5Arr[e], m10 = ma10Arr[e], m20 = ma20Arr[e]
+            if (m5 != null && m10 != null && m20 != null) {
+                const maMax = Math.max(m5, m10, m20)
+                const maMin = Math.min(m5, m10, m20)
+                if ((maMax - maMin) / median > s1MaxMaSpreadPct) {
+                    if (s1End > 0) break
+                    continue
+                }
+            }
+            s1End = e
+        }
+        if (s1End < 0) { i++; continue }
+
+        // 蓄势上下沿（百分位过滤极端）
+        const highs = [], lows = []
+        for (let k = i; k <= s1End; k++) {
+            highs.push(+klines[k].high); lows.push(+klines[k].low)
+        }
+        highs.sort((a, b) => a - b)
+        lows.sort((a, b) => a - b)
+        const s1Upper = highs[Math.floor(highs.length * 0.95)]
+        const s1Lower = lows [Math.floor(lows.length  * 0.05)]
+
+        // === 趋势位置过滤 ===
+        // 真蓄势：前面有过一段上涨，蓄势区位置不会贴在历史最低
+        // 假蓄势：长期阴跌后走平，蓄势区本身就是地板 — 大概率反弹乏力，要过滤
+        // 检查：蓄势均价 ≥ 近 trendLookback 根最低价 × trendMinRatio
+        {
+            const lookbackStart = Math.max(0, s1End - (trendLookback - 1))
+            let historicalLow = Infinity
+            for (let k = lookbackStart; k <= s1End; k++) {
+                const l = +klines[k].low
+                if (l < historicalLow) historicalLow = l
+            }
+            const s1AvgPrice = (s1Upper + s1Lower) / 2
+            if (historicalLow > 0 && s1AvgPrice < historicalLow * trendMinRatio) {
+                i = s1End + 5
+                continue
+            }
+        }
+
+        // === Stage 2 试盘检测 ===
+        let s2Idx = -1, s2Type = null
+        for (let t = s1End + 1; t < n && t - s1End <= s2WithinBars; t++) {
+            const k = klines[t]
+            const open = +k.open, close = +k.close, high = +k.high, low = +k.low
+            const body = Math.abs(close - open)
+            const upper = high - Math.max(open, close)
+            const lower = Math.min(open, close) - low
+            const vr = volumeRatio(klines, t, 5)
+            if (vr == null || body <= 0) continue
+            // 长上影 + 大量（射击之星型试盘）
+            if (upper > body * s2ShadowRatio && vr >= s2VolRatioMin) {
+                s2Idx = t; s2Type = 'upperShadow'; break
+            }
+            // 长下影 + 温和量 + 收阳（金针探底型试盘）
+            if (lower > body * s2ShadowRatio && vr >= 1.3 && close > open) {
+                s2Idx = t; s2Type = 'lowerShadow'; break
+            }
+        }
+        if (s2Idx < 0) { i = s1End + 5; continue }
+
+        // === 试盘有效性确认 ===
+        // 真试盘：主力试探后股价企稳；假试盘：试完就破位
+        // 规则：试盘 K 之后 s2WithinBars 根内（或截止到当前），任何收盘 < s2Low × 0.99 → 整段作废
+        const s2Low = +klines[s2Idx].low
+        const s2ConfirmEnd = Math.min(n - 1, s2Idx + s2WithinBars)
+        let s2Broken = false
+        for (let t = s2Idx + 1; t <= s2ConfirmEnd; t++) {
+            if (+klines[t].close < s2Low * 0.99) { s2Broken = true; break }
+        }
+        if (s2Broken) { i = s1End + 5; continue }
+
+        // === Stage 3 突破检测 ===
+        let s3Idx = -1
+        const s2High = +klines[s2Idx].high
+        const breakLevel = Math.max(s2High, s1Upper)
+        for (let t = s2Idx + 1; t < n && t - s2Idx <= s3WithinBars; t++) {
+            const k = klines[t]
+            const open = +k.open, close = +k.close, high = +k.high, low = +k.low
+            const body = Math.abs(close - open)
+            const range = high - low
+            const vr = volumeRatio(klines, t, 5)
+            if (vr == null) continue
+            // 收盘突破 + 量在合理区间 + 实体饱满 + MA 多头排列
+            if (close > breakLevel
+                && vr >= s3VolRatioMin && vr <= s3VolRatioMax
+                && range > 0 && body / range >= s3BodyRatioMin
+                && close > open) {
+                // MA 排列检查：放宽为"close > MA20 且 MA5 > MA20"（不强求 MA5>MA10>MA20）
+                // 长横盘后第一根突破，MA 还在缠绕，严格三层排列经常 miss
+                const m5 = ma5Arr[t], m20 = ma20Arr[t]
+                if (m5 != null && m20 != null && close > m20 && m5 > m20) {
+                    s3Idx = t; break
+                }
+            }
+        }
+
+        // 构建 event（即使没 Stage 3 也保留：处于"试盘后等待启动"状态）
+        const lastIdx = n - 1
+        const currentStage = s3Idx >= 0 ? 3 : (s2Idx >= 0 ? 2 : 1)
+        const barsAgoFromS3 = s3Idx >= 0 ? lastIdx - s3Idx : null
+        const isFresh = currentStage === 3 && barsAgoFromS3 <= freshWithinBars
+
+        // === 预突破信号（突破前 5 根温和放量计数）===
+        // 量比 ∈ [1.3, 2.0]：主力悄悄进场的足迹（不是爆量诱多，是"试探性吸筹"）
+        // 候选阶段（Stage 2）：预突破计数高 → 突破临近，提升候选权重
+        // 发车阶段（Stage 3）：预突破计数高 → 突破有伏笔，是真启动而非偶然冲量
+        const probeEndIdx = s3Idx >= 0 ? s3Idx - 1 : lastIdx
+        const probeStartIdx = Math.max(s2Idx + 1, probeEndIdx - 4)
+        let preBreakoutVolBars = 0
+        for (let t = probeStartIdx; t <= probeEndIdx && t >= 0 && t <= lastIdx; t++) {
+            const vr = volumeRatio(klines, t, 5)
+            if (vr != null && vr >= 1.3 && vr <= 2.0) preBreakoutVolBars++
+        }
+        // —— 三档介入价位 + 止损价位 ——
+        const s2K = s2Idx >= 0 ? klines[s2Idx] : null
+        const s2Mid = s2K ? (+s2K.high + +s2K.low) / 2 : null  // 试盘 K 线半分位
+        // 黄金买点 = 试盘 K 线半分位 与 蓄势上沿 取较低（更稳健的回踩位置）
+        const goldenBuyPrice = s2Mid != null ? Math.min(s2Mid, s1Upper) : s1Upper
+        const breakoutPrice  = s3Idx >= 0 ? +klines[s3Idx].close : null
+        const stopLossPrice  = s1Lower * 0.97   // 蓄势下沿 × 0.97 = 关键支撑止损
+        events.push({
+            s1StartIdx:  i,
+            s1EndIdx:    s1End,
+            s1StartTime: klines[i].time,
+            s1EndTime:   klines[s1End].time,
+            s1Upper, s1Lower,
+            s2Idx, s2Type,
+            s2Low,
+            s2Time:      s2K ? s2K.time : null,
+            s2Price:     s2K ? +s2K.close : null,
+            s3Idx,
+            s3Time:      s3Idx >= 0 ? klines[s3Idx].time : null,
+            s3Price:     s3Idx >= 0 ? +klines[s3Idx].close : null,
+            currentStage,
+            isFresh,
+            barsAgoFromS3,
+            // 介入价位
+            goldenBuyPrice,
+            breakoutPrice,
+            // 止损价位
+            stopLossPrice,
+            // 预突破信号（0~5 根温和放量计数）
+            preBreakoutVolBars,
+            // 振幅自适应实际使用值（debug / UI 展示）
+            dynMaxRange,
+        })
+        i = s1End + 5
+    }
+    return events
 }
 
 // ---------------- 主升 / 主跌段识别（独立趋势段染色）----------------

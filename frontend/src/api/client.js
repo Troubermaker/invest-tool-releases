@@ -76,6 +76,14 @@ export const api = {
 
   /** 个股 K 线 / 分时。code = 6 位股票代码 */
   getStockKline: (code, timeframe) => call('get_stock_kline', code, timeframe),
+  /** 管理员专用：通达信源 K 线（批量扫描用，无反爬）。count 默认 800，超过自动分页 */
+  getStockKlineViaTdx: (code, timeframe = '日K', count = 800) =>
+    call('get_stock_kline_via_tdx', code, timeframe, count),
+  /** 管理员专用：通达信源指数 K 线（沪深 300 / 上证指数 等）*/
+  getIndexKlineViaTdx: (name, timeframe = '日K', count = 300) =>
+    call('get_index_kline_via_tdx', name, timeframe, count),
+  /** 管理员专用：TDX 连接是否可用 */
+  tdxIsAvailable: () => call('tdx_is_available'),
 
   /** 板块联动个股。plateId: KPL 板块代码；date='YYYY-MM-DD' 切历史 */
   getSectorStocks: (plateId, date = null) => call('get_sector_stocks', plateId, date),
@@ -117,6 +125,14 @@ export const api = {
   isActivated: () => call('is_activated'),
   /** 提交激活码。成功返回 true，失败返回 false */
   activateLicense: (code) => call('activate_license', code),
+
+  // -------- 管理员模式（基于已激活之上的权限分级）--------
+  /** 是否处于管理员模式。返回 boolean */
+  isAdmin: () => call('is_admin'),
+  /** 输入管理员密码升级。成功返回 true */
+  unlockAdmin: (password) => call('unlock_admin', password),
+  /** 退出管理员模式 */
+  disableAdmin: () => call('disable_admin'),
 
   // -------- 在线更新 --------
   /** 检查更新：联网拉 latest.json 比版本。返回 {has_update, latest_version, ...} */

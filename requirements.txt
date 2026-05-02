@@ -1,4 +1,6 @@
 requests
+curl_cffi
+pytdx
 schedule
 pywebview
 openai

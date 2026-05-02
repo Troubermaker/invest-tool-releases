@@ -7,8 +7,52 @@ K 线 / 分时服务。
 - 日/周/月/年 → 东方财富优先（含真实成交额），失败回退腾讯 newfqkline
 """
 import datetime
+import logging
+import threading
+import time
+
 from http_client import fetch_json, FetchError
 import symbols
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------- 东财断路器 ---------------- #
+# 批量扫描时 EM 会因"短时间同 IP+UA 高频"被服务端 RST 连接。每次都打 EM 再回退腾讯
+# 既浪费时间又污染日志。断路器：30s 内累积 3 次失败 → 暂时跳过 EM 60s，直走腾讯。
+EM_CIRCUIT_FAIL_THRESHOLD = 3
+EM_CIRCUIT_FAIL_WINDOW    = 30.0     # 秒
+EM_CIRCUIT_COOLDOWN       = 60.0     # 秒
+_em_recent_failures = []
+_em_circuit_open_until = 0.0
+_em_circuit_lock = threading.Lock()
+
+
+def _em_circuit_is_open():
+    return time.monotonic() < _em_circuit_open_until
+
+
+def _em_circuit_record_failure():
+    global _em_circuit_open_until, _em_recent_failures
+    now = time.monotonic()
+    with _em_circuit_lock:
+        _em_recent_failures = [t for t in _em_recent_failures
+                               if now - t < EM_CIRCUIT_FAIL_WINDOW]
+        _em_recent_failures.append(now)
+        if len(_em_recent_failures) >= EM_CIRCUIT_FAIL_THRESHOLD:
+            _em_circuit_open_until = now + EM_CIRCUIT_COOLDOWN
+            _em_recent_failures = []
+            logger.warning(
+                f"EM K 线短路打开（{EM_CIRCUIT_FAIL_WINDOW}s 内 "
+                f"{EM_CIRCUIT_FAIL_THRESHOLD} 次失败）→ {EM_CIRCUIT_COOLDOWN}s 内全走腾讯"
+            )
+
+
+def _em_circuit_record_success():
+    global _em_recent_failures
+    if _em_recent_failures:
+        with _em_circuit_lock:
+            _em_recent_failures = []
 
 
 def get_kline(index_name, timeframe):
@@ -134,27 +178,42 @@ TENCENT_TF_MAP = {'日K': 'day', '周K': 'week', '月K': 'month', '年K': 'year'
 
 
 def _fetch_candle(index_name, symbol, timeframe):
-    # 优先走东方财富（含真实成交额）
+    """指数 K 线。腾讯优先（HTTP 稳定），EM 备用。"""
+    tx_data = _try_tencent(symbol, timeframe)
+    if tx_data:
+        return tx_data
     secid = symbols.get_eastmoney_secid(index_name)
     em_data = _try_eastmoney_by_secid(secid, timeframe) if secid else None
     if em_data:
-        return em_data
-    # 回退到腾讯
-    return _try_tencent(symbol, timeframe)
+        logger.info(f"{symbol} {timeframe} 腾讯无数据，已回退 EM ({len(em_data)} 根)")
+    return em_data
 
 
 def _fetch_candle_by_secid(secid, symbol, timeframe):
-    """个股版 K 线：直接给 secid 抓 EM，回退腾讯。"""
+    """
+    个股版 K 线。
+    腾讯优先（HTTP，无 TLS 指纹问题，反爬宽松）；
+    腾讯失败/无数据时再回退 EM（HTTPS，带准确 amt，但易被某些环境的杀软/防火墙拦）。
+    顺序反过来是因为部分用户机器（杀软做 TLS inspection 等）连不上 EM 但能开浏览器。
+    """
+    tx_data = _try_tencent(symbol, timeframe)
+    if tx_data:
+        return tx_data
+    # 腾讯没数据再试 EM
     em_data = _try_eastmoney_by_secid(secid, timeframe)
     if em_data:
-        return em_data
-    return _try_tencent(symbol, timeframe)
+        logger.info(f"{symbol} {timeframe} 腾讯无数据，已回退 EM ({len(em_data)} 根)")
+    return em_data
 
 
 def _try_eastmoney_by_secid(secid, timeframe):
-    """给定 secid 走 EM 历史 K 线接口。"""
+    """给定 secid 走 EM 历史 K 线接口；触发断路器时直接返回 None 走腾讯。"""
     if not secid:
         return None
+    # 断路器打开期间直接放弃 EM，免得每只票都白等一轮 retry
+    if _em_circuit_is_open():
+        return None
+
     klt = KLT_MAP.get(timeframe, 101)
     url = (
         f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -164,13 +223,21 @@ def _try_eastmoney_by_secid(secid, timeframe):
         f"&klt={klt}&fqt=1&beg=0&end=20500101&lmt=300"
     )
     try:
-        res = fetch_json(url, headers={'Referer': 'https://quote.eastmoney.com/'})
+        # 批量扫描时 retry 太多反而拖累整体（每只票最多浪费 3-4 秒）
+        # 改成 1 次 retry：失败 1 次就让上层走 fallback
+        res = fetch_json(
+            url,
+            headers={'Referer': 'https://quote.eastmoney.com/'},
+            retry=1,
+        )
     except FetchError:
+        _em_circuit_record_failure()
         return None
 
     klines = res.get('data', {}).get('klines') or []
     if not klines:
         return None
+    _em_circuit_record_success()
 
     results = []
     prev_close = None

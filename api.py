@@ -39,6 +39,8 @@ from services import hot_list_service
 from services import news_service
 from services import limit_pool_service
 from services import license_service
+from services import admin_service
+from services import tdx_service
 from services import update_service
 from services import alert_service
 import ai_service
@@ -151,6 +153,16 @@ def api_endpoint(func):
     return wrapper
 
 
+def admin_only(func):
+    """管理员才可调用的端点装饰器。叠加在 @api_endpoint 内层。"""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if not admin_service.is_admin():
+            return {"ok": False, "error": "需要管理员权限", "code": "NOT_ADMIN"}
+        return func(self, *args, **kwargs)
+    return wrapper
+
+
 class Api:
     def __init__(self):
         self._window = None
@@ -172,6 +184,36 @@ class Api:
     def activate_license(self, code):
         """提交激活码。成功返回 True；签名错误返回 False。"""
         return license_service.activate(code)
+
+    # ============ 管理员模式（基于已激活之上做权限分级）============
+    _tdx_warmed = False  # 进程级标记：避免重复预热
+
+    @api_endpoint
+    def is_admin(self):
+        """当前是否处于管理员模式。前端用此决定要不要显示扫描器/复杂指标 UI。
+        若是管理员且本进程未预热过，顺便后台预热 pytdx — 启动后第一次打开 K 线无延迟。"""
+        ok = admin_service.is_admin()
+        if ok and not Api._tdx_warmed:
+            Api._tdx_warmed = True
+            import threading
+            threading.Thread(target=tdx_service.warmup, daemon=True).start()
+        return ok
+
+    @api_endpoint
+    def unlock_admin(self, password):
+        """输入管理员密码升级。成功返回 True；密码错误返回 False。
+        升级成功时后台预热 pytdx 连接 — 用户后续打开 K 线/扫描时连接已就绪。"""
+        ok = admin_service.unlock(password)
+        if ok:
+            import threading
+            threading.Thread(target=tdx_service.warmup, daemon=True).start()
+        return ok
+
+    @api_endpoint
+    def disable_admin(self):
+        """退出管理员模式（普通用户视图）。"""
+        admin_service.disable()
+        return True
 
     # ============ 在线更新 ============
     @api_endpoint
@@ -319,6 +361,32 @@ class Api:
     def get_stock_kline(self, code, timeframe):
         """个股 K 线（任意 6 位代码）。timeframe: 分时/5日/日K/周K/月K/年K"""
         return kline_service.get_stock_kline(code, timeframe)
+
+    @api_endpoint
+    @admin_only
+    def get_stock_kline_via_tdx(self, code, timeframe='日K', count=800):
+        """
+        管理员专用：严格 TDX-only。
+        TDX 拉不到（北交所 / 服务器全挂 / 单股票数据缺失）→ 直接返回 []，
+        前端表现为"数据不足"。绝不 fallback 到腾讯/EM，避免触发反爬。
+        count 超过 800 自动分页，最多可拉至股票上市日全历史。
+        """
+        return tdx_service.get_stock_kline(code, timeframe, count=count)
+
+    @api_endpoint
+    @admin_only
+    def get_index_kline_via_tdx(self, name, timeframe='日K', count=300):
+        """
+        管理员专用：指数 K 线走 TDX（沪深 300 / 上证指数 等）。
+        给 useMarketEnv 用，避免大盘环境也打腾讯。
+        """
+        return tdx_service.get_index_kline(name, timeframe, count=count)
+
+    @api_endpoint
+    @admin_only
+    def tdx_is_available(self):
+        """TDX 连接是否可用（管理员 UI 上可显示状态）。"""
+        return tdx_service.is_available()
 
     @api_endpoint
     def get_sector_stocks(self, plate_id, date=None):
@@ -631,7 +699,10 @@ class Api:
 
     @api_endpoint
     def get_batch_sparklines(self, codes):
-        """按代码批量查当日分时（画 sparkline 用）。返回 {code: {preClose, prices}}"""
+        """
+        按代码批量查当日分时（画 sparkline 用）。返回 {code: {preClose, prices, avgPrices}}。
+        统一走 EM trends2 — pytdx 批量分时有响应缓冲污染问题，不可靠。
+        """
         return sparkline_service.get_batch_sparklines(codes or [])
 
     @api_endpoint

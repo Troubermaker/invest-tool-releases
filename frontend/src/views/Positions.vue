@@ -27,8 +27,8 @@ const renameInputRef = ref(null)
 // 搜索过滤当前列表
 const searchQuery = ref('')
 
-// 列排序：3 态循环（desc → asc → 清空），仅"当日盈亏"/"持有盈亏"可排
-// sortKey: 'dailyProfit' | 'totalProfit' | null
+// 列排序：3 态循环（desc → asc → 清空），可排："当日盈亏" / "持有盈亏" / "年初至今"
+// sortKey: 'dailyProfit' | 'totalProfit' | 'ytdPct' | null
 const sortKey = ref(null)
 const sortOrder = ref('desc')
 
@@ -540,9 +540,13 @@ const filteredPositions = computed(() => {
           )
         : positions.value
 
-    // ② 按盈亏金额排序（未排序时保持原顺序）
+    // ② 按选中维度排序（未排序时保持原顺序）
     if (sortKey.value) {
-        const getVal = sortKey.value === 'dailyProfit' ? dailyProfitAmount : profitAmount
+        let getVal
+        if (sortKey.value === 'dailyProfit')      getVal = dailyProfitAmount
+        else if (sortKey.value === 'totalProfit') getVal = profitAmount
+        else if (sortKey.value === 'ytdPct')      getVal = (p) => quotes.value[p.code]?.ytdPct
+        else                                       getVal = () => null
         const dir = sortOrder.value === 'asc' ? 1 : -1
         list = [...list].sort((a, b) => {
             const av = getVal(a), bv = getVal(b)
@@ -1249,6 +1253,16 @@ onMounted(async () => {
                             <div class="leading-tight">市值</div>
                             <div v-if="isSummary" class="text-[10px] text-[#bbb] font-normal leading-tight mt-[1px]">仓位占比</div>
                         </th>
+                        <th class="px-[10px] py-[10px] font-normal text-right w-[80px] cursor-pointer select-none hover:text-[#dc2626] transition group"
+                            @click="handleSort('ytdPct')">
+                            <div class="leading-tight">
+                                年初至今
+                                <span class="ml-[2px] text-[9px] align-middle tabular-nums"
+                                      :class="sortDirFor('ytdPct') ? 'text-[#dc2626]' : 'text-[#ccc] opacity-0 group-hover:opacity-100'">
+                                    {{ sortDirFor('ytdPct') === 'asc' ? '▲' : '▼' }}
+                                </span>
+                            </div>
+                        </th>
                         <!-- 汇总视图显示"持有账户"，单账户视图显示"加仓日期" -->
                         <th v-if="isSummary" class="pl-[20px] pr-[10px] py-[10px] font-normal text-left w-[120px]">持有账户</th>
                         <th v-else class="px-[10px] py-[10px] font-normal text-center w-[90px]">加仓日期</th>
@@ -1258,10 +1272,10 @@ onMounted(async () => {
                 </thead>
                 <tbody>
                     <tr v-if="loading && !positions.length">
-                        <td :colspan="isSummary ? 8 : 9" class="py-[60px] text-center text-[#aaa] text-[13px]">加载中...</td>
+                        <td :colspan="isSummary ? 9 : 10" class="py-[60px] text-center text-[#aaa] text-[13px]">加载中...</td>
                     </tr>
                     <tr v-else-if="!positions.length">
-                        <td :colspan="isSummary ? 8 : 9" class="py-[80px] text-center text-[#aaa] text-[13px]">
+                        <td :colspan="isSummary ? 9 : 10" class="py-[80px] text-center text-[#aaa] text-[13px]">
                             <template v-if="isSummary">
                                 还没有任何持仓，先切到账户 tab 添加持仓再来看汇总
                             </template>
@@ -1272,7 +1286,7 @@ onMounted(async () => {
                         </td>
                     </tr>
                     <tr v-else-if="!filteredPositions.length">
-                        <td :colspan="isSummary ? 8 : 9" class="py-[60px] text-center text-[#aaa] text-[13px]">
+                        <td :colspan="isSummary ? 9 : 10" class="py-[60px] text-center text-[#aaa] text-[13px]">
                             未匹配到"{{ searchQuery }}"，
                             <button @click="searchQuery = ''" class="text-[#dc2626] hover:underline">清空搜索</button>
                         </td>
@@ -1374,6 +1388,14 @@ onMounted(async () => {
                             <div v-if="isSummary" class="text-[11px] text-[#999] leading-tight mt-[2px]">
                                 {{ positionWeight(p) != null ? positionWeight(p).toFixed(2) + '%' : '—' }}
                             </div>
+                        </td>
+
+                        <!-- 年初至今涨幅（基于股价本身，不涉及成本）-->
+                        <td class="px-[10px] py-[6px] text-right tabular-nums align-middle">
+                            <span class="text-[12px] font-medium"
+                                  :class="colorClassOf(quotes[p.code]?.ytdPct)">
+                                {{ fmtPercent(quotes[p.code]?.ytdPct) }}
+                            </span>
                         </td>
 
                         <!-- 汇总视图：持有账户徽章 -->

@@ -11,7 +11,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { api } from '../api/client'
-import { computeAll, pickCloses, supportResistance, supportResistanceCluster, detectBoxes, detectPlatforms, detectTrendlines, detectZigzag, detectChannel, detectFibonacci, detectPatterns, detectMainTrends, detectMainRallyStart, detectGaps, clusterResonance, computeMainWaveScores, computeAccumulationScores, volumeRatio } from '../composables/useTechIndicators'
+import { computeAll, pickCloses, supportResistance, supportResistanceCluster, detectBoxes, detectPlatforms, detectTrendlines, detectZigzag, detectChannel, detectFibonacci, detectPatterns, detectMainTrends, detectMainRallyStart, detectThreeStageLaunch, detectGaps, clusterResonance, computeMainWaveScores, computeAccumulationScores, volumeRatio } from '../composables/useTechIndicators'
 
 const props = defineProps({
     code:   { type: String, required: true },
@@ -38,9 +38,16 @@ const DEFAULT_VISIBLE_BARS = {
 //   - 箱体 自动识别平台并换色（合并 PLAT）
 //   - 通道 默认包含上下趋势线（合并 TREND）
 //   - 删除 主升/主跌（信息融入 主升启动 + 波段）
-const allIndicators = [
+// 基础指标（普通用户可见）：MA / BOLL / MACD / KDJ
+// 高级指标（仅管理员）：复杂识别类（压支 / 箱体 / 通道 / 波段 / 斐波 / 形态 /
+//                                  主升启动 / 三维启动 / 缺口 / 共振 / 信号 / 启动分）
+const BASIC_INDICATORS = [
     { id: 'MA',   label: '均线' },
     { id: 'BOLL', label: 'BOLL' },
+    { id: 'MACD', label: 'MACD' },
+    { id: 'KDJ',  label: 'KDJ'  },
+]
+const ADVANCED_INDICATORS = [
     { id: 'SR',   label: '压/支' },
     { id: 'BOX',  label: '箱体' },
     { id: 'CHAN', label: '通道' },
@@ -48,14 +55,47 @@ const allIndicators = [
     { id: 'FIB',  label: '斐波那契' },
     { id: 'PAT',  label: '形态' },
     { id: 'RALLY', label: '🚀 主升启动' },
+    { id: 'TRIPLE', label: '🎯 三维启动' },
     { id: 'GAP',   label: '缺口' },
     { id: 'RESO', label: '共振' },
     { id: 'SIG',  label: '📢 信号' },
-    { id: 'MACD', label: 'MACD' },
-    { id: 'KDJ',  label: 'KDJ'  },
     { id: 'SCORE', label: '📊 启动分' },
 ]
-const activeIndicators = ref(['MA', 'MACD', 'KDJ'])
+import { useUserRole } from '../composables/useUserRole'
+const { isAdmin } = useUserRole()
+// 显示顺序按原次序：MA / BOLL / 高级一组 / MACD / KDJ / 启动分
+const allIndicators = computed(() => {
+    if (isAdmin.value) {
+        return [
+            { id: 'MA',   label: '均线' },
+            { id: 'BOLL', label: 'BOLL' },
+            { id: 'SR',   label: '压/支' },
+            { id: 'BOX',  label: '箱体' },
+            { id: 'CHAN', label: '通道' },
+            { id: 'ZZ',   label: '波段' },
+            { id: 'FIB',  label: '斐波那契' },
+            { id: 'PAT',  label: '形态' },
+            { id: 'RALLY', label: '🚀 主升启动' },
+            { id: 'TRIPLE', label: '🎯 三维启动' },
+            { id: 'GAP',   label: '缺口' },
+            { id: 'RESO', label: '共振' },
+            { id: 'SIG',  label: '📢 信号' },
+            { id: 'MACD', label: 'MACD' },
+            { id: 'KDJ',  label: 'KDJ'  },
+            { id: 'SCORE', label: '📊 启动分' },
+        ]
+    }
+    return BASIC_INDICATORS
+})
+// 指标选择跨股票/跨会话持久化（模块级 ref + localStorage）
+// 切换股票时不会重置，用户勾选/取消后立即持久化
+import { useStockChartIndicators } from '../composables/useStockChartIndicators'
+const { activeIndicators, clampToBasic } = useStockChartIndicators()
+
+// 角色变化时清掉超出权限范围的 chip（避免普通用户看到被禁用的复杂指标残留状态）
+watch(isAdmin, (v) => {
+    if (!v) clampToBasic()
+})
 
 const klines = ref([])
 const loading = ref(false)
@@ -193,6 +233,51 @@ function updateMainTrendsPixels() {
         })
     }
     mainTrendsPx.value = out
+}
+
+// ============ 🎯 三维启动 overlay（蓄势→试盘→突破 完整序列）============
+const triples = ref([])     // [{ s1Start/End, s1Upper/Lower, s2Idx, s3Idx, currentStage, isFresh, ... }]
+const triplesPx = ref([])   // 像素坐标
+function updateTriplesPixels() {
+    if (!mainChart || !mainSeries || !triples.value.length || !klines.value.length) {
+        if (triplesPx.value.length) triplesPx.value = []
+        return
+    }
+    const ts = mainChart.timeScale()
+    const out = []
+    for (const t of triples.value) {
+        // 蓄势期矩形
+        const x1 = ts.timeToCoordinate(t.s1StartTime)
+        const x2 = ts.timeToCoordinate(t.s1EndTime)
+        const yU = mainSeries.priceToCoordinate(t.s1Upper)
+        const yL = mainSeries.priceToCoordinate(t.s1Lower)
+        if (x1 == null || x2 == null || yU == null || yL == null) continue
+        // 试盘 + 突破点 x 坐标
+        const xs2 = t.s2Time ? ts.timeToCoordinate(t.s2Time) : null
+        const xs3 = t.s3Time ? ts.timeToCoordinate(t.s3Time) : null
+        const ys2 = t.s2Price != null ? mainSeries.priceToCoordinate(t.s2Price) : null
+        const ys3 = t.s3Price != null ? mainSeries.priceToCoordinate(t.s3Price) : null
+        out.push({
+            key: `triple-${t.s1StartIdx}`,
+            stage: t.currentStage,
+            isFresh: t.isFresh,
+            cx: Math.min(x1, x2),
+            cy: Math.min(yU, yL),
+            cw: Math.max(2, Math.abs(x2 - x1)),
+            ch: Math.max(2, Math.abs(yU - yL)),
+            s2x: xs2, s2y: ys2, s2Type: t.s2Type,
+            s3x: xs3, s3y: ys3,
+            barsAgoFromS3: t.barsAgoFromS3,
+            // 介入价位 / 风控价位（用于 banner 显示交易计划）
+            goldenBuyPrice: t.goldenBuyPrice,
+            breakoutPrice:  t.breakoutPrice,
+            stopLossPrice:  t.stopLossPrice,
+            maAddOnPrice:   t.maAddOnPrice,
+            maReduceLine:   t.maReduceLine,
+            timeStopWarning: t.timeStopWarning,
+        })
+    }
+    triplesPx.value = out
 }
 
 // ============ 缺口（跳空）overlay ============
@@ -369,6 +454,7 @@ function updateAllOverlays() {
     updateMainTrendsPixels()
     updateRallyStartsPixels()
     updateGapsPixels()
+    updateTriplesPixels()
 }
 
 // ============ 矩形 overlay（箱体 / 平台 共用）============
@@ -407,7 +493,11 @@ async function loadData() {
     loading.value = true
     errMsg.value = ''
     try {
-        const res = await api.getStockKline(props.code, timeframe.value)
+        // 管理员 → 全 timeframe 走 pytdx（分时 / 5 日 改用 1 分钟 K 实现，更可靠）
+        // 普通用户 → 全部走 kline_service
+        const res = isAdmin.value
+            ? await api.getStockKlineViaTdx(props.code, timeframe.value)
+            : await api.getStockKline(props.code, timeframe.value)
         if (!res.ok) {
             errMsg.value = res.error || '数据获取失败'
             klines.value = []
@@ -860,6 +950,31 @@ async function renderAll() {
         gaps.value = detectGaps(klines.value)
     } else {
         gaps.value = []
+    }
+
+    // —— 🎯 三维启动（蓄势→试盘→突破 完整序列）—— //
+    if (isCandleMode && activeIndicators.value.includes('TRIPLE')) {
+        triples.value = detectThreeStageLaunch(klines.value)
+        // 把当前 MA 值附到每个 event 上（用作"加仓点"和"减仓线"提示）
+        const lastIdx = klines.value.length - 1
+        const ma5LastVal  = _lastComputed?.mainOverlays?.find(o => o.name === 'MA5')?.values?.[lastIdx]
+        const ma10LastVal = _lastComputed?.mainOverlays?.find(o => o.name === 'MA10')?.values?.[lastIdx]
+        const ma20LastVal = _lastComputed?.mainOverlays?.find(o => o.name === 'MA20')?.values?.[lastIdx]
+        const lastClose = +klines.value[lastIdx].close
+        for (const t of triples.value) {
+            t.maAddOnPrice = ma5LastVal != null ? +ma5LastVal.toFixed(2) : null  // 加仓点：当前 MA5
+            t.maAddOnPrice2 = ma10LastVal != null ? +ma10LastVal.toFixed(2) : null  // 备用 MA10
+            t.maReduceLine = ma20LastVal != null ? +ma20LastVal.toFixed(2) : null  // 减仓线：MA20
+            // 时间止损警告：突破后 5 日内未脱离成本（当前价 < 突破价 × 1.02）
+            if (t.s3Idx >= 0 && t.barsAgoFromS3 >= 5 && t.breakoutPrice
+                && lastClose < t.breakoutPrice * 1.02) {
+                t.timeStopWarning = true
+            } else {
+                t.timeStopWarning = false
+            }
+        }
+    } else {
+        triples.value = []
     }
 
 // —— 趋势通道（线性回归拟合上下轨）—— //
@@ -1461,6 +1576,88 @@ onUnmounted(() => {
             <!-- 主图 + hover 浮动卡片（仅 hover 时出现；MACD/KDJ 已挪到各自副图 legend，这里不展示）-->
             <div class="relative bg-white" :style="{ height: mainChartHeight }">
                 <div ref="mainEl" class="w-full h-full"></div>
+
+                <!-- 🎯 三维启动 overlay：蓄势期 cyan 矩形 + 试盘红竖线 + 突破橙竖线 -->
+                <svg v-if="triplesPx.length"
+                     class="absolute inset-0 pointer-events-none z-[6]"
+                     style="width: 100%; height: 100%;">
+                    <g v-for="t in triplesPx" :key="t.key">
+                        <!-- 蓄势期矩形（cyan 淡背景 + 虚线边）-->
+                        <rect :x="t.cx" :y="t.cy" :width="t.cw" :height="t.ch"
+                              fill="rgba(6, 182, 212, 0.08)"
+                              stroke="rgba(6, 182, 212, 0.7)"
+                              stroke-width="1" stroke-dasharray="3 2" />
+                        <text :x="t.cx + 4" y="14"
+                              fill="#0e7490" font-size="10" font-weight="bold"
+                              font-family="ui-monospace, monospace">
+                            🎯 蓄势期
+                        </text>
+                        <!-- 试盘点：红色竖虚线 + "试" 标 -->
+                        <g v-if="t.s2x != null">
+                            <line :x1="t.s2x" y1="0" :x2="t.s2x" y2="100%"
+                                  stroke="#dc2626" stroke-width="2" stroke-dasharray="5 3" opacity="0.8" />
+                            <text :x="t.s2x + 4" y="14"
+                                  fill="#dc2626" font-size="11" font-weight="bold">
+                                试 ({{ t.s2Type === 'upperShadow' ? '上影' : '下影' }})
+                            </text>
+                        </g>
+                        <!-- 突破点：橙色竖实线 + "启" 标 -->
+                        <g v-if="t.s3x != null">
+                            <line :x1="t.s3x" y1="0" :x2="t.s3x" y2="100%"
+                                  stroke="#ea580c" stroke-width="2.5" opacity="0.9" />
+                            <text :x="t.s3x + 4" y="14"
+                                  fill="#ea580c" font-size="12" font-weight="bold">
+                                🎯 启 ({{ t.barsAgoFromS3 }}前)
+                            </text>
+                        </g>
+                    </g>
+                </svg>
+                <!-- 三维启动顶部 banner（仅 fresh 时）—— 完整交易计划 -->
+                <!-- 位置：左上角（避让主升启动 banner 的居中位置）-->
+                <div v-if="triplesPx.find(t => t.isFresh)"
+                     class="absolute top-[5px] left-[5px] z-[13] pointer-events-none
+                            text-[12px] font-bold tabular-nums leading-[1.4]
+                            shadow-[0_2px_12px_rgba(220,38,38,0.20)] rounded-[5px]
+                            px-[12px] py-[6px] flex flex-col gap-[2px] min-w-[280px] max-w-[320px]
+                            bg-gradient-to-r from-[#fef2f2] to-[#fee2e2]
+                            border-2 border-[#dc2626] text-[#dc2626]">
+                    <span class="text-[14px]">🎯 三维启动确认</span>
+                    <span class="text-[10px] font-normal opacity-90">
+                        蓄势+试盘+突破 · {{ triplesPx.find(t => t.isFresh).barsAgoFromS3 }}根前
+                    </span>
+                    <!-- 三档介入点 + 风控线 -->
+                    <div class="mt-[3px] pt-[3px] border-t border-current/30 w-full text-[10px] font-mono leading-[1.5]">
+                        <div class="flex justify-between gap-2">
+                            <span class="text-[#0e7490]">💎 黄金买点</span>
+                            <span>{{ triplesPx.find(t => t.isFresh).goldenBuyPrice?.toFixed(2) }}</span>
+                            <span class="text-[#666] font-normal text-[9px]">回踩支撑</span>
+                        </div>
+                        <div v-if="triplesPx.find(t => t.isFresh).breakoutPrice" class="flex justify-between gap-2">
+                            <span>🎯 追涨买点</span>
+                            <span>{{ triplesPx.find(t => t.isFresh).breakoutPrice.toFixed(2) }}</span>
+                            <span class="text-[#666] font-normal text-[9px]">突破日</span>
+                        </div>
+                        <div v-if="triplesPx.find(t => t.isFresh).maAddOnPrice" class="flex justify-between gap-2">
+                            <span class="text-[#2563eb]">➕ 加仓点</span>
+                            <span>{{ triplesPx.find(t => t.isFresh).maAddOnPrice.toFixed(2) }}</span>
+                            <span class="text-[#666] font-normal text-[9px]">回踩 MA5</span>
+                        </div>
+                        <div v-if="triplesPx.find(t => t.isFresh).maReduceLine" class="flex justify-between gap-2">
+                            <span class="text-[#ea580c]">⚠ 减仓线</span>
+                            <span>{{ triplesPx.find(t => t.isFresh).maReduceLine.toFixed(2) }}</span>
+                            <span class="text-[#666] font-normal text-[9px]">跌破 MA20 减仓</span>
+                        </div>
+                        <div v-if="triplesPx.find(t => t.isFresh).stopLossPrice" class="flex justify-between gap-2">
+                            <span class="text-[#16a34a]">⛔ 止损</span>
+                            <span>{{ triplesPx.find(t => t.isFresh).stopLossPrice.toFixed(2) }}</span>
+                            <span class="text-[#666] font-normal text-[9px]">蓄势下沿×0.97</span>
+                        </div>
+                        <div v-if="triplesPx.find(t => t.isFresh).timeStopWarning"
+                             class="mt-[2px] pt-[2px] border-t border-current/20 text-center text-[10px] font-bold">
+                            ⏰ 时间止损警告：突破后 5 日未脱离成本，警惕假突破
+                        </div>
+                    </div>
+                </div>
 
                 <!-- 缺口（跳空）overlay：横条状贯穿带 - 未补=鲜艳，已补=淡色虚框 -->
                 <svg v-if="gapsPx.length"
