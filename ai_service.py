@@ -4,8 +4,13 @@ import os
 # 使用 OpenAI SDK 兼容各种模型 (包括 DeepSeek 等，只需替换 base_url)
 # 默认留空，等待用户填入。此处代码逻辑预铺好。
 API_KEY = os.getenv("AI_API_KEY", "your-api-key-here")
-BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1") 
+BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("AI_MODEL_NAME", "gpt-3.5-turbo")
+
+
+def is_configured():
+    """API Key 是否已配置（非占位值）。"""
+    return bool(API_KEY) and API_KEY != "your-api-key-here"
 
 def analyze_query(query, context=""):
     """

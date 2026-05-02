@@ -185,10 +185,18 @@ export const api = {
          updates.name ?? null, updates.addedPrice ?? null,
          updates.remark ?? null, updates.addedAt ?? null),
 
+  /** 批量导入：解析文本，返回识别出的股票列表 */
+  importParseText: (text) => call('import_parse_text', text || ''),
+  /** 批量入库：把识别出的 [{code, name}] 批量加入指定分组 */
+  importBatchAdd: (groupId, stocks) => call('import_batch_add', groupId, stocks || []),
+
   /** 股票搜索（A 股，支持代码/中文名/拼音）*/
   searchStocks: (query, limit) => call('search_stocks', query, limit ?? 20),
   /** 从分组移除股票 */
   removeWatchlistStock: (groupId, code) => call('remove_watchlist_stock', groupId, code),
+  /** 批量移除：codes 数组 */
+  removeWatchlistStocksBatch: (groupId, codes) =>
+    call('remove_watchlist_stocks_batch', groupId, codes || []),
   /** 重排分组内股票，参数 [code1, code2, ...] */
   reorderWatchlistStocks: (groupId, orderedCodes) => call('reorder_watchlist_stocks', groupId, orderedCodes),
 

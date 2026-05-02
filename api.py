@@ -495,6 +495,29 @@ class Api:
                                         remark=remark, added_at=added_at)
         return {"ok": True}
 
+    # ---------- 批量导入（文本 / 图片）----------
+    @api_endpoint
+    def import_parse_text(self, text):
+        """
+        从一段文本里识别股票代码 + 名称。
+        返回 [{code, name, source}, ...]，前端预览后再调 import_batch_add 入库。
+        """
+        from services import import_service
+        return import_service.parse_text(text or '')
+
+    @api_endpoint
+    def import_batch_add(self, group_id, stocks):
+        """
+        批量加入分组。已存在的 code 跳过。
+        Args:
+            group_id: int
+            stocks: [{code, name}]
+        Returns:
+            {added, skipped_existing, failed, detail}
+        """
+        from services import import_service
+        return import_service.batch_add_to_group(group_id, stocks or [])
+
     # ---------- 价格警报 ----------
     @api_endpoint
     def set_stock_alert(self, code, above=None, below=None):
@@ -535,6 +558,20 @@ class Api:
     def remove_watchlist_stock(self, group_id, code):
         watchlist_service.remove_stock(group_id, code)
         return {"ok": True}
+
+    @api_endpoint
+    def remove_watchlist_stocks_batch(self, group_id, codes):
+        """批量从分组移除股票。失败的不影响其它继续删。"""
+        codes = codes or []
+        removed = 0
+        failed = []
+        for code in codes:
+            try:
+                watchlist_service.remove_stock(group_id, code)
+                removed += 1
+            except Exception as e:
+                failed.append({'code': code, 'error': str(e)})
+        return {'removed': removed, 'failed': failed}
 
     @api_endpoint
     def reorder_watchlist_stocks(self, group_id, ordered_codes):

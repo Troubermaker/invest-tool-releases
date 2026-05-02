@@ -32,10 +32,17 @@ desktop.ini
 *.log
 logs/
 
-# Database
+# Database (含 WAL / shared-memory 副文件，必须一起忽略，否则跨机器同步会损坏主库)
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Temporary files
 *.tmp

@@ -6,6 +6,7 @@ import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
 import { openStockChart } from '../composables/useStockChart'
 import ScanSignalsModal from '../components/ScanSignalsModal.vue'
+import WatchlistImportModal from '../components/WatchlistImportModal.vue'
 import { useUserRole } from '../composables/useUserRole'
 const { isAdmin } = useUserRole()
 
@@ -70,6 +71,56 @@ const showScanModal = ref(false)
 const scanStocksList = computed(() =>
     stocks.value.map(s => ({ code: s.code, name: s.name }))
 )
+
+// 批量导入 modal
+const showImportModal = ref(false)
+
+// ============ 多选 / 批量删除 ============
+// selectedCodes 是 Set<string>，按 code 跟踪选中的行
+const selectedCodes = ref(new Set())
+function toggleRowSelection(code, e) {
+    // 阻止点击 checkbox 时冒泡触发整行 click（双击 K 线 / 编辑等）
+    e?.stopPropagation()
+    const next = new Set(selectedCodes.value)
+    if (next.has(code)) next.delete(code)
+    else next.add(code)
+    selectedCodes.value = next
+}
+function clearSelection() {
+    selectedCodes.value = new Set()
+}
+// 切分组时清掉之前的选择（避免跨组误删）
+watch(selectedGroupId, () => clearSelection())
+
+const allFilteredSelected = computed(() => {
+    if (!filteredStocks.value.length) return false
+    return filteredStocks.value.every(s => selectedCodes.value.has(s.code))
+})
+function toggleAllFiltered() {
+    const next = new Set(selectedCodes.value)
+    if (allFilteredSelected.value) {
+        for (const s of filteredStocks.value) next.delete(s.code)
+    } else {
+        for (const s of filteredStocks.value) next.add(s.code)
+    }
+    selectedCodes.value = next
+}
+
+async function handleBatchRemove() {
+    const codes = Array.from(selectedCodes.value)
+    if (!codes.length) return
+    const ok = await askConfirm({
+        title: '批量移除自选股',
+        message: `确定从「${selectedGroup.value?.name || '当前分组'}」移除 ${codes.length} 只股票？此操作不可撤销。`,
+        confirmText: `移除 ${codes.length} 只`,
+    })
+    if (!ok) return
+    const res = await api.removeWatchlistStocksBatch(selectedGroupId.value, codes)
+    if (res.ok) {
+        clearSelection()
+        await Promise.all([loadGroups(), loadStocks()])
+    }
+}
 
 // 通用确认弹窗：askConfirm({title, message, confirmText}) → Promise<boolean>
 const confirmState = ref({ show: false, title: '', message: '', confirmText: '确定', _resolve: null })
@@ -951,6 +1002,18 @@ onUnmounted(() => {
                         </svg>
                     </button>
                 </div>
+                <!-- 批量导入（所有用户）-->
+                <button @click="showImportModal = true"
+                        title="从文本/图片批量识别并导入股票（通达信/同花顺式导入）"
+                        class="text-[12px] px-[10px] py-[4px] rounded-[4px] border border-[#0891b2]/40
+                               text-[#0891b2] bg-white hover:bg-[#ecfeff] hover:border-[#0891b2]
+                               transition flex items-center gap-[4px] shrink-0">
+                    <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 9.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 8.414V13a1 1 0 11-2 0V8.414L7.707 9.707a1 1 0 01-1.414 0z" />
+                    </svg>
+                    <span>批量导入</span>
+                </button>
+
                 <!-- 三维启动扫描（仅管理员）-->
                 <button v-if="isAdmin"
                         @click="showScanModal = true"
@@ -1021,12 +1084,40 @@ onUnmounted(() => {
             </div>
         </div>
 
+        <!-- 多选操作条（选中 ≥1 只时浮现）-->
+        <div v-if="selectedCodes.size > 0"
+             class="h-[36px] px-[14px] border-b border-[#fecaca] bg-[#fff5f5] flex items-center gap-[10px] shrink-0">
+            <span class="text-[12px] text-[#dc2626] font-semibold">
+                已选 <span class="tabular-nums">{{ selectedCodes.size }}</span> 只
+            </span>
+            <button @click="handleBatchRemove"
+                    class="text-[12px] font-bold text-white bg-[#dc2626] px-[12px] py-[4px] rounded-[4px]
+                           hover:bg-[#991b1b] shadow-sm transition flex items-center gap-[4px]">
+                <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                </svg>
+                批量移除
+            </button>
+            <button @click="clearSelection"
+                    class="ml-auto text-[11px] text-[#666] hover:text-[#dc2626] transition">
+                取消选择
+            </button>
+        </div>
+
         <!-- 股票表格 -->
         <div class="flex-1 overflow-auto custom-scrollbar bg-white">
             <table class="w-full text-left border-collapse whitespace-nowrap">
                 <thead class="sticky top-0 bg-[#fafafa] shadow-[0_1px_0_#eeeeee] text-[12px] text-[#888] z-10">
                     <tr class="watchlist-header-row">
-                        <!-- 固定列：股票名称（始终最左）-->
+                        <!-- 固定列：多选 checkbox（最左）-->
+                        <th class="col-fixed px-[8px] py-[10px] font-normal text-center w-[32px]">
+                            <input type="checkbox"
+                                   :checked="allFilteredSelected"
+                                   @change="toggleAllFiltered"
+                                   :title="allFilteredSelected ? '取消全选' : '全选当前列表'"
+                                   class="w-[13px] h-[13px] accent-[#dc2626] cursor-pointer">
+                        </th>
+                        <!-- 固定列：股票名称 -->
                         <th class="col-fixed px-[12px] py-[10px] font-normal w-[120px]">股票名称</th>
                         <!-- 固定列：今日走势（紧随名称）-->
                         <th class="col-fixed px-[8px] py-[10px] font-normal text-center w-[160px]">今日走势</th>
@@ -1050,16 +1141,16 @@ onUnmounted(() => {
                 </thead>
                 <tbody>
                     <tr v-if="loading && !stocks.length">
-                        <td colspan="16" class="py-[60px] text-center text-[#aaa] text-[13px]">加载中...</td>
+                        <td colspan="17" class="py-[60px] text-center text-[#aaa] text-[13px]">加载中...</td>
                     </tr>
                     <tr v-else-if="!stocks.length">
-                        <td colspan="16" class="py-[80px] text-center text-[#aaa] text-[13px]">
+                        <td colspan="17" class="py-[80px] text-center text-[#aaa] text-[13px]">
                             分组「{{ selectedGroup?.name }}」还没有股票，点击右上角
                             <span class="text-[#dc2626] font-semibold">+ 添加股票</span>
                         </td>
                     </tr>
                     <tr v-else-if="!filteredStocks.length">
-                        <td colspan="16" class="py-[60px] text-center text-[#aaa] text-[13px]">
+                        <td colspan="17" class="py-[60px] text-center text-[#aaa] text-[13px]">
                             未匹配到"{{ searchQuery }}"，
                             <button @click="searchQuery = ''" class="text-[#dc2626] hover:underline">清空搜索</button>
                         </td>
@@ -1067,8 +1158,18 @@ onUnmounted(() => {
 
                     <tr v-for="stock in filteredStocks" :key="stock.code"
                         @dblclick="openStockChart(stock.code, stock.name || quotes[stock.code]?.name, filteredStocks)"
-                        class="border-b border-[#f5f5f5] hover:bg-[#fffafa] transition-colors group cursor-pointer"
+                        class="border-b border-[#f5f5f5] transition-colors group cursor-pointer"
+                        :class="selectedCodes.has(stock.code) ? 'bg-[#fff5f5]' : 'hover:bg-[#fffafa]'"
                         title="双击查看 K 线 · 左侧列表可切换">
+
+                        <!-- 多选 checkbox -->
+                        <td class="px-[8px] py-[8px] text-center align-middle"
+                            @click.stop>
+                            <input type="checkbox"
+                                   :checked="selectedCodes.has(stock.code)"
+                                   @change="toggleRowSelection(stock.code, $event)"
+                                   class="w-[13px] h-[13px] accent-[#dc2626] cursor-pointer">
+                        </td>
 
                         <td class="px-[12px] py-[8px] align-middle">
                             <div class="text-[14px] font-bold text-[#111] leading-tight truncate">{{ stock.name || quotes[stock.code]?.name || '—' }}</div>
@@ -1388,6 +1489,13 @@ onUnmounted(() => {
     <ScanSignalsModal :open="showScanModal"
                       :stocks="scanStocksList"
                       @close="showScanModal = false" />
+
+    <!-- ============ 批量导入 modal ============ -->
+    <WatchlistImportModal :open="showImportModal"
+                          :groups="groups"
+                          :default-group-id="selectedGroupId"
+                          @close="showImportModal = false"
+                          @imported="loadGroups(); loadStocks()" />
 
   </div>
 </template>

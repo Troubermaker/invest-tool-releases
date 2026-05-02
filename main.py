@@ -35,6 +35,43 @@ if getattr(sys, 'frozen', False) and (sys.stdout is None or sys.stderr is None):
         sys.stdout = open(os.devnull, 'w')
         sys.stderr = sys.stdout
 
+# ========= 加载 .env（必须在 ai_service / baidu_ocr_service 等读 os.getenv 之前）=========
+# 极简实现：纯 stdlib 解析，避免引入 python-dotenv 依赖
+# - 文件位置：项目根目录或 exe 旁边的 .env
+# - 优先级：真实 OS 环境变量 > .env（已设的不被覆盖，便于临时调试）
+# - 语法：每行 KEY=VALUE，# 开头是注释，支持 'value' / "value" 引号包裹
+def _load_dotenv():
+    # PyInstaller 打包后用 sys.executable 旁边的 .env；开发态用工作目录
+    if getattr(sys, 'frozen', False):
+        env_path = os.path.join(os.path.dirname(sys.executable), '.env')
+    else:
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, 'r', encoding='utf-8-sig') as f:   # utf-8-sig 自动剥 BOM
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' not in line:
+                    continue
+                key, _, val = line.partition('=')
+                key = key.strip()
+                val = val.strip()
+                # 剥引号
+                if (len(val) >= 2 and
+                    ((val[0] == '"' and val[-1] == '"') or
+                     (val[0] == "'" and val[-1] == "'"))):
+                    val = val[1:-1]
+                # 已被 OS 环境变量设过的不覆盖（让真实环境变量优先级更高）
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except Exception as e:
+        print(f'[WARN] .env 加载失败：{e}')
+
+_load_dotenv()
+
 import webview
 import socket
 from api import Api
