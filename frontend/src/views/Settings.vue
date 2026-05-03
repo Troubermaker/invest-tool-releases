@@ -13,6 +13,10 @@ let _updateCheckMsgTimer = null
 const desktopNotifyEnabled = ref(false)
 const DESKTOP_NOTIFY_PREF_KEY = 'alerts.desktop_notification'
 
+// 关闭按钮行为：勾选 = 最小化到托盘，不勾选 = 直接退出
+const minimizeToTrayEnabled = ref(true)
+const MIN_TO_TRAY_PREF_KEY = 'app.minimize_to_tray_on_close'
+
 async function loadAppInfo() {
     const res = await api.getAppVersion()
     if (res.ok && res.data) {
@@ -24,6 +28,15 @@ async function loadAppInfo() {
     if (pref.ok && typeof pref.data === 'boolean') {
         desktopNotifyEnabled.value = pref.data
     }
+    // 加载关闭行为偏好（默认 true：最小化到托盘）
+    const trayPref = await api.getUserPreference(MIN_TO_TRAY_PREF_KEY, true)
+    if (trayPref.ok && typeof trayPref.data === 'boolean') {
+        minimizeToTrayEnabled.value = trayPref.data
+    }
+}
+
+async function handleToggleMinimizeToTray() {
+    await api.setUserPreference(MIN_TO_TRAY_PREF_KEY, minimizeToTrayEnabled.value)
 }
 
 async function handleToggleDesktopNotify() {
@@ -418,6 +431,21 @@ function confirmCancel() {
                 </label>
                 <span class="text-[10px] text-[#aaa]">
                     应用内永远开启（右下角弹 toast）；桌面 Toast 默认关，避免抢焦点
+                </span>
+            </div>
+
+            <!-- 关闭按钮行为 -->
+            <div class="px-[14px] pb-[10px] -mt-[4px] flex items-center gap-[14px] flex-wrap">
+                <span class="text-[11px] text-[#666] shrink-0">关闭按钮</span>
+                <label class="flex items-center gap-[6px] cursor-pointer select-none">
+                    <input type="checkbox"
+                           v-model="minimizeToTrayEnabled"
+                           @change="handleToggleMinimizeToTray"
+                           class="accent-[#dc2626] cursor-pointer">
+                    <span class="text-[11px] text-[#333]">点 X 最小化到托盘（不勾选则直接退出）</span>
+                </label>
+                <span class="text-[10px] text-[#aaa]">
+                    托盘菜单的「退出」永远是真退出，不受此开关影响
                 </span>
             </div>
 

@@ -61,14 +61,34 @@ def _quit_app(icon=None, item=None):
         pass
 
 
+PREF_MIN_TO_TRAY = 'app.minimize_to_tray_on_close'  # bool，默认 True
+
+
 def on_window_closing():
     """
     pywebview window.events.closing 回调。
-    返回 False 取消关闭（隐藏到托盘）；返回 None / True 让其正常关闭。
+    根据用户偏好 `app.minimize_to_tray_on_close` 决定行为：
+      - True（默认）：隐藏到托盘（返 False 取消关闭）
+      - False：直接退出（返 None / True 放行）
+
+    托盘菜单"退出"会先设 _real_quit_requested = True，本回调放行，进程退出。
     """
     if _real_quit_requested:
         return None     # 真退出，放行
-    # 拦截：隐藏窗口而不是关闭
+
+    # 读偏好（懒加载 watchlist_service 避免循环导入）
+    try:
+        from services import watchlist_service
+        minimize = watchlist_service.get_preference(PREF_MIN_TO_TRAY, True)
+    except Exception:
+        minimize = True   # 默认行为：隐藏到托盘
+
+    if not minimize:
+        # 用户选择了"X 直接退出"
+        _quit_app()
+        return None
+
+    # 隐藏到托盘
     try:
         _window.hide()
     except Exception as e:
