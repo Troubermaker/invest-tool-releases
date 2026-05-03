@@ -1,6 +1,13 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../api/client'
+import { useExternalApp } from '../composables/useExternalApp'
+
+// 联动外部行情软件（通达信 / 同花顺）
+const ext = useExternalApp()
+async function handleToggleExt(target, val) {
+    await ext.setEnabled(target, val)
+}
 
 // ---------------- 关于 / 系统 ----------------
 const appVersion = ref('')
@@ -446,6 +453,46 @@ function confirmCancel() {
                 </label>
                 <span class="text-[10px] text-[#aaa]">
                     托盘菜单的「退出」永远是真退出，不受此开关影响
+                </span>
+            </div>
+
+            <!-- 联动外部行情软件 -->
+            <div class="px-[14px] pb-[10px] -mt-[4px] flex items-center gap-[14px] flex-wrap">
+                <span class="text-[11px] text-[#666] shrink-0">联动外部</span>
+
+                <!-- 通达信 -->
+                <label class="flex items-center gap-[6px] cursor-pointer select-none">
+                    <input type="checkbox"
+                           :checked="ext.enableTdx.value"
+                           @change="handleToggleExt('tdx', $event.target.checked)"
+                           class="accent-[#dc2626] cursor-pointer">
+                    <span class="text-[11px] text-[#333]">📡 通达信</span>
+                    <span v-if="ext.enableTdx.value" class="text-[10px]"
+                          :class="ext.status.value.tdx?.running ? 'text-[#16a34a]' : 'text-[#dc2626]'">
+                        {{ ext.status.value.tdx?.running ? '✓ 已检测到' : '⚠ 未运行' }}
+                    </span>
+                </label>
+
+                <!-- 同花顺 -->
+                <label class="flex items-center gap-[6px] cursor-pointer select-none">
+                    <input type="checkbox"
+                           :checked="ext.enableThs.value"
+                           @change="handleToggleExt('ths', $event.target.checked)"
+                           class="accent-[#dc2626] cursor-pointer">
+                    <span class="text-[11px] text-[#333]">📡 同花顺</span>
+                    <span v-if="ext.enableThs.value" class="text-[10px]"
+                          :class="ext.status.value.ths?.running ? 'text-[#16a34a]' : 'text-[#dc2626]'">
+                        {{ ext.status.value.ths?.running ? '✓ 已检测到' : '⚠ 未运行' }}
+                    </span>
+                </label>
+
+                <button @click="ext.refreshStatus()"
+                        class="text-[10px] text-[#2563eb] hover:underline cursor-pointer">
+                    重新检测
+                </button>
+
+                <span class="text-[10px] text-[#aaa]">
+                    勾选后，自选/持仓行 hover 会出「📡」按钮，点击可在外部软件跳转该股
                 </span>
             </div>
 

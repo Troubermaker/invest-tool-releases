@@ -8,7 +8,9 @@ import { openStockChart } from '../composables/useStockChart'
 import ScanSignalsModal from '../components/ScanSignalsModal.vue'
 import WatchlistImportModal from '../components/WatchlistImportModal.vue'
 import { useUserRole } from '../composables/useUserRole'
+import { useExternalApp } from '../composables/useExternalApp'
 const { isAdmin } = useUserRole()
+const ext = useExternalApp()
 
 // ---------------- 数据状态 ----------------
 const groups = ref([])
@@ -1172,7 +1174,24 @@ onUnmounted(() => {
                         </td>
 
                         <td class="px-[12px] py-[8px] align-middle">
-                            <div class="text-[14px] font-bold text-[#111] leading-tight truncate">{{ stock.name || quotes[stock.code]?.name || '—' }}</div>
+                            <div class="flex items-center gap-[4px] min-w-0">
+                                <div class="text-[14px] font-bold text-[#111] leading-tight truncate flex-1">{{ stock.name || quotes[stock.code]?.name || '—' }}</div>
+                                <!-- 联动按钮（hover 出现 + Settings 勾选 + 软件运行中）-->
+                                <button v-if="ext.showTdxButton.value"
+                                        @click.stop="ext.jumpTo('tdx', stock.code)"
+                                        title="在通达信打开"
+                                        class="opacity-0 group-hover:opacity-100 shrink-0 text-[10px] px-[5px] py-[1px] rounded
+                                               text-[#0891b2] bg-[#ecfeff] hover:bg-[#cffafe] border border-[#a5f3fc] transition">
+                                    📡 TDX
+                                </button>
+                                <button v-if="ext.showThsButton.value"
+                                        @click.stop="ext.jumpTo('ths', stock.code)"
+                                        title="在同花顺打开"
+                                        class="opacity-0 group-hover:opacity-100 shrink-0 text-[10px] px-[5px] py-[1px] rounded
+                                               text-[#7c3aed] bg-[#f5f3ff] hover:bg-[#ede9fe] border border-[#ddd6fe] transition">
+                                    📡 THS
+                                </button>
+                            </div>
                             <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">
                                 {{ marketPrefix(stock.code) }}{{ stock.code }}
                             </div>

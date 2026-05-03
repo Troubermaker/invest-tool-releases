@@ -4,6 +4,8 @@ import draggable from 'vuedraggable'
 import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
 import { openStockChart } from '../composables/useStockChart'
+import { useExternalApp } from '../composables/useExternalApp'
+const ext = useExternalApp()
 
 // ---------------- 账户 / 持仓状态 ----------------
 const SUMMARY_ID = 'summary'  // 选中汇总 tab 时的哨兵值（真实账户 id 都是数字）
@@ -1299,7 +1301,23 @@ onMounted(async () => {
 
                         <!-- 股票名称 + 代码 -->
                         <td class="px-[12px] py-[8px] align-middle">
-                            <div class="text-[14px] font-bold text-[#111] leading-tight truncate">{{ p.name || quotes[p.code]?.name || '—' }}</div>
+                            <div class="flex items-center gap-[4px] min-w-0">
+                                <div class="text-[14px] font-bold text-[#111] leading-tight truncate flex-1">{{ p.name || quotes[p.code]?.name || '—' }}</div>
+                                <button v-if="ext.showTdxButton.value"
+                                        @click.stop="ext.jumpTo('tdx', p.code)"
+                                        title="在通达信打开"
+                                        class="opacity-0 group-hover:opacity-100 shrink-0 text-[10px] px-[5px] py-[1px] rounded
+                                               text-[#0891b2] bg-[#ecfeff] hover:bg-[#cffafe] border border-[#a5f3fc] transition">
+                                    📡 TDX
+                                </button>
+                                <button v-if="ext.showThsButton.value"
+                                        @click.stop="ext.jumpTo('ths', p.code)"
+                                        title="在同花顺打开"
+                                        class="opacity-0 group-hover:opacity-100 shrink-0 text-[10px] px-[5px] py-[1px] rounded
+                                               text-[#7c3aed] bg-[#f5f3ff] hover:bg-[#ede9fe] border border-[#ddd6fe] transition">
+                                    📡 THS
+                                </button>
+                            </div>
                             <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">
                                 {{ marketPrefix(p.code) }}{{ p.code }}
                             </div>

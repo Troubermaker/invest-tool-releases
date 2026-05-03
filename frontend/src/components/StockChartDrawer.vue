@@ -10,6 +10,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import StockChart from './StockChart.vue'
 import { stockChartState, closeStockChart, switchToStock } from '../composables/useStockChart'
 import { api } from '../api/client'
+import { useExternalApp } from '../composables/useExternalApp'
+const ext = useExternalApp()
 
 const visible   = computed(() => stockChartState.value.visible)
 const code      = computed(() => stockChartState.value.code)
@@ -61,6 +63,27 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             <!-- 顶部抓手条（视觉） -->
             <div class="h-[6px] flex items-center justify-center shrink-0">
                 <div class="w-[40px] h-[3px] rounded-full bg-[#cbd5e1]"></div>
+            </div>
+
+            <!-- 联动外部行情软件（仅 Settings 勾选 + 软件运行中时显示）-->
+            <div v-if="code && (ext.showTdxButton.value || ext.showThsButton.value)"
+                 class="absolute top-[10px] right-[14px] z-[5] flex items-center gap-[6px]">
+                <button v-if="ext.showTdxButton.value"
+                        @click="ext.jumpTo('tdx', code)"
+                        title="在通达信打开当前股票"
+                        class="text-[11px] font-semibold px-[8px] py-[3px] rounded
+                               text-[#0891b2] bg-[#ecfeff] hover:bg-[#cffafe]
+                               border border-[#a5f3fc] transition shadow-sm">
+                    📡 在通达信打开
+                </button>
+                <button v-if="ext.showThsButton.value"
+                        @click="ext.jumpTo('ths', code)"
+                        title="在同花顺打开当前股票"
+                        class="text-[11px] font-semibold px-[8px] py-[3px] rounded
+                               text-[#7c3aed] bg-[#f5f3ff] hover:bg-[#ede9fe]
+                               border border-[#ddd6fe] transition shadow-sm">
+                    📡 在同花顺打开
+                </button>
             </div>
 
             <!-- 主体：左侧股票列表（可选）+ 右侧 K 线 -->
