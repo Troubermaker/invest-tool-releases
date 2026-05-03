@@ -3,6 +3,8 @@ curl_cffi
 pytdx
 schedule
 pywebview
+pystray
+pillow
 openai
 pyinstaller
 chinese_calendar

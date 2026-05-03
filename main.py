@@ -151,6 +151,15 @@ def main():
     x = max(0, (screen_w - win_w) // 2)
     y = max(0, (screen_h - win_h) // 2)
 
+    # 应用图标：开发态从源码 assets，打包后从 _internal/assets（spec 里 datas 已带）
+    # 注意：icon 是给 webview.start() 用的（不是 create_window），下方 webview.start 处再传
+    if getattr(sys, 'frozen', False):
+        icon_path = os.path.join(os.path.dirname(sys.executable), '_internal', 'assets', 'icon.ico')
+        if not os.path.exists(icon_path):
+            icon_path = os.path.join(os.path.dirname(sys.executable), 'assets', 'icon.ico')
+    else:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'icon.ico')
+
     window = webview.create_window(
         title="量化复盘与盯盘终端",
         url=url,
@@ -168,13 +177,28 @@ def main():
     setup_boss_key(window)
     # 启动时按需预热缓存（盘后 / 非交易日打开 app 时，先后台抓最新交易日数据）
     scheduler.warm_cache_on_startup_async()
+
+    # 系统托盘：关闭按钮 = 隐藏到托盘，真退出走托盘菜单
+    from services import tray_service
+    if os.path.exists(icon_path):
+        tray_service.init(window, icon_path)
+        # 拦截关闭事件（pywebview 6.x：events.closing 返 False 取消关闭）
+        try:
+            window.events.closing += tray_service.on_window_closing
+        except Exception as e:
+            print(f'[WARN] 注册 closing 事件失败：{e}（关闭按钮将直接退出）')
     # debug 模式自动策略：
     #   python main.py                → debug=True （开发）
     #   打包后 invest_tool.exe         → debug=False（商用发布默认关闭 DevTools）
     #   打包后 invest_tool.exe --debug → debug=True （维护人员排查问题时显式开启）
     is_packaged = getattr(sys, 'frozen', False)
     debug_mode = (not is_packaged) or ('--debug' in sys.argv)
-    webview.start(debug=debug_mode)
+    # icon 参数只在某些 pywebview 版本支持，try/except 兜底避免 TypeError
+    try:
+        webview.start(debug=debug_mode, icon=icon_path if os.path.exists(icon_path) else None)
+    except TypeError:
+        # 老版本 pywebview 不认 icon kwarg；图标依赖 PyInstaller spec 里的 exe icon
+        webview.start(debug=debug_mode)
 
 if __name__ == '__main__':
     main()

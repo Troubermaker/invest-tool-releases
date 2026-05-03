@@ -38,7 +38,11 @@ hiddenimports = [
     'services.license_service',   # Cython 保护：HMAC SECRET
     'api_endpoints._auth',        # Cython 保护：所有 Cookie / Token
 ]
-datas = [('frontend/dist', 'frontend/dist')]  # 前端打包产物
+datas = [
+    ('frontend/dist', 'frontend/dist'),       # 前端打包产物
+    ('assets/icon.ico', 'assets'),            # 应用图标（pywebview 窗口运行时也用）
+    ('assets/icon.png', 'assets'),
+]
 binaries = []
 
 for pkg in ('webview', 'cryptography', 'certifi', 'charset_normalizer', 'urllib3'):
@@ -84,7 +88,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon='icon.ico',      # 有图标时填上
+    icon='assets/icon.ico',
 )
 
 coll = COLLECT(
