@@ -1306,15 +1306,19 @@ onMounted(async () => {
                                 <button v-if="ext.showTdxButton.value"
                                         @click.stop="ext.jumpTo('tdx', p.code)"
                                         title="在通达信打开"
-                                        class="opacity-0 group-hover:opacity-100 shrink-0 text-[10px] px-[5px] py-[1px] rounded
-                                               text-[#0891b2] bg-[#ecfeff] hover:bg-[#cffafe] border border-[#a5f3fc] transition">
+                                        class="shrink-0 text-[11px] font-semibold px-[8px] py-[3px] rounded-[4px]
+                                               text-[#0891b2] bg-[#ecfeff] hover:bg-[#a5f3fc] hover:text-[#0e7490]
+                                               active:scale-95 active:bg-[#67e8f9]
+                                               border border-[#a5f3fc] transition-all duration-100 shadow-sm">
                                     📡 TDX
                                 </button>
                                 <button v-if="ext.showThsButton.value"
                                         @click.stop="ext.jumpTo('ths', p.code)"
                                         title="在同花顺打开"
-                                        class="opacity-0 group-hover:opacity-100 shrink-0 text-[10px] px-[5px] py-[1px] rounded
-                                               text-[#7c3aed] bg-[#f5f3ff] hover:bg-[#ede9fe] border border-[#ddd6fe] transition">
+                                        class="shrink-0 text-[11px] font-semibold px-[8px] py-[3px] rounded-[4px]
+                                               text-[#7c3aed] bg-[#f5f3ff] hover:bg-[#ddd6fe] hover:text-[#5b21b6]
+                                               active:scale-95 active:bg-[#c4b5fd]
+                                               border border-[#ddd6fe] transition-all duration-100 shadow-sm">
                                     📡 THS
                                 </button>
                             </div>

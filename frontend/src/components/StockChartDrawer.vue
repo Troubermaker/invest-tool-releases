@@ -13,6 +13,13 @@ import { api } from '../api/client'
 import { useExternalApp } from '../composables/useExternalApp'
 const ext = useExternalApp()
 
+// 切换股票（左侧列表点击触发）：换 K 线 + 顺手联动外部
+function switchAndMaybeLink(code, name) {
+    switchToStock(code, name)
+    if (ext.showTdxButton.value) ext.jumpTo('tdx', code)
+    if (ext.showThsButton.value) ext.jumpTo('ths', code)
+}
+
 const visible   = computed(() => stockChartState.value.visible)
 const code      = computed(() => stockChartState.value.code)
 const name      = computed(() => stockChartState.value.name)
@@ -67,21 +74,23 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
             <!-- 联动外部行情软件（仅 Settings 勾选 + 软件运行中时显示）-->
             <div v-if="code && (ext.showTdxButton.value || ext.showThsButton.value)"
-                 class="absolute top-[10px] right-[14px] z-[5] flex items-center gap-[6px]">
+                 class="absolute top-[10px] right-[14px] z-[5] flex items-center gap-[8px]">
                 <button v-if="ext.showTdxButton.value"
                         @click="ext.jumpTo('tdx', code)"
                         title="在通达信打开当前股票"
-                        class="text-[11px] font-semibold px-[8px] py-[3px] rounded
-                               text-[#0891b2] bg-[#ecfeff] hover:bg-[#cffafe]
-                               border border-[#a5f3fc] transition shadow-sm">
+                        class="text-[12px] font-bold px-[12px] py-[5px] rounded-[5px]
+                               text-[#0891b2] bg-[#ecfeff] hover:bg-[#a5f3fc] hover:text-[#0e7490]
+                               active:scale-95 active:bg-[#67e8f9]
+                               border border-[#a5f3fc] transition-all duration-100 shadow">
                     📡 在通达信打开
                 </button>
                 <button v-if="ext.showThsButton.value"
                         @click="ext.jumpTo('ths', code)"
                         title="在同花顺打开当前股票"
-                        class="text-[11px] font-semibold px-[8px] py-[3px] rounded
-                               text-[#7c3aed] bg-[#f5f3ff] hover:bg-[#ede9fe]
-                               border border-[#ddd6fe] transition shadow-sm">
+                        class="text-[12px] font-bold px-[12px] py-[5px] rounded-[5px]
+                               text-[#7c3aed] bg-[#f5f3ff] hover:bg-[#ddd6fe] hover:text-[#5b21b6]
+                               active:scale-95 active:bg-[#c4b5fd]
+                               border border-[#ddd6fe] transition-all duration-100 shadow">
                     📡 在同花顺打开
                 </button>
             </div>
@@ -98,7 +107,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                     </div>
                     <div class="flex-1 overflow-y-auto">
                         <button v-for="s in stockList" :key="s.code"
-                                @click="switchToStock(s.code, s.name)"
+                                @click="switchAndMaybeLink(s.code, s.name)"
                                 class="w-full text-left px-[10px] py-[7px] border-b border-[#f0f0f0]
                                        flex flex-col gap-[1px] transition-colors"
                                 :class="s.code === code
