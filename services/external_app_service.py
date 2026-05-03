@@ -38,9 +38,23 @@ APP_KEYWORDS = {
 
 APP_DISPLAY_NAME = {'tdx': '通达信', 'ths': '同花顺'}
 
+# 窗口句柄缓存：避免每次点击都跑一遍 EnumWindows（最大延迟来源）
+# 失效条件：句柄无效 / 窗口标题变了 / 60s 没成功用过
+_hwnd_cache = {}    # target → {'hwnd': int, 'title': str, 'ts': float}
+_HWND_CACHE_TTL = 60.0
+
 
 def _is_windows():
     return platform.system() == 'Windows'
+
+
+def _is_window_valid(hwnd):
+    """快速校验缓存的句柄还有效。"""
+    if not hwnd:
+        return False
+    import ctypes
+    user32 = ctypes.windll.user32
+    return bool(user32.IsWindow(hwnd))
 
 
 def _enum_top_windows():
@@ -70,8 +84,16 @@ def _enum_top_windows():
     return results
 
 
-def _find_window(target):
-    """按关键字模糊找窗口。返回 (hwnd, title) 或 (None, None)。"""
+def _find_window(target, use_cache=True):
+    """按关键字模糊找窗口。返回 (hwnd, title) 或 (None, None)。
+    优先用缓存；缓存无效或过期才重新 EnumWindows（昂贵）。"""
+    # 先查缓存
+    if use_cache:
+        cached = _hwnd_cache.get(target)
+        if cached and (time.monotonic() - cached['ts'] < _HWND_CACHE_TTL):
+            if _is_window_valid(cached['hwnd']):
+                return cached['hwnd'], cached['title']
+
     keywords = APP_KEYWORDS.get(target, [])
     if not keywords:
         return None, None
@@ -79,7 +101,10 @@ def _find_window(target):
         title_lower = title.lower()
         for kw in keywords:
             if kw.lower() in title_lower:
+                _hwnd_cache[target] = {'hwnd': hwnd, 'title': title, 'ts': time.monotonic()}
                 return hwnd, title
+    # 找不到：清缓存
+    _hwnd_cache.pop(target, None)
     return None, None
 
 
@@ -153,16 +178,18 @@ def jump_to_stock(target, code):
     if not _activate_window(hwnd):
         return {'ok': False, 'reason': 'ACTIVATE_FAILED', 'msg': '激活窗口失败'}
 
-    # 等焦点切完（SetForegroundWindow 是异步的，立即敲键盘可能落到旧焦点窗口）
-    time.sleep(0.08)
+    # 等焦点切完（30ms 大多数情况够；之前 80ms 太保守）
+    time.sleep(0.03)
 
     try:
         import keyboard
-        keyboard.write(code, delay=0.005)
-        time.sleep(0.03)
+        keyboard.write(code, delay=0)   # 不要每字符 delay，6 位数字一次性敲
+        time.sleep(0.01)                 # write 后留一点点，确保前一批字符进缓冲
         keyboard.send('enter')
     except Exception as e:
         logger.warning(f'模拟键盘失败：{e}')
+        # 如果是缓存的句柄突然失效（用户关了又开），下次重新找
+        _hwnd_cache.pop(target, None)
         return {'ok': False, 'reason': 'KEYBOARD_FAILED', 'msg': str(e)}
 
     return {'ok': True, 'title': title}

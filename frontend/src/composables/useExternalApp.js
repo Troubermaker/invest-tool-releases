@@ -57,20 +57,20 @@ async function setEnabled(target, value) {
     await api.setUserPreference(key, !!value)
 }
 
-async function jumpTo(target, code) {
-    if (!code) return false
-    try {
-        const res = await api.externalJumpToStock(target, code)
-        if (res.ok && res.data?.ok) {
-            return true
-        }
+/**
+ * 触发联动跳转（fire-and-forget）。
+ * 不 await — 点击立即返回，让按钮感觉"瞬时响应"。
+ * 错误只在后台静默 push toast，不阻塞 UI。
+ */
+function jumpTo(target, code) {
+    if (!code) return
+    api.externalJumpToStock(target, code).then(res => {
+        if (res.ok && res.data?.ok) return
         const msg = res.data?.msg || res.error || '联动失败'
         pushError(`📡 ${target.toUpperCase()} 联动失败：${msg}`)
-        return false
-    } catch (e) {
+    }).catch(e => {
         pushError(`📡 联动异常：${e}`)
-        return false
-    }
+    })
 }
 
 export function useExternalApp() {
