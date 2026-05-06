@@ -967,8 +967,8 @@ onUnmounted(() => {
             </div>
         </div>
 
-        <!-- Volume / Sentiment -->
-        <div class="shrink-0 xl:pl-4 xl:border-l border-[#e5e5e5] basis-[320px] grow-[0.2] max-w-[440px] flex items-stretch">
+        <!-- Volume / Sentiment（< 640px 摸鱼态隐藏，省空间给指数+板块）-->
+        <div class="shrink-0 xl:pl-4 xl:border-l border-[#e5e5e5] basis-[320px] grow-[0.2] max-w-[440px] hidden compact:flex items-stretch">
             <div class="bg-white border border-[#e8e8e8] rounded-[4px] py-[4px] px-[10px] flex items-center gap-[10px] w-full h-full cursor-default">
                 <!-- Left: Turnover value -->
                 <div class="flex-[4] basis-0 min-w-0 flex flex-col justify-center border-r border-[#f0f0f0] pr-[12px]">
@@ -1013,11 +1013,11 @@ onUnmounted(() => {
         </div>
     </div>
 
-    <!-- MAIN CONTENT AREA -->
-    <div class="flex-1 flex overflow-hidden w-full bg-white z-0">
-      
-      <!-- Left Column: 精选板块 -->
-      <div class="w-[220px] bg-white border-r border-[#e5e5e5] flex flex-col flex-shrink-0 z-0 relative">
+    <!-- MAIN CONTENT AREA（< 640px 摸鱼态：板块在上、个股在下纵向堆叠）-->
+    <div class="flex-1 flex flex-col compact:flex-row overflow-hidden w-full bg-white z-0">
+
+      <!-- Left Column: 精选板块（窄屏时全宽 + 限高 ~40vh 留空间给下方个股）-->
+      <div class="w-full compact:w-[220px] max-h-[40vh] compact:max-h-none bg-white border-b compact:border-b-0 compact:border-r border-[#e5e5e5] flex flex-col flex-shrink-0 z-0 relative">
         <div class="h-[44px] bg-[#fff5f5] text-[#dc2626] border-b border-[#ffe5e5] flex items-center justify-between px-[12px] font-semibold text-[13px]">
           <span>精选板块</span>
           <div class="flex items-center gap-[6px]">

@@ -168,7 +168,7 @@ def main():
         height=win_h,
         x=x,
         y=y,
-        min_size=(1280, 720),
+        min_size=(800, 700),    # 「摸鱼模式」最小尺寸 —— 用户能拖到桌面边缘隐藏
         background_color='#fcfcfc',  # 纯净白灰浅色背景
     )
     
