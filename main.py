@@ -118,8 +118,98 @@ def setup_boss_key(window):
         except Exception as e2:
             print(f"[WARN] 默认老板键也注册失败: {e2}")
 
+# 单实例锁的全局句柄 —— 必须存在模块级，让 GC 不释放 Mutex（释放 = 锁失效）
+_SINGLE_INSTANCE_MUTEX = None
+
+
+def _ensure_single_instance():
+    """单实例锁：用 Windows 命名 Mutex 检测是否已有 invest_tool 在跑。
+
+    流程：
+      1. CreateMutexW 创建/打开同名 Mutex；GetLastError == ERROR_ALREADY_EXISTS 表示已有实例
+      2. 已有实例 → 通过窗口 title 找到 hwnd → 取消最小化/隐藏 → 拉到前台 → 闪烁标题栏
+      3. 自己 sys.exit(0)，让用户的双击点击操作"什么都没发生"，但已有窗口被激活提醒
+
+    返回 True = 这是首启实例（继续运行），False = 重复启动（调用方应退出）。
+    非 Windows 平台直接返 True（Mac/Linux 这类客诉很少见，先不管）。
+    """
+    if not sys.platform.startswith('win'):
+        return True
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
+
+    ERROR_ALREADY_EXISTS = 183
+
+    # Local\ 前缀：mutex 命名空间限定到当前用户会话，避免跨用户冲突
+    # 加版本号方便以后改协议时打破旧锁
+    mutex_name = "Local\\InvestTool_SingleInstance_Mutex_v1"
+
+    global _SINGLE_INSTANCE_MUTEX
+    _SINGLE_INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, mutex_name)
+    last_err = kernel32.GetLastError()
+
+    if last_err != ERROR_ALREADY_EXISTS:
+        return True   # 首启，正常继续
+
+    # ---- 重复启动：找到已有窗口、激活并闪烁提醒 ----
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.IsIconic.argtypes = [wintypes.HWND]
+    user32.IsIconic.restype = wintypes.BOOL
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+
+    SW_SHOW = 5
+    SW_RESTORE = 9
+
+    title = "量化复盘与盯盘终端"   # 跟下面 webview.create_window 的 title 保持一致
+    hwnd = user32.FindWindowW(None, title)
+    if hwnd:
+        # 1) 如果被托盘隐藏 / 最小化了，先恢复显示
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        else:
+            user32.ShowWindow(hwnd, SW_SHOW)
+        # 2) 拉到前台
+        user32.SetForegroundWindow(hwnd)
+        # 3) 闪烁标题栏 5 次（提示用户"我在这儿"）
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [
+                ('cbSize',    wintypes.UINT),
+                ('hwnd',      wintypes.HWND),
+                ('dwFlags',   wintypes.DWORD),
+                ('uCount',    wintypes.UINT),
+                ('dwTimeout', wintypes.DWORD),
+            ]
+        FLASHW_ALL       = 0x00000003   # 标题栏 + 任务栏图标都闪
+        FLASHW_TIMERNOFG = 0x0000000C   # 直到窗口获得前台焦点才停止闪烁
+        fwi = FLASHWINFO(
+            cbSize=ctypes.sizeof(FLASHWINFO),
+            hwnd=hwnd,
+            dwFlags=FLASHW_ALL | FLASHW_TIMERNOFG,
+            uCount=5,
+            dwTimeout=0,
+        )
+        try:
+            user32.FlashWindowEx(ctypes.byref(fwi))
+        except Exception:
+            pass   # 闪烁失败无关紧要，前台激活成功就够了
+
+    return False
+
+
 def main():
-    # Start the background data fetcher scheduling daemon 
+    # 单实例检测：发现已有 invest_tool 在跑就激活那个窗口、自己退出
+    if not _ensure_single_instance():
+        sys.exit(0)
+
+    # Start the background data fetcher scheduling daemon
     scheduler.start_background_daemon()
     
     api = Api()
