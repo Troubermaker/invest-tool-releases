@@ -299,7 +299,14 @@ SHA256:   {sha256}
     ok(f"发布说明：{dest.name}")
 
 
-# ---- Gitee Releases API（创建 release + 上传 zip）----
+# ---- Gitee Releases API（创建 release + 上传 zip + 修剪旧附件）----
+
+# Gitee 单仓库附件配额硬上限 1 GB（公开仓库），超了上传就 400。
+# 每次发版前自动删掉最旧的 release 附件，只保留最新 N 个版本。
+# 旧 release 实体（含 changelog）保留，只是没法下载老 zip 了——
+# 对一个 in-app updater 场景来说够用，要做版本回滚再说。
+KEEP_LAST_RELEASE_ATTACHMENTS = 3
+
 
 def _get_gitee_token():
     """优先环境变量 GITEE_TOKEN；fallback release_secret.py。"""
@@ -345,18 +352,32 @@ def upload_zip_to_gitee_release(version: str, zip_path: Path, sha256: str, relea
         err("update_config.GITEE_USER / RELEASE_REPO 未正确配置，跳过")
         return False
 
-    # 1. 先 query 这个 tag 是否已经存在 release（避免冲突）
+    # 1. 修剪旧 release 的附件，给新 zip 腾配额（exclude 当前版本，避免误删自己）
+    prune_old_release_attachments(
+        owner, repo, token,
+        keep_last=KEEP_LAST_RELEASE_ATTACHMENTS,
+        exclude_versions=[version],
+    )
+
+    # 2. 查 release 是否已存在
+    #    - 不存在：创建
+    #    - 存在但没 zip 附件（"孤儿 release"，比如上次上传到一半失败）：复用
+    #    - 存在且已有同名 zip：拒绝（避免覆盖出意外）
     existing = _gitee_get_release_by_tag(owner, repo, version, token)
     if existing:
-        warn(f"Gitee 上 v{version} release 已存在（id={existing.get('id')}），跳过创建")
-        warn(f"如要覆盖：先到网页删除该 release，再重跑 release.py --publish")
-        return False
-
-    # 2. 创建 release
-    release_id = _gitee_create_release(owner, repo, version, branch, release_notes, token)
-    if not release_id:
-        return False
-    ok(f"已创建 release v{version}（id={release_id}）")
+        release_id = existing.get('id')
+        attachments = _gitee_list_attachments(owner, repo, release_id, token)
+        same_name = next((a for a in attachments if a.get('name') == zip_path.name), None)
+        if same_name:
+            warn(f"v{version} 已挂同名附件 {zip_path.name}（id={same_name.get('id')}），跳过上传")
+            warn(f"如要重传：到网页删除该附件后重跑 release.py --publish")
+            return False
+        ok(f"复用已存在的 release v{version}（id={release_id}，无 zip 附件）")
+    else:
+        release_id = _gitee_create_release(owner, repo, version, branch, release_notes, token)
+        if not release_id:
+            return False
+        ok(f"已创建 release v{version}（id={release_id}）")
 
     # 3. 上传 zip 附件
     if not _gitee_upload_attachment(owner, repo, release_id, zip_path, token):
@@ -449,6 +470,129 @@ def _gitee_upload_attachment(owner, repo, release_id, file_path: Path, token):
     except Exception as e:
         err(f"上传附件网络异常: {e}")
         return False
+
+
+# ---- Gitee Releases 附件修剪（防 1GB 配额爆掉）----
+
+def _parse_version_tag(tag: str):
+    """'v0.2.20' → (0, 2, 20)；解析失败返 (-1,)，会被排到最后。"""
+    s = (tag or '').lstrip('vV').strip()
+    try:
+        return tuple(int(x) for x in s.split('.'))
+    except (ValueError, AttributeError):
+        return (-1,)
+
+
+def _gitee_list_all_releases(owner, repo, token, max_pages=10):
+    """分页拉所有 release（每页 50 上限）。返回 list[dict]。"""
+    out = []
+    for page in range(1, max_pages + 1):
+        url = (f"https://gitee.com/api/v5/repos/{owner}/{repo}/releases"
+               f"?per_page=50&page={page}&access_token={token}")
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                batch = _json.loads(resp.read())
+        except Exception as e:
+            warn(f"列 release 失败 page={page}: {e}")
+            break
+        if not batch:
+            break
+        out.extend(batch)
+        if len(batch) < 50:
+            break
+    return out
+
+
+def _gitee_list_attachments(owner, repo, release_id, token):
+    """列某个 release 的实际上传附件（含 id + size）。源码 archive 不在此列表里。"""
+    url = (f"https://gitee.com/api/v5/repos/{owner}/{repo}/releases/{release_id}"
+           f"/attach_files?access_token={token}")
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            return _json.loads(resp.read()) or []
+    except Exception as e:
+        warn(f"列 attach_files 失败 release_id={release_id}: {e}")
+        return []
+
+
+def _gitee_delete_attachment(owner, repo, release_id, attach_id, token):
+    """删一个 release 附件。成功返 True。"""
+    url = (f"https://gitee.com/api/v5/repos/{owner}/{repo}/releases/{release_id}"
+           f"/attach_files/{attach_id}?access_token={token}")
+    req = urllib.request.Request(url, method='DELETE')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status in (200, 204)
+    except urllib.error.HTTPError as e:
+        body_txt = e.read().decode('utf-8', errors='replace')[:200]
+        warn(f"删 attachment 失败 HTTP {e.code}: {body_txt}")
+        return False
+    except Exception as e:
+        warn(f"删 attachment 网络异常: {e}")
+        return False
+
+
+def prune_old_release_attachments(owner, repo, token, keep_last=3, exclude_versions=()):
+    """
+    修剪旧 release 的附件以释放配额。保留最新 keep_last 个 **有附件** 的 release。
+    exclude_versions 里的版本（一般是即将要发的新版）跳过、不参与计数也不删。
+
+    只删 attachments，不删 release 实体（changelog 仍可访问）。
+    返回 (deleted_count, freed_bytes)。
+    """
+    step(f"修剪旧 release 附件（保留最新 {keep_last} 个有附件版本）")
+
+    rels = _gitee_list_all_releases(owner, repo, token)
+    if not rels:
+        warn("没拿到 release 列表，跳过修剪")
+        return 0, 0
+
+    excl = {v.lstrip('vV').strip() for v in exclude_versions}
+
+    enriched = []
+    for r in rels:
+        tag = r.get('tag_name', '') or ''
+        if tag.lstrip('vV').strip() in excl:
+            continue
+        rid = r.get('id')
+        if not rid:
+            continue
+        atts = _gitee_list_attachments(owner, repo, rid, token)
+        if atts:
+            enriched.append({
+                'tag':         tag,
+                'release_id':  rid,
+                'version_key': _parse_version_tag(tag),
+                'attachments': atts,
+            })
+
+    if not enriched:
+        ok("仓库目前没有可修剪的附件")
+        return 0, 0
+
+    enriched.sort(key=lambda x: x['version_key'], reverse=True)
+
+    if len(enriched) <= keep_last:
+        ok(f"无需修剪（{len(enriched)} 个有附件 release，全在保留范围内）")
+        return 0, 0
+
+    to_prune = enriched[keep_last:]
+    deleted = 0
+    freed = 0
+    for rel in to_prune:
+        for a in rel['attachments']:
+            aid = a.get('id')
+            name = a.get('name', '?')
+            size = int(a.get('size') or 0)
+            if not aid:
+                continue
+            if _gitee_delete_attachment(owner, repo, rel['release_id'], aid, token):
+                deleted += 1
+                freed += size
+                dim(f"  删 {rel['tag']}/{name} ({size / 1024 / 1024:.1f} MB)")
+
+    ok(f"修剪完成：删了 {deleted} 个附件，释放 {freed / 1024 / 1024:.1f} MB")
+    return deleted, freed
 
 
 # ---- Git tag ----
@@ -615,18 +759,29 @@ def main():
     latest_json_path = RELEASE_DIR / 'latest.json'
     write_latest_json(version, zip_name, zip_path, digest, latest_json_path)
 
-    # 8. 可选：自动 push latest.json + 上传 zip 到 Gitee Releases
+    # 8. 可选：上传 zip 到 Gitee Releases，**成功后**才 push latest.json
+    #
+    # 顺序很关键：latest.json 是客户端 in-app updater 唯一信源，里面的 download_url
+    # 在 zip 真正传上去之前指向一个不存在的资源。如果先 push manifest 再传 zip，
+    # 万一上传那一步失败（token 过期 / 体积超限 / 网络问题），客户端立刻就能看到
+    # 「更新失败 HTTP 404」——血淋淋的教训。
+    # 改成"先传 zip，确认 OK 再 push manifest"后，最坏情况是 zip 传上去但 manifest
+    # 没 push（用户依然停留在旧版本，没用户感知错误），下次重跑 release.py --publish
+    # 就能补救。
     publish_ok = True
     upload_ok = False
     if args.publish:
-        publish_ok = publish_manifest_to_release_repo(version, latest_json_path)
-        # 上传 zip 是独立步骤——可能 publish 成功但 upload 失败，或 upload 跳过
         upload_ok = upload_zip_to_gitee_release(
             version=version,
             zip_path=zip_path,
             sha256=digest,
             release_notes=collect_recent_commits(),
         )
+        if upload_ok:
+            publish_ok = publish_manifest_to_release_repo(version, latest_json_path)
+        else:
+            publish_ok = False
+            warn("zip 上传失败 → 故意跳过 latest.json push（避免客户端拿到指向 404 的 manifest）")
 
     # 9. 可选 git tag
     if args.git_tag:
@@ -642,22 +797,24 @@ def main():
     print(f"  • latest.json")
 
     if args.publish:
-        manifest_status = '✓' if publish_ok else '✗'
         upload_status   = '✓' if upload_ok   else '✗'
-        print(f"\n{_C.BOLD}{_C.G}发布动作：{_C.END}")
-        print(f"  {manifest_status} latest.json push 到公开仓库")
+        manifest_status = '✓' if publish_ok else '✗'
+        print(f"\n{_C.BOLD}{_C.G}发布动作（先传 zip → 再 push manifest）：{_C.END}")
         print(f"  {upload_status} zip 上传到 Gitee Releases（API）")
+        print(f"  {manifest_status} latest.json push 到公开仓库")
 
-        if publish_ok and upload_ok:
+        if upload_ok and publish_ok:
             print(f"\n{_C.BOLD}{_C.G}🎉 全自动发布完成！用户 app 下次启动即检测到 v{version}{_C.END}")
-        elif publish_ok and not upload_ok:
+        elif not upload_ok:
             uc = __import__('update_config')
-            print(f"\n{_C.BOLD}{_C.Y}zip 没自动传上去，请手动补传：{_C.END}")
+            print(f"\n{_C.BOLD}{_C.Y}zip 没传上去 → manifest 也没 push（客户端不会看到 404）。请手动补传 zip：{_C.END}")
             print(f"  打开 https://gitee.com/{uc.GITEE_USER}/{uc.RELEASE_REPO}/releases")
-            print(f"  → 创建发布版本 → tag v{version} → 上传 {zip_name}")
+            print(f"  → 找到/创建 v{version} 发布版本 → 上传 {zip_name}")
+            print(f"  → 然后到公开仓库本地 clone 把 release/latest.json 复制过去 commit + push")
             print(f"  （或配置 release_secret.py 启用自动上传，参考 release_secret.py.example）")
         else:
-            print(f"\n{_C.R}⚠ --publish 部分失败，详见上方错误日志{_C.END}")
+            print(f"\n{_C.BOLD}{_C.Y}zip 已上传成功，但 latest.json push 失败 —— 用户暂时看不到新版（也不会报错）。{_C.END}")
+            print(f"  手动补救：到公开仓库本地 clone 把 release/latest.json 复制过去 commit + push")
     else:
         print(f"\n{_C.BOLD}{_C.Y}手动发布步骤（或下次加 --publish 一键自动）：{_C.END}")
         print(f"  1. 公开仓库 push latest.json：")

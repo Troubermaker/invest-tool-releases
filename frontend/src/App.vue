@@ -16,7 +16,6 @@ import Settings from './views/Settings.vue'
 import { api } from './api/client'
 import { pushWarn } from './composables/useNotifications'
 import { useUserRole } from './composables/useUserRole'
-import { useExternalApp } from './composables/useExternalApp'
 
 const currentTab = ref('market')
 const isAIDrawerOpen = ref(false)
@@ -34,11 +33,9 @@ onMounted(async () => {
 })
 
 // 已激活后拉一次 admin 状态（未激活时不调，避免门禁拦截）
-const { init: initExternalApp } = useExternalApp()
 watch(isActivated, (v) => {
     if (v === true) {
         refreshUserRole()
-        initExternalApp()
     }
 }, { immediate: true })
 

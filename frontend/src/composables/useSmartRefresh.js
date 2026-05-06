@@ -49,13 +49,15 @@ const MODE_MULTIPLIER = {
 }
 
 // ---------------- 市场会话（A 股交易时段判定）----------------
-// 'morning'      9:30 - 11:30 上半场
-// 'lunch'        11:30 - 13:00 午休
-// 'afternoon'    13:00 - 15:00 下半场
-// 'after-close'  15:00 - 24:00 盘后
-// 'before-open'  0:00 - 9:30   盘前
-// 'weekend'      周六/周日全天
-// 'holiday'      工作日里的法定节假日（如清明 / 国庆 / 春节调休等）
+// 'before-open'    0:00  - 9:15  盘前
+// 'auction'        9:15  - 9:25  集合竞价（行情有变动 → 仍刷新）
+// 'auction-quiet'  9:25  - 9:30  竞价静默期（撮合期，行情冻结 → 暂停）
+// 'morning'        9:30  - 11:30 上半场
+// 'lunch'          11:30 - 13:00 午休（暂停）
+// 'afternoon'      13:00 - 15:00 下半场
+// 'after-close'    15:00 - 24:00 盘后（暂停）
+// 'weekend'        周六/周日全天
+// 'holiday'        工作日里的法定节假日（如清明 / 国庆 / 春节调休等）
 //
 // 节假日靠 backend 的 chinese_calendar 给的交易日清单（getTradingDays），
 // 首次启动时异步拉一次，挂在 tradingDaysSet。在 set 加载完成前，
@@ -97,7 +99,9 @@ export const marketSession = computed(() => {
     }
 
     const m = d.getHours() * 60 + d.getMinutes()
-    if (m < 9 * 60 + 30)         return 'before-open'
+    if (m < 9 * 60 + 15)         return 'before-open'
+    if (m < 9 * 60 + 25)         return 'auction'         // 集合竞价：报价持续变化，要刷
+    if (m < 9 * 60 + 30)         return 'auction-quiet'   // 撮合期：行情冻结，停 5 分钟
     if (m < 11 * 60 + 30)        return 'morning'
     if (m < 13 * 60)             return 'lunch'
     if (m <= 15 * 60)            return 'afternoon'
@@ -105,7 +109,9 @@ export const marketSession = computed(() => {
 })
 
 export const isMarketOpen = computed(() =>
-    marketSession.value === 'morning' || marketSession.value === 'afternoon'
+    marketSession.value === 'morning'
+    || marketSession.value === 'afternoon'
+    || marketSession.value === 'auction'    // 集合竞价也算"开盘"，照常拉行情
 )
 
 // ---------------- 全局监听器只挂一次 ----------------
@@ -153,7 +159,10 @@ function ensureTradingDaysLoaded() {
 /**
  * @param {Function} fn API 调用函数，可以返回 {ok, data, error} 信封或 void
  * @param {Object} opts
- *   - baseInterval:        基础间隔 ms
+ *   - baseInterval:        基础间隔 ms（active 态用）
+ *   - hiddenInterval:      可选，窗口隐藏时的固定间隔 ms（含 deep-hidden）。
+ *                           传了就**覆盖**全局 6×/18× 降速倍率。用于高频接口（如 3s 行情）
+ *                           想避免最小化时仍按 base 倍数高频打接口的场景。
  *   - prefKey:             可选，user_preferences key；值是秒数（0 = 暂停）
  *   - ignoreMarketHours:   true = 24x7 刷新（用于快讯等盘外也变的数据）；默认 false
  *   - snapshotKey:         可选，localStorage 快照 key —— mount 时先用上次的数据
@@ -164,6 +173,7 @@ function ensureTradingDaysLoaded() {
  */
 export function useSmartRefresh(fn, {
     baseInterval = 30_000,
+    hiddenInterval = null,
     prefKey = null,
     ignoreMarketHours = false,
     snapshotKey = null,
@@ -223,11 +233,19 @@ export function useSmartRefresh(fn, {
         return true
     }
 
+    // 算当前应该用的实际间隔（ms）。考虑 hiddenInterval 覆盖。
+    function effectiveIntervalMs() {
+        if (refreshMode.value === 'active') return currentIntervalMs.value
+        // 隐藏态：传了 hiddenInterval 就用它，否则按全局倍率降速
+        if (hiddenInterval != null && hiddenInterval > 0) return hiddenInterval
+        const multiplier = MODE_MULTIPLIER[refreshMode.value] || 1
+        return currentIntervalMs.value * multiplier
+    }
+
     function reschedule() {
         if (timer) { clearInterval(timer); timer = null }
         if (!shouldAutoRefresh()) return
-        const multiplier = MODE_MULTIPLIER[refreshMode.value] || 1
-        timer = setInterval(run, currentIntervalMs.value * multiplier)
+        timer = setInterval(run, effectiveIntervalMs())
     }
 
     /**
@@ -251,7 +269,7 @@ export function useSmartRefresh(fn, {
         if (currentIntervalMs.value <= 0) return -1
         if (!ignoreMarketHours && !isMarketOpen.value) return -2
         if (!lastRefreshAt.value) return null
-        const interval = currentIntervalMs.value * (MODE_MULTIPLIER[refreshMode.value] || 1)
+        const interval = effectiveIntervalMs()
         const remainingMs = (lastRefreshAt.value + interval) - now.value
         return Math.max(0, Math.ceil(remainingMs / 1000))
     })
@@ -297,7 +315,7 @@ export function useSmartRefresh(fn, {
     const watchdog = setInterval(() => {
         if (!shouldAutoRefresh()) return
         if (!lastRefreshAt.value) return
-        const expected = currentIntervalMs.value * (MODE_MULTIPLIER[refreshMode.value] || 1)
+        const expected = effectiveIntervalMs()
         const elapsed = Date.now() - lastRefreshAt.value
         if (elapsed > expected * 2) {
             // 久未刷新，强制跑一次 + 重排定时器

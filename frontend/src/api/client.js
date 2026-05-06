@@ -190,11 +190,6 @@ export const api = {
   /** 批量入库：把识别出的 [{code, name}] 批量加入指定分组 */
   importBatchAdd: (groupId, stocks) => call('import_batch_add', groupId, stocks || []),
 
-  /** 联动外部软件：探测运行状态 */
-  externalAppStatus: () => call('external_app_status'),
-  /** 联动外部软件：跳转到指定股票。target='tdx'|'ths' */
-  externalJumpToStock: (target, code) => call('external_jump_to_stock', target, code),
-
   /** 股票搜索（A 股，支持代码/中文名/拼音）*/
   searchStocks: (query, limit) => call('search_stocks', query, limit ?? 20),
   /** 从分组移除股票 */

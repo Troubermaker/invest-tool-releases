@@ -4,8 +4,11 @@ import draggable from 'vuedraggable'
 import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
 import { openStockChart } from '../composables/useStockChart'
-import { useExternalApp } from '../composables/useExternalApp'
-const ext = useExternalApp()
+import {
+    QUOTE_INTERVAL_ACTIVE,
+    QUOTE_INTERVAL_HIDDEN,
+    SPARKLINE_INTERVAL_ACTIVE,
+} from '../config/refreshIntervals'
 
 // ---------------- 账户 / 持仓状态 ----------------
 const SUMMARY_ID = 'summary'  // 选中汇总 tab 时的哨兵值（真实账户 id 都是数字）
@@ -1007,9 +1010,9 @@ watch(positions, () => {
     refreshSparklines()
 }, { deep: false })
 
-// 智能刷新：行情基础 10s，sparkline 60s（变化慢，且每只独立缓存）
-useSmartRefresh(refreshQuotes,     { baseInterval: 10_000, immediate: false })
-useSmartRefresh(refreshSparklines, { baseInterval: 60_000, immediate: false })
+// 智能刷新：间隔取自 config/refreshIntervals.js（开发期单点可调）
+useSmartRefresh(refreshQuotes,     { baseInterval: QUOTE_INTERVAL_ACTIVE,     hiddenInterval: QUOTE_INTERVAL_HIDDEN, immediate: false })
+useSmartRefresh(refreshSparklines, { baseInterval: SPARKLINE_INTERVAL_ACTIVE, immediate: false })
 
 onMounted(async () => {
     await loadAccounts()
@@ -1301,27 +1304,7 @@ onMounted(async () => {
 
                         <!-- 股票名称 + 代码 -->
                         <td class="px-[12px] py-[8px] align-middle">
-                            <div class="flex items-center gap-[4px] min-w-0">
-                                <div class="text-[14px] font-bold text-[#111] leading-tight truncate flex-1">{{ p.name || quotes[p.code]?.name || '—' }}</div>
-                                <button v-if="ext.showTdxButton.value"
-                                        @click.stop="ext.jumpTo('tdx', p.code)"
-                                        title="在通达信打开"
-                                        class="shrink-0 text-[11px] font-semibold px-[8px] py-[3px] rounded-[4px]
-                                               text-[#0891b2] bg-[#ecfeff] hover:bg-[#a5f3fc] hover:text-[#0e7490]
-                                               active:scale-95 active:bg-[#67e8f9]
-                                               border border-[#a5f3fc] transition-all duration-100 shadow-sm">
-                                    📡 TDX
-                                </button>
-                                <button v-if="ext.showThsButton.value"
-                                        @click.stop="ext.jumpTo('ths', p.code)"
-                                        title="在同花顺打开"
-                                        class="shrink-0 text-[11px] font-semibold px-[8px] py-[3px] rounded-[4px]
-                                               text-[#7c3aed] bg-[#f5f3ff] hover:bg-[#ddd6fe] hover:text-[#5b21b6]
-                                               active:scale-95 active:bg-[#c4b5fd]
-                                               border border-[#ddd6fe] transition-all duration-100 shadow-sm">
-                                    📡 THS
-                                </button>
-                            </div>
+                            <div class="text-[14px] font-bold text-[#111] leading-tight truncate">{{ p.name || quotes[p.code]?.name || '—' }}</div>
                             <div class="text-[11px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums">
                                 {{ marketPrefix(p.code) }}{{ p.code }}
                             </div>

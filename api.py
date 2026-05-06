@@ -505,23 +505,6 @@ class Api:
         from services import import_service
         return import_service.parse_text(text or '')
 
-    # ---------- 联动外部行情软件（通达信 / 同花顺）----------
-    @api_endpoint
-    def external_app_status(self):
-        """探测 TDX/THS 是否运行，前端用于 Settings 状态指示 + 按钮 enable/disable。"""
-        from services import external_app_service
-        return external_app_service.app_status()
-
-    @api_endpoint
-    def external_jump_to_stock(self, target, code):
-        """
-        把外部行情软件切到指定股票。
-        target: 'tdx' / 'ths'
-        code:   6 位代码
-        """
-        from services import external_app_service
-        return external_app_service.jump_to_stock(target, code)
-
     @api_endpoint
     def import_batch_add(self, group_id, stocks):
         """
