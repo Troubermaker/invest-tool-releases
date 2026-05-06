@@ -190,6 +190,18 @@ export const api = {
   /** 批量入库：把识别出的 [{code, name}] 批量加入指定分组 */
   importBatchAdd: (groupId, stocks) => call('import_batch_add', groupId, stocks || []),
 
+  /** ---- 候选池（找发车 / 找候选 收藏后持续追踪买点）---- */
+  /** 列出全部候选池条目（按入选时间倒序）*/
+  listCandidatePicks: () => call('list_candidate_picks'),
+  /** 把扫描结果存入候选池。payload 见 api.py 注释 */
+  addCandidatePick: (payload) => call('add_candidate_pick', payload || {}),
+  /** 从候选池删一只票 */
+  removeCandidatePick: (code) => call('remove_candidate_pick', code),
+  /** 改备注 */
+  updateCandidateNote: (code, note) => call('update_candidate_note', code, note || ''),
+  /** 清空整个候选池（危险）*/
+  clearCandidatePicks: () => call('clear_candidate_picks'),
+
   /** 股票搜索（A 股，支持代码/中文名/拼音）*/
   searchStocks: (query, limit) => call('search_stocks', query, limit ?? 20),
   /** 从分组移除股票 */

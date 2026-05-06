@@ -13,9 +13,12 @@ import { addToWatchlistState, closeAddToWatchlist } from '../composables/useAddT
 import { pushSuccess, pushError } from '../composables/useNotifications'
 
 const visible = computed(() => addToWatchlistState.value.visible)
+const mode    = computed(() => addToWatchlistState.value.mode || 'single')
 const code    = computed(() => addToWatchlistState.value.code)
 const name    = computed(() => addToWatchlistState.value.name)
 const price   = computed(() => addToWatchlistState.value.price)
+const stocks  = computed(() => addToWatchlistState.value.stocks || [])
+const isBatch = computed(() => mode.value === 'batch')
 
 const groups = ref([])
 const loading = ref(false)
@@ -37,12 +40,31 @@ async function pickGroup(g) {
     if (adding.value) return
     adding.value = g.id
     try {
-        const res = await api.addWatchlistStock(g.id, code.value, name.value, price.value, '')
-        if (res.ok) {
-            pushSuccess(`已添加 ${name.value || code.value} 到「${g.name}」`)
-            closeAddToWatchlist()
+        if (isBatch.value) {
+            // 批量：调用 importBatchAdd（自动跳过已存在的 code）
+            const payload = stocks.value.map(s => ({ code: s.code, name: s.name }))
+            const res = await api.importBatchAdd(g.id, payload)
+            if (res.ok) {
+                const d = res.data || {}
+                const added = d.added ?? 0
+                const skipped = d.skipped_existing ?? 0
+                const failed = d.failed ?? 0
+                let msg = `已添加 ${added} 只到「${g.name}」`
+                if (skipped) msg += `，${skipped} 只已存在跳过`
+                if (failed)  msg += `，${failed} 只失败`
+                pushSuccess(msg)
+                closeAddToWatchlist()
+            } else {
+                pushError(res.error || '批量添加失败')
+            }
         } else {
-            pushError(res.error || '添加失败')
+            const res = await api.addWatchlistStock(g.id, code.value, name.value, price.value, '')
+            if (res.ok) {
+                pushSuccess(`已添加 ${name.value || code.value} 到「${g.name}」`)
+                closeAddToWatchlist()
+            } else {
+                pushError(res.error || '添加失败')
+            }
         }
     } catch (e) {
         pushError('添加异常：' + e.message)
@@ -69,9 +91,18 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                         max-h-[70vh] overflow-hidden flex flex-col">
                 <!-- Header -->
                 <div class="px-[16px] py-[10px] border-b border-[#f0f0f0] flex items-baseline gap-[8px]">
-                    <span class="text-[14px] font-bold text-[#111]">添加到自选</span>
-                    <span class="text-[11px] text-[#94a3b8] font-mono tabular-nums">{{ code }}</span>
-                    <span class="text-[12px] text-[#666] truncate">{{ name }}</span>
+                    <template v-if="isBatch">
+                        <span class="text-[14px] font-bold text-[#111]">批量添加到自选</span>
+                        <span class="text-[12px] text-[#dc2626] font-bold tabular-nums">{{ stocks.length }} 只</span>
+                        <span class="text-[11px] text-[#888] truncate">
+                            {{ stocks.slice(0, 3).map(s => s.name || s.code).join('、') }}{{ stocks.length > 3 ? ' 等' : '' }}
+                        </span>
+                    </template>
+                    <template v-else>
+                        <span class="text-[14px] font-bold text-[#111]">添加到自选</span>
+                        <span class="text-[11px] text-[#94a3b8] font-mono tabular-nums">{{ code }}</span>
+                        <span class="text-[12px] text-[#666] truncate">{{ name }}</span>
+                    </template>
                     <button @click="closeAddToWatchlist"
                             class="ml-auto text-[14px] text-[#888] hover:text-[#dc2626] w-[22px] h-[22px] rounded transition flex items-center justify-center">
                         ✕

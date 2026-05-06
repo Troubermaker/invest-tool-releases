@@ -1104,17 +1104,19 @@ onUnmounted(() => {
             </div>
             
             <div class="flex-1 w-full bg-white overflow-auto custom-scrollbar relative">
-                <table class="w-full text-left border-collapse whitespace-nowrap min-w-max">
+                <!-- 收紧列宽 + padding，让 8 列在 1380×800（含 125% DPI）下完整显示，
+                     去掉 min-w-max 避免内容偶尔溢出导致整张表横向滚动 -->
+                <table class="w-full text-left border-collapse whitespace-nowrap">
                     <thead class="sticky top-0 bg-[#fafafa] shadow-[0_1px_0_#eeeeee] z-10 text-[12px] text-[#888]">
                         <tr>
-                            <th class="px-[12px] py-[10px] font-normal w-[70px]">代码</th>
-                            <th class="px-[12px] py-[10px] font-normal w-[220px]">名称</th>
-                            <th class="px-[10px] py-[10px] font-normal text-right">最新价</th>
-                            <th class="px-[10px] py-[10px] font-normal text-right">涨幅</th>
-                            <th class="px-[10px] py-[10px] font-normal text-right">成交额</th>
-                            <th class="px-[10px] py-[10px] font-normal text-right">主力买</th>
-                            <th class="px-[10px] py-[10px] font-normal text-right">主力卖</th>
-                            <th class="px-[12px] py-[10px] font-normal text-right">主力净额</th>
+                            <th class="px-[8px] py-[10px] font-normal w-[64px]">代码</th>
+                            <th class="px-[8px] py-[10px] font-normal w-[170px]">名称</th>
+                            <th class="px-[6px] py-[10px] font-normal text-right">最新价</th>
+                            <th class="px-[6px] py-[10px] font-normal text-right">涨幅</th>
+                            <th class="px-[6px] py-[10px] font-normal text-right">成交额</th>
+                            <th class="px-[6px] py-[10px] font-normal text-right">主力买</th>
+                            <th class="px-[6px] py-[10px] font-normal text-right">主力卖</th>
+                            <th class="px-[8px] py-[10px] font-normal text-right">主力净额</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1125,7 +1127,7 @@ onUnmounted(() => {
                             :title="'双击查看 K 线 · 左侧列表可切换'"
                             class="border-b border-[#f5f5f5] hover:bg-[#f2f8fc] transition-colors group cursor-pointer"
                         >
-                            <td class="px-[12px] py-[10px] text-[12px] text-[#666] font-mono align-top">
+                            <td class="px-[8px] py-[10px] text-[12px] text-[#666] font-mono align-top">
                                 <div class="flex items-center gap-[4px]">
                                     <span>{{ stock.code }}</span>
                                     <button @click.stop="openAddToWatchlist(stock.code, stock.name, stock.price)"
@@ -1134,7 +1136,7 @@ onUnmounted(() => {
                                             title="加入自选">+</button>
                                 </div>
                             </td>
-                            <td class="px-[12px] py-[10px] align-top">
+                            <td class="px-[8px] py-[10px] align-top">
                                 <div class="flex items-center gap-[6px] flex-wrap">
                                     <svg v-if="stock.isLimitUp"
                                          class="w-[14px] h-[14px] shrink-0 text-[#ea580c] drop-shadow-[0_0_3px_rgba(234,88,12,0.45)]"
@@ -1162,12 +1164,12 @@ onUnmounted(() => {
                                     <span v-if="stock.themesAll" class="text-[11px] text-[#999] truncate">{{ stock.themesAll }}</span>
                                 </div>
                             </td>
-                            <td class="px-[10px] py-[10px] text-[14px] font-bold text-right align-top tabular-nums" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.price }}</td>
-                            <td class="px-[10px] py-[10px] text-[13px] font-bold text-right align-top tabular-nums" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.change }}</td>
-                            <td class="px-[10px] py-[10px] text-[12px] text-[#475569] font-medium text-right align-top tabular-nums">{{ stock.turnover }}</td>
-                            <td class="px-[10px] py-[10px] text-[12px] text-[#475569] font-medium text-right align-top tabular-nums">{{ stock.mainBuy }}</td>
-                            <td class="px-[10px] py-[10px] text-[12px] text-[#475569] font-medium text-right align-top tabular-nums">{{ stock.mainSell }}</td>
-                            <td class="px-[12px] py-[10px] text-[13px] font-bold text-right align-top tabular-nums" :class="stock.mainNetUp ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.mainNet }}</td>
+                            <td class="px-[6px] py-[10px] text-[14px] font-bold text-right align-top tabular-nums" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.price }}</td>
+                            <td class="px-[6px] py-[10px] text-[13px] font-bold text-right align-top tabular-nums" :class="stock.up ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.change }}</td>
+                            <td class="px-[6px] py-[10px] text-[12px] text-[#475569] font-medium text-right align-top tabular-nums">{{ stock.turnover }}</td>
+                            <td class="px-[6px] py-[10px] text-[12px] text-[#475569] font-medium text-right align-top tabular-nums">{{ stock.mainBuy }}</td>
+                            <td class="px-[6px] py-[10px] text-[12px] text-[#475569] font-medium text-right align-top tabular-nums">{{ stock.mainSell }}</td>
+                            <td class="px-[8px] py-[10px] text-[13px] font-bold text-right align-top tabular-nums" :class="stock.mainNetUp ? 'text-[#dc2626]' : 'text-[#059669]'">{{ stock.mainNet }}</td>
                         </tr>
                         <tr v-if="sectorStocksLoading && !sectorStocks.length">
                             <td colspan="8" class="px-[20px] py-[60px] text-center text-[#aaa] text-[13px]">

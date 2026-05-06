@@ -9,8 +9,11 @@
 import { ref, computed, watch, onUnmounted, onMounted } from 'vue'
 import { detectThreeStageLaunch, gradeFreshSignal } from '../composables/useTechIndicators'
 import { openStockChart } from '../composables/useStockChart'
+import { openAddToWatchlist, openAddToWatchlistBatch } from '../composables/useAddToWatchlist'
 import { useStockScanner } from '../composables/useStockScanner'
 import { useMarketEnv } from '../composables/useMarketEnv'
+import { api } from '../api/client'
+import { pushSuccess, pushError } from '../composables/useNotifications'
 
 const props = defineProps({
     open:     { type: Boolean, default: false },
@@ -64,6 +67,8 @@ function gradeStyle(g) {
 
 async function startScan() {
     if (scanning.value) return
+    savedCodes.value = new Set()        // 每次扫描独立 session
+    selectedCodes.value = new Set()
     // 等大盘环境拿到再开扫，这样每只票评级都能用上 envScore
     const envSnapshot = await refreshMarketEnv().catch(() => null)
     await scanner.scan(props.stocks, async (stock, klines) => {
@@ -90,6 +95,126 @@ async function startScan() {
 function openInDrawer(r) {
     const list = sortedResults.value.map(x => ({ code: x.code, name: x.name }))
     openStockChart(r.code, r.name, list)
+}
+
+// ---------------- 候选池收藏 ----------------
+// 找发车扫出的是 Stage 3（已突破）的票，存进候选池后状态会被推断为「已突破」
+// 用户在候选池就能持续追踪：是涨上去 / 假突破回落 / 还是回踩黄金买点
+const savedCodes = ref(new Set())
+
+async function saveToCandidatePool(r, e) {
+    e?.stopPropagation()
+    if (savedCodes.value.has(r.code)) return
+    try {
+        const res = await api.addCandidatePick({
+            code:               r.code,
+            name:               r.name,
+            stage:              r.event?.currentStage ?? 3,
+            save_price:         r.lastPrice,
+            break_level:        r.event?.s1Upper ?? null,
+            golden_price:       r.event?.goldenBuyPrice ?? null,
+            s1_lower:           r.event?.s1Lower ?? null,
+            consolidation_bars: null,
+            source:             '三维启动找发车',
+        })
+        if (res.ok) {
+            savedCodes.value = new Set([...savedCodes.value, r.code])
+            pushSuccess(`已收藏 ${r.name}（${r.code}）→ 候选池`)
+        } else {
+            pushError(res.error || '收藏失败')
+        }
+    } catch (err) {
+        pushError(`收藏失败：${err}`)
+    }
+}
+
+function addToWatch(r, e) {
+    e?.stopPropagation()
+    openAddToWatchlist(r.code, r.name, r.lastPrice)
+}
+
+// ---------------- 批量选择 ----------------
+const selectedCodes = ref(new Set())
+
+function toggleRow(code, e) {
+    e?.stopPropagation()
+    const next = new Set(selectedCodes.value)
+    if (next.has(code)) next.delete(code)
+    else next.add(code)
+    selectedCodes.value = next
+}
+
+const allVisibleSelected = computed(() => {
+    if (!sortedResults.value.length) return false
+    return sortedResults.value.every(r => selectedCodes.value.has(r.code))
+})
+
+function toggleAll() {
+    if (allVisibleSelected.value) {
+        const next = new Set(selectedCodes.value)
+        for (const r of sortedResults.value) next.delete(r.code)
+        selectedCodes.value = next
+    } else {
+        const next = new Set(selectedCodes.value)
+        for (const r of sortedResults.value) next.add(r.code)
+        selectedCodes.value = next
+    }
+}
+
+const batchProcessing = ref(false)
+
+async function batchSaveToCandidatePool() {
+    if (batchProcessing.value || !selectedCodes.value.size) return
+    const targets = sortedResults.value.filter(
+        r => selectedCodes.value.has(r.code) && !savedCodes.value.has(r.code),
+    )
+    if (!targets.length) {
+        pushSuccess('选中的票都已经在候选池里了')
+        return
+    }
+    batchProcessing.value = true
+    let okCount = 0
+    let failCount = 0
+    try {
+        // 串行：避免撞 SQLite 单写锁 + 控制 EM 节奏
+        for (const r of targets) {
+            try {
+                const res = await api.addCandidatePick({
+                    code:               r.code,
+                    name:               r.name,
+                    stage:              r.event?.currentStage ?? 3,
+                    save_price:         r.lastPrice,
+                    break_level:        r.event?.s1Upper ?? null,
+                    golden_price:       r.event?.goldenBuyPrice ?? null,
+                    s1_lower:           r.event?.s1Lower ?? null,
+                    consolidation_bars: null,
+                    source:             '三维启动找发车',
+                })
+                if (res.ok) {
+                    okCount++
+                    savedCodes.value = new Set([...savedCodes.value, r.code])
+                } else {
+                    failCount++
+                }
+            } catch {
+                failCount++
+            }
+        }
+        let msg = `已批量收藏 ${okCount} 只到候选池`
+        if (failCount) msg += `，${failCount} 只失败`
+        pushSuccess(msg)
+    } finally {
+        batchProcessing.value = false
+    }
+}
+
+function batchAddToWatchlist() {
+    if (!selectedCodes.value.size) return
+    const targets = sortedResults.value
+        .filter(r => selectedCodes.value.has(r.code))
+        .map(r => ({ code: r.code, name: r.name, price: r.lastPrice }))
+    if (!targets.length) return
+    openAddToWatchlistBatch(targets)
 }
 
 function fmtPrice(v) { return v == null ? '—' : (+v).toFixed(2) }
@@ -229,9 +354,47 @@ onUnmounted(() => {
                         </div>
                     </div>
 
-                    <table v-else class="w-full text-left border-collapse text-[12px]">
+                    <!-- 批量操作工具栏（选中 ≥1 只时高亮）-->
+                    <div v-else-if="sortedResults.length"
+                         class="px-[12px] py-[6px] border-b border-[#f0f0f0] bg-[#fafafa] flex items-center gap-[10px] text-[11px]">
+                        <span class="text-[#666]">
+                            已选
+                            <span class="font-bold tabular-nums" :class="selectedCodes.size ? 'text-[#dc2626]' : 'text-[#999]'">
+                                {{ selectedCodes.size }}
+                            </span>
+                            / {{ sortedResults.length }}
+                        </span>
+                        <button @click="batchSaveToCandidatePool"
+                                :disabled="!selectedCodes.size || batchProcessing"
+                                class="px-[10px] py-[3px] rounded-[4px] border transition
+                                       disabled:opacity-50 disabled:cursor-not-allowed"
+                                :class="selectedCodes.size && !batchProcessing
+                                    ? 'bg-[#fef3c7] text-[#b45309] border-[#fde68a] hover:bg-[#fde68a] font-semibold'
+                                    : 'bg-white text-[#999] border-[#e5e7eb]'">
+                            ★ 批量收藏到候选池
+                        </button>
+                        <button @click="batchAddToWatchlist"
+                                :disabled="!selectedCodes.size"
+                                class="px-[10px] py-[3px] rounded-[4px] border transition
+                                       disabled:opacity-50 disabled:cursor-not-allowed"
+                                :class="selectedCodes.size
+                                    ? 'bg-[#fee2e2] text-[#991b1b] border-[#fecaca] hover:bg-[#fecaca] font-semibold'
+                                    : 'bg-white text-[#999] border-[#e5e7eb]'">
+                            + 批量加自选
+                        </button>
+                        <span v-if="batchProcessing" class="text-[#dc2626] font-semibold animate-pulse">处理中...</span>
+                    </div>
+
+                    <table v-if="sortedResults.length" class="w-full text-left border-collapse text-[12px]">
                         <thead class="sticky top-0 bg-[#fafafa] shadow-[0_1px_0_#eeeeee] text-[11px] text-[#888] z-10">
                             <tr>
+                                <th class="px-[8px] py-[8px] font-normal text-center w-[32px]">
+                                    <input type="checkbox"
+                                           :checked="allVisibleSelected"
+                                           @change="toggleAll"
+                                           :title="allVisibleSelected ? '取消全选' : '全选当前结果'"
+                                           class="w-[13px] h-[13px] accent-[#dc2626] cursor-pointer">
+                                </th>
                                 <th class="px-[12px] py-[8px] font-normal w-[60px]">评级</th>
                                 <th class="px-[12px] py-[8px] font-normal w-[140px]">股票</th>
                                 <th class="px-[8px]  py-[8px] font-normal text-right w-[70px]">现价</th>
@@ -241,12 +404,21 @@ onUnmounted(() => {
                                 <th class="px-[8px]  py-[8px] font-normal text-center w-[90px]">突破日</th>
                                 <th class="px-[8px]  py-[8px] font-normal text-right w-[60px]">距今</th>
                                 <th class="px-[8px]  py-[8px] font-normal text-right w-[70px]">止损</th>
+                                <th class="px-[8px]  py-[8px] font-normal text-center w-[110px]">操作</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr v-for="r in sortedResults" :key="r.code"
                                 @click="openInDrawer(r)"
-                                class="border-b border-[#f5f5f5] hover:bg-[#fff5f5] cursor-pointer transition-colors">
+                                class="border-b border-[#f5f5f5] hover:bg-[#fff5f5] cursor-pointer transition-colors"
+                                :class="selectedCodes.has(r.code) ? 'bg-[#fffaf0]' : ''">
+                                <!-- 多选 checkbox -->
+                                <td class="px-[8px] py-[8px] text-center" @click.stop>
+                                    <input type="checkbox"
+                                           :checked="selectedCodes.has(r.code)"
+                                           @change="toggleRow(r.code, $event)"
+                                           class="w-[13px] h-[13px] accent-[#dc2626] cursor-pointer">
+                                </td>
                                 <td class="px-[12px] py-[8px]">
                                     <div v-if="r.grade"
                                          class="flex items-center gap-[6px]"
@@ -288,6 +460,26 @@ onUnmounted(() => {
                                 </td>
                                 <td class="px-[8px] py-[8px] text-right tabular-nums text-[#059669]">
                                     {{ fmtPrice(r.event.stopLossPrice) }}
+                                </td>
+                                <!-- 操作：★ 收藏候选池 + + 自选 -->
+                                <td class="px-[8px] py-[8px] text-center" @click.stop>
+                                    <div class="flex items-center justify-center gap-[4px]">
+                                        <button @click="saveToCandidatePool(r, $event)"
+                                                :disabled="savedCodes.has(r.code)"
+                                                :title="savedCodes.has(r.code) ? '已加入候选池' : '收藏到候选池，持续追踪买点'"
+                                                class="text-[12px] px-[6px] py-[3px] rounded-[3px] transition shadow-sm border"
+                                                :class="savedCodes.has(r.code)
+                                                    ? 'bg-[#fef3c7] text-[#b45309] border-[#fde68a] cursor-default'
+                                                    : 'bg-white text-[#f59e0b] border-[#fde68a] hover:bg-[#fffbeb]'">
+                                            {{ savedCodes.has(r.code) ? '★' : '☆' }}
+                                        </button>
+                                        <button @click="addToWatch(r, $event)"
+                                                title="加入自选"
+                                                class="text-[10px] font-bold text-white bg-[#dc2626] px-[8px] py-[3px] rounded-[3px]
+                                                       hover:bg-[#991b1b] transition shadow-sm">
+                                            + 自选
+                                        </button>
+                                    </div>
                                 </td>
                             </tr>
                         </tbody>

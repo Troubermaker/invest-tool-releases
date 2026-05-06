@@ -160,6 +160,30 @@ def init_db():
             FOREIGN KEY (account_id) REFERENCES portfolio_accounts(id) ON DELETE CASCADE
         )
     ''')
+
+    # 候选池：找发车 / 找候选扫出来的票，用户主动 ⭐ 收藏后存这里
+    # 跟 watchlist 是两回事 —— 这里专为「持续追踪买点」设计：
+    #   - save_price / break_level / golden_price 是入选时的价格快照，永远不变
+    #   - 当前价 vs 这些 snapshot 算出"等待中 / 临门一脚 / 已突破 / 进入买点 / 已失效"
+    # UNIQUE(code) 保证同一只票只保留一条；重新保存覆盖旧记录（snapshot 重置）
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS candidate_picks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL UNIQUE,
+            name TEXT,
+            saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            stage INTEGER,                              -- 1 蓄势中 / 2 试盘后等突破
+            save_price REAL,                            -- 入选时收盘价（参考点）
+            break_level REAL,                           -- 突破触发位（s1Upper）
+            golden_price REAL,                          -- 黄金买点（推荐回踩位）
+            s1_lower REAL,                              -- Stage 1 下沿（跌破 = 已失效）
+            consolidation_bars INTEGER,                 -- 入选时蓄势已持续根数
+            source TEXT DEFAULT '三维启动找候选',         -- 来源标签（未来支持多种扫描器）
+            note TEXT DEFAULT ''                        -- 用户备注
+        )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_candidate_saved_at ON candidate_picks(saved_at DESC)')
+
     # 开启外键约束（sqlite 默认关闭）
     c.execute('PRAGMA foreign_keys = ON')
     conn.commit()

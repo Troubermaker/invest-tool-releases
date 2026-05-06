@@ -236,7 +236,7 @@ def main():
             # 也可以选择此时 sys.exit(1) 或者继续显示 pywebview 的错误页面
 
     # 计算窗口居中位置（pywebview 默认不一定居中，手动算更可靠）
-    win_w, win_h = 1440, 900
+    win_w, win_h =1380, 800
     screen_w, screen_h = get_screen_size()
     x = max(0, (screen_w - win_w) // 2)
     y = max(0, (screen_h - win_h) // 2)

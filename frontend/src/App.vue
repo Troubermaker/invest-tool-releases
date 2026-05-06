@@ -11,6 +11,7 @@ import AdminUnlockModal from './components/AdminUnlockModal.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
+import CandidatePool from './views/CandidatePool.vue'
 import Review from './views/Review.vue'
 import Settings from './views/Settings.vue'
 import { api } from './api/client'
@@ -24,8 +25,19 @@ const isAIDrawerOpen = ref(false)
 const isActivated = ref(null)
 
 // 管理员模式 + 隐藏解锁 modal
-const { refresh: refreshUserRole } = useUserRole()
+const { refresh: refreshUserRole, isAdmin } = useUserRole()
 const showAdminModal = ref(false)
+
+// 管理员专属 tab —— 跟 Sidebar.vue 的 ALL_NAV_ITEMS[].adminOnly 必须保持一致
+const ADMIN_ONLY_TABS = new Set(['candidates'])
+
+// 退出管理员模式时，如果当前在管理员专属 tab，自动退回到行情首页
+// （否则 Sidebar 已隐藏入口但视图还在渲染，造成"我看到的内容点不到"的诡异感）
+watch(isAdmin, (admin) => {
+    if (!admin && ADMIN_ONLY_TABS.has(currentTab.value)) {
+        currentTab.value = 'market'
+    }
+})
 
 onMounted(async () => {
     const res = await api.isActivated()
@@ -119,6 +131,7 @@ onUnmounted(() => {
         <Market v-if="currentTab === 'market'" @openAI="isAIDrawerOpen = true"/>
         <Watchlist v-else-if="currentTab === 'watchlist'" />
         <Positions v-else-if="currentTab === 'positions'" />
+        <CandidatePool v-else-if="currentTab === 'candidates'" />
         <Review v-else-if="currentTab === 'review'" />
         <Settings v-else-if="currentTab === 'settings'" />
 

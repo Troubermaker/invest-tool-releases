@@ -43,6 +43,7 @@ from services import admin_service
 from services import tdx_service
 from services import update_service
 from services import alert_service
+from services import candidate_pool_service
 import ai_service
 
 
@@ -713,6 +714,51 @@ class Api:
         """从指定路径导入备份文件。"""
         counts = backup_service.import_from_file(path, mode=mode)
         return {"imported": counts}
+
+    # =========== 候选池（找发车 / 找候选 收藏后持续追踪买点）=========== #
+
+    @api_endpoint
+    def list_candidate_picks(self):
+        """列出全部候选池条目，按入选时间倒序。前端配合实时行情算当前状态。"""
+        return candidate_pool_service.list_picks()
+
+    @api_endpoint
+    def add_candidate_pick(self, payload):
+        """
+        把扫描器选中的票存入候选池。
+        payload 字段：code, name, stage, save_price, break_level, golden_price,
+                     s1_lower (可空), consolidation_bars (可空), source, note
+        同 code 重复添加会覆盖旧 snapshot。
+        """
+        if not isinstance(payload, dict):
+            raise ValueError('payload 必须是 dict')
+        return candidate_pool_service.add_pick(
+            code=payload.get('code'),
+            name=payload.get('name'),
+            stage=payload.get('stage'),
+            save_price=payload.get('save_price'),
+            break_level=payload.get('break_level'),
+            golden_price=payload.get('golden_price'),
+            s1_lower=payload.get('s1_lower'),
+            consolidation_bars=payload.get('consolidation_bars'),
+            source=payload.get('source') or '三维启动找候选',
+            note=payload.get('note') or '',
+        )
+
+    @api_endpoint
+    def remove_candidate_pick(self, code):
+        """从候选池删一只票。"""
+        return candidate_pool_service.remove_pick(code)
+
+    @api_endpoint
+    def update_candidate_note(self, code, note):
+        """改备注。"""
+        return candidate_pool_service.update_note(code, note)
+
+    @api_endpoint
+    def clear_candidate_picks(self):
+        """清空整个候选池（危险操作，前端要二次确认）。"""
+        return candidate_pool_service.clear_all()
 
     # =========== 老板键 =========== #
 
