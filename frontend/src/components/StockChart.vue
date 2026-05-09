@@ -119,6 +119,28 @@ let scoreSeries = null  // 评分柱状 series
 // hoverSide：浮动卡片贴左 / 贴右（避免遮挡 cursor 当前 bar）
 const hoverIdx = ref(-1)
 const hoverSide = ref('left')
+
+// 三维启动 fresh banner 是否显示（左上角占据 ~250px 高度区域）
+const hasFreshTripleBanner = computed(() =>
+    activeIndicators.value?.includes?.('TRIPLE') &&
+    triplesPx.value?.some?.(t => t.isFresh),
+)
+
+// hover 卡片位置（避开鼠标 + 避开左上角 banner）
+//   - 鼠标在 K 左半 → 卡片右上（远离鼠标）
+//   - 鼠标在 K 右半 + 无 banner → 卡片左上（远离鼠标）
+//   - 鼠标在 K 右半 + 有 banner → 卡片贴左但下移到 banner 下方（远离鼠标 + 不被 banner 遮）
+const hoverCardStyle = computed(() => {
+    if (hoverSide.value === 'right') {
+        // 鼠标在左半 → 卡片贴右
+        return { right: '10px', top: '6px' }
+    }
+    // hoverSide === 'left'：鼠标在右半 → 卡片贴左
+    if (hasFreshTripleBanner.value) {
+        return { left: '10px', top: '250px' }
+    }
+    return { left: '10px', top: '6px' }
+})
 let _lastComputed = null   // { mainOverlays, subPanes }
 let _timeToIdx = new Map() // 时间 → klines 索引
 let _patternByIdx = new Map() // idx → { label, fullName, signal } —— hover 时取完整形态名
@@ -257,6 +279,11 @@ function updateTriplesPixels() {
         const xs3 = t.s3Time ? ts.timeToCoordinate(t.s3Time) : null
         const ys2 = t.s2Price != null ? mainSeries.priceToCoordinate(t.s2Price) : null
         const ys3 = t.s3Price != null ? mainSeries.priceToCoordinate(t.s3Price) : null
+        // 用 K 线 high 价格定位勋章（在 K 线最高点上方放 marker，更精准）
+        const s2K = (t.s2Idx >= 0 && t.s2Idx < klines.value.length) ? klines.value[t.s2Idx] : null
+        const s3K = (t.s3Idx >= 0 && t.s3Idx < klines.value.length) ? klines.value[t.s3Idx] : null
+        const ys2High = s2K ? mainSeries.priceToCoordinate(+s2K.high) : null
+        const ys3High = s3K ? mainSeries.priceToCoordinate(+s3K.high) : null
         out.push({
             key: `triple-${t.s1StartIdx}`,
             stage: t.currentStage,
@@ -265,8 +292,8 @@ function updateTriplesPixels() {
             cy: Math.min(yU, yL),
             cw: Math.max(2, Math.abs(x2 - x1)),
             ch: Math.max(2, Math.abs(yU - yL)),
-            s2x: xs2, s2y: ys2, s2Type: t.s2Type,
-            s3x: xs3, s3y: ys3,
+            s2x: xs2, s2y: ys2, s2yHigh: ys2High, s2Type: t.s2Type,
+            s3x: xs3, s3y: ys3, s3yHigh: ys3High,
             barsAgoFromS3: t.barsAgoFromS3,
             // 介入价位 / 风控价位（用于 banner 显示交易计划）
             goldenBuyPrice: t.goldenBuyPrice,
@@ -1577,37 +1604,43 @@ onUnmounted(() => {
             <div class="relative bg-white" :style="{ height: mainChartHeight }">
                 <div ref="mainEl" class="w-full h-full"></div>
 
-                <!-- 🎯 三维启动 overlay：蓄势期 cyan 矩形 + 试盘红竖线 + 突破橙竖线 -->
+                <!-- 🎯 三维启动 overlay：勋章 marker 版 — K 线上方贴小圆徽章 -->
                 <svg v-if="triplesPx.length"
                      class="absolute inset-0 pointer-events-none z-[6]"
                      style="width: 100%; height: 100%;">
                     <g v-for="t in triplesPx" :key="t.key">
-                        <!-- 蓄势期矩形（cyan 淡背景 + 虚线边）-->
+                        <!-- 蓄势期矩形（保留：表示一段区间，不是一个点）-->
                         <rect :x="t.cx" :y="t.cy" :width="t.cw" :height="t.ch"
-                              fill="rgba(6, 182, 212, 0.08)"
-                              stroke="rgba(6, 182, 212, 0.7)"
+                              fill="rgba(6, 182, 212, 0.06)"
+                              stroke="rgba(6, 182, 212, 0.45)"
                               stroke-width="1" stroke-dasharray="3 2" />
-                        <text :x="t.cx + 4" y="14"
-                              fill="#0e7490" font-size="10" font-weight="bold"
-                              font-family="ui-monospace, monospace">
-                            🎯 蓄势期
+                        <text :x="t.cx + 4" :y="t.cy + t.ch - 4"
+                              fill="#0e7490" font-size="9" font-weight="600"
+                              font-family="ui-monospace, monospace" opacity="0.75">
+                            蓄势
                         </text>
-                        <!-- 试盘点：红色竖虚线 + "试" 标 -->
-                        <g v-if="t.s2x != null">
-                            <line :x1="t.s2x" y1="0" :x2="t.s2x" y2="100%"
-                                  stroke="#dc2626" stroke-width="2" stroke-dasharray="5 3" opacity="0.8" />
-                            <text :x="t.s2x + 4" y="14"
-                                  fill="#dc2626" font-size="11" font-weight="bold">
-                                试 ({{ t.s2Type === 'upperShadow' ? '上影' : '下影' }})
+                        <!-- 试盘勋章：青色 = 跟蓄势区间同色系 = "还在准备阶段" -->
+                        <g v-if="t.s2x != null && t.s2yHigh != null">
+                            <circle :cx="t.s2x" :cy="t.s2yHigh - 14" r="9"
+                                    fill="#0891b2" stroke="white" stroke-width="1.5"
+                                    style="filter: drop-shadow(0 1px 2px rgba(0,0,0,0.15))"/>
+                            <text :x="t.s2x" :y="t.s2yHigh - 14"
+                                  fill="white" font-size="11" font-weight="700"
+                                  text-anchor="middle" dominant-baseline="central"
+                                  font-family="ui-monospace, monospace">
+                                试
                             </text>
                         </g>
-                        <!-- 突破点：橙色竖实线 + "启" 标 -->
-                        <g v-if="t.s3x != null">
-                            <line :x1="t.s3x" y1="0" :x2="t.s3x" y2="100%"
-                                  stroke="#ea580c" stroke-width="2.5" opacity="0.9" />
-                            <text :x="t.s3x + 4" y="14"
-                                  fill="#ea580c" font-size="12" font-weight="bold">
-                                🎯 启 ({{ t.barsAgoFromS3 }}前)
+                        <!-- 突破勋章：红色 = "正式行动信号"，比试稍大更醒目 -->
+                        <g v-if="t.s3x != null && t.s3yHigh != null">
+                            <circle :cx="t.s3x" :cy="t.s3yHigh - 16" r="10"
+                                    fill="#dc2626" stroke="white" stroke-width="1.5"
+                                    style="filter: drop-shadow(0 1px 2px rgba(0,0,0,0.18))"/>
+                            <text :x="t.s3x" :y="t.s3yHigh - 16"
+                                  fill="white" font-size="12" font-weight="700"
+                                  text-anchor="middle" dominant-baseline="central"
+                                  font-family="ui-monospace, monospace">
+                                启
                             </text>
                         </g>
                     </g>
@@ -1859,12 +1892,13 @@ onUnmounted(() => {
                     </span>
                 </div>
 
+                <!-- hover 卡片 z-14 高于 banner z-13 永远可见；位置由 hoverCardStyle 智能选 -->
                 <div v-if="hoverIdx >= 0 && displayData"
-                     class="absolute top-[6px] z-[10] pointer-events-none
+                     class="absolute z-[14] pointer-events-none
                             bg-white/95 backdrop-blur-[2px] border border-[#e5e7eb] rounded-[5px]
                             shadow-[0_2px_8px_rgba(0,0,0,0.08)]
                             px-[10px] py-[7px] text-[11px] tabular-nums font-mono leading-[1.5] min-w-[170px]"
-                     :style="hoverSide === 'right' ? { right: '10px' } : { left: '10px' }">
+                     :style="hoverCardStyle">
                     <div class="font-bold text-[#111] mb-[4px] pb-[3px] border-b border-[#f1f5f9]">
                         {{ formatHoverTime(displayData.k.time) }}
                     </div>

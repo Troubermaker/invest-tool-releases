@@ -30,9 +30,30 @@ logger = logging.getLogger(__name__)
 # 不影响其它模块（其它模块继续走默认 WARNING）
 if not logger.handlers:
     logger.setLevel(logging.INFO)
-    _h = logging.StreamHandler(sys.stdout)
-    _h.setFormatter(logging.Formatter('[%(asctime)s] [TDX] %(message)s', datefmt='%H:%M:%S'))
-    logger.addHandler(_h)
+    _fmt = logging.Formatter('[%(asctime)s] [TDX] %(message)s', datefmt='%H:%M:%S')
+
+    # stdout handler（开发模式 python main.py 看终端）
+    _h_out = logging.StreamHandler(sys.stdout)
+    _h_out.setFormatter(_fmt)
+    logger.addHandler(_h_out)
+
+    # 文件 handler（打包后/无终端启动也能查日志）
+    # 路径：项目根 / logs / tdx.log，按文件大小滚动（5MB × 3）
+    try:
+        import os as _os
+        from logging.handlers import RotatingFileHandler as _RFH
+        _log_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'logs')
+        _os.makedirs(_log_dir, exist_ok=True)
+        _h_file = _RFH(
+            _os.path.join(_log_dir, 'tdx.log'),
+            maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8',
+        )
+        _h_file.setFormatter(_fmt)
+        logger.addHandler(_h_file)
+    except Exception as _e:
+        # 文件 handler 失败不影响 stdout
+        sys.stdout.write(f'[TDX] 文件日志初始化失败: {_e}\n')
+
     logger.propagate = False  # 避免重复输出到 root logger
 
 # 通达信主流行情服务器 IP 池（每月偶尔会变，但下面这批多年稳定）
@@ -437,9 +458,435 @@ def get_stock_kline(code, timeframe='日K', count=800):
         return []
 
 
+# =========== Phase 7：TDX 式增量更新辅助 ===========
+
+def _normalize_kline_time_key(t):
+    """K 线 time 字段 → 'YYYY-MM-DD' 字符串（dict key 用）。无法识别返 None。"""
+    if isinstance(t, str):
+        return t[:10] if len(t) >= 10 else None
+    if isinstance(t, dict) and t.get('year'):
+        try:
+            return f"{int(t['year'])}-{int(t.get('month', 1)):02d}-{int(t.get('day', 1)):02d}"
+        except (TypeError, ValueError):
+            return None
+    if isinstance(t, (int, float)):
+        try:
+            ts = t / 1000 if t > 1e12 else t
+            return datetime.date.fromtimestamp(ts).isoformat()
+        except (OSError, OverflowError, ValueError):
+            return None
+    return None
+
+
+def _extract_last_kline_date(klines):
+    """K 线列表最后一根的日期字符串。"""
+    if not klines:
+        return None
+    last = klines[-1] if isinstance(klines[-1], dict) else None
+    return _normalize_kline_time_key(last.get('time')) if last else None
+
+
+def _calendar_days_between(d1_str, d2_str):
+    """d2 - d1 的日历天数。d1 ≥ d2 返 0；解析异常返 -1。"""
+    try:
+        d1 = datetime.date.fromisoformat(d1_str[:10])
+        d2 = datetime.date.fromisoformat(d2_str[:10])
+        return max(0, (d2 - d1).days)
+    except (TypeError, ValueError, AttributeError):
+        return -1
+
+
+def _merge_klines_by_time(old, new):
+    """按 time 去重合并；new 覆盖 old 同日记录。返回时间升序列表。"""
+    by_time = {}
+    for k in old or []:
+        if isinstance(k, dict):
+            tk = _normalize_kline_time_key(k.get('time'))
+            if tk:
+                by_time[tk] = k
+    for k in new or []:
+        if isinstance(k, dict):
+            tk = _normalize_kline_time_key(k.get('time'))
+            if tk:
+                by_time[tk] = k   # 覆盖（处理盘中/盘后差异、复权微调）
+    return [by_time[t] for t in sorted(by_time.keys())]
+
+
+def _detect_adjustment(old_klines, new_klines, threshold=0.01):
+    """检测复权除息：重叠日期的 close 价平均差异 > threshold（默认 1%）→ 视为复权。"""
+    if not old_klines or not new_klines:
+        return False
+    old_by_time = {}
+    for k in old_klines:
+        if isinstance(k, dict):
+            tk = _normalize_kline_time_key(k.get('time'))
+            if tk:
+                old_by_time[tk] = k
+
+    diffs = []
+    for nk in new_klines:
+        if not isinstance(nk, dict):
+            continue
+        tk = _normalize_kline_time_key(nk.get('time'))
+        if not tk or tk not in old_by_time:
+            continue
+        try:
+            old_close = float(old_by_time[tk].get('close') or 0)
+            new_close = float(nk.get('close') or 0)
+            if old_close > 0 and new_close > 0:
+                diffs.append(abs(new_close - old_close) / old_close)
+        except (TypeError, ValueError):
+            continue
+
+    if len(diffs) < 2:        # 重叠样本太少，不下结论
+        return False
+    return (sum(diffs) / len(diffs)) > threshold
+
+
+def _fetch_and_cache_full(code, timeframe, count):
+    """全量拉 + 写缓存（替换语义）。
+
+    Phase 7：即使 result == []（TDX 多次确认返空，pre-IPO / 退市 / 暂停交易等）
+    也写缓存——同日后续调用直接命中空缓存，避免反复 ping TDX。
+    跨日后会自动重试一次（看是否正式上市），还是空就再缓存。
+
+    例外：TDX 完全连接不上时不写缓存（避免把网络问题误标为"无数据"）。
+    例外 2：已有非空缓存时，TDX 返空不要覆盖（多半是网络瞬断/服务器抖动，
+    保留老 K 比清空安全；下次再拉就行）。
+    """
+    import services.kline_cache_service as kline_cache
+
+    # TDX 不可用就不写 cache（network glitch 不该污染缓存）
+    if _ensure_api() is None:
+        return []
+
+    result = get_stock_kline(code, timeframe, count)
+
+    # 防御性检查：TDX 返空 + 已有非空缓存 → 保留老缓存（不写 [] 把历史 K 删掉）
+    # 仅"完全没缓存"或"老缓存本身是空"时才允许写空（pre-IPO 语义保留）
+    if not result:
+        _, _, existing = kline_cache.lookup_full(code, timeframe)
+        if existing:   # 老缓存有 bars → 不动它
+            logger.warning(f'TDX {code} 全量返空但已有 {len(existing)} 根缓存，保留不覆盖')
+            return existing
+        # 没缓存或缓存就是空 → 写 [] 表示"已确认无数据"
+        kline_cache.store(code, timeframe, [])
+        return []
+
+    kline_cache.store(code, timeframe, result)
+    return result
+
+
+def get_stock_kline_cached(code, timeframe='日K', count=800):
+    """
+    带 SQLite 持久化缓存的 K 线获取（admin only 端点暴露给前端回测/扫描器用）。
+
+    Phase 7 升级：TDX 式增量更新
+      - 同日缓存命中 → 直接返回（最快）
+      - 跨日 + 缓存有 → 算 gap，只拉 gap+5 根新 K，merge 后写回（增量）
+      - gap > 30 天 / 检测到复权调整 / 完全无缓存 → 全量重拉 800 根
+      - 非日 K（周/月/年）→ 全量（数据量本就小，不必增量）
+
+    传输量从 80KB / 只降到几百字节 / 只，跨日全市场更新 25 分钟 → 5 分钟。
+    """
+    import services.kline_cache_service as kline_cache
+
+    market = _detect_market(code)
+    if market < 0:
+        return []
+
+    import services.kline_cache_service as _kcache
+    today = datetime.date.today().isoformat()
+    cached_date, cached_fetched_at, cached_klines = kline_cache.lookup_full(code, timeframe)
+
+    # 周末 / 节假日「最近完成交易日」：用于非日 K 的缓存命中比较
+    # 周日跑数据时 today=Sun，但 周K/月K 在 Friday 15:00 后就定型了，没必要重拉
+    last_trading_day = _kcache.latest_completed_trading_day()
+
+    # 非日 K（周/月/年）特殊路径：cache 命中条件比 日K 宽松
+    #   - 数据周期长，单根 K 在周内/月内/年内会持续更新，但跨周期才"定型"
+    #   - 周末跑：cached_date >= last_trading_day（即 Friday 拉的）→ 直接命中，不再调 TDX
+    #   - 工作日跑：cached_date == today → 同日已拉过，直接命中
+    if timeframe != '日K':
+        if cached_klines and cached_date >= last_trading_day:
+            return cached_klines
+        # 缓存陈旧 / 完全无缓存 → 全量重拉
+        return _fetch_and_cache_full(code, timeframe, count)
+
+    # 以下是日 K 路径
+
+    # 周末 / 节假日命中：今天非交易日，缓存的 last K 已经是最近交易日 → 不需重拉
+    # 例：周六 cached last_date='2026-05-08'(Fri) >= last_trading_day='2026-05-08' → 命中
+    # 工作日命中也包含在里面：盘前 last_trading_day=昨天，缓存有昨天 K 即可
+    # 但盘后 last_trading_day=今天，没今天 K 不命中，会落入下面的跨日逻辑（正常）
+    if cached_klines:
+        cached_last_date = _extract_last_kline_date(cached_klines)
+        if cached_last_date and cached_last_date >= last_trading_day:
+            # 但要排除"last K 是今天 + fetched_at 在收盘前 + 现在已收盘"的 partial 情况
+            # 这种情况要走下面的同日 partial 补全逻辑
+            now = datetime.datetime.now()
+            today_close_dt = datetime.datetime.combine(
+                datetime.date.today(), datetime.time(15, 0),
+            )
+            is_post_close = now >= today_close_dt and now.weekday() < 5
+            is_partial_today = (
+                cached_last_date == today
+                and is_post_close
+                and kline_cache.is_today_kline_complete(cached_fetched_at, cached_last_date) is False
+            )
+            if not is_partial_today:
+                return cached_klines
+
+    # 同日 + 确认空缓存（TDX 多次返空，多半 pre-IPO）→ 直接返 [] 不再调 TDX
+    # 跨日时会重试一次看是否上市（cached_date != today，会走全量分支）
+    if cached_date == today and cached_klines == []:
+        return []
+
+    # 同日缓存 → 最快路径，但要检测两种"陈旧"情况：
+    #   A) last_date == today 但 fetched_at < 15:00 → partial today K（盘中拉的）
+    #   B) last_date < today                        → 之前拉时 TDX 没给今日 K（最常见）
+    # 已收盘后两种都应该重拉。否则同日内缓存命中直接返回。
+    if cached_date == today and cached_klines:
+        if timeframe == '日K':
+            last_date = _extract_last_kline_date(cached_klines)
+            now = datetime.datetime.now()
+            today_close_dt = datetime.datetime.combine(
+                datetime.date.today(), datetime.time(15, 0),
+            )
+            is_post_close = now >= today_close_dt and now.weekday() < 5
+
+            # 情况 B：last_date < today 且已收盘 → 缓存已陈旧，跳出同日分支重拉
+            if is_post_close and last_date and last_date < today:
+                logger.info(f'TDX {code} 同日缓存但 last={last_date}<today，已收盘 → 重拉补今日 K')
+                # 走下面的"跨日增量"分支：会算 gap、拉新 K、merge 写回
+                pass  # 不 return，下落
+            else:
+                # 情况 A：last_date == today + partial（fetched_at < 15:00）
+                complete = kline_cache.is_today_kline_complete(cached_fetched_at, last_date)
+                if complete is False and is_post_close:
+                    logger.info(f'TDX {code} 检测到盘中 partial today K，已收盘 → 自动补全')
+                    new_klines = get_stock_kline(code, timeframe, 5)
+                    if new_klines and not _detect_adjustment(cached_klines, new_klines):
+                        merged = _merge_klines_by_time(cached_klines, new_klines)
+                        kline_cache.store(code, timeframe, merged)
+                        return merged
+                    if new_klines:   # 复权命中 → 全量
+                        return _fetch_and_cache_full(code, timeframe, count)
+                    # 拉失败 → 继续返 partial 数据（fall through return cached）
+                return cached_klines
+        # else: 非日 K 已在函数顶部 timeframe != '日K' 分支处理，到不了这里
+
+    # 完全无缓存 → 全量首拉
+    if not cached_klines:
+        return _fetch_and_cache_full(code, timeframe, count)
+
+    # 跨日：判断 gap 决定增量 vs 全量
+    last_date = _extract_last_kline_date(cached_klines)
+    if not last_date:
+        return _fetch_and_cache_full(code, timeframe, count)
+
+    gap = _calendar_days_between(last_date, today)
+
+    if gap == 0:
+        # K 线最后一根已经是今天（可能是凌晨切日，fetched_date 是昨天但数据其实有今日 K）
+        # 重写一下 fetched_date = today，下次直接命中
+        kline_cache.store(code, timeframe, cached_klines)
+        return cached_klines
+
+    if gap < 0 or gap > 30:
+        # gap 解析失败 / 缓存太老（>30天）→ 全量重拉
+        return _fetch_and_cache_full(code, timeframe, count)
+
+    # gap 1-30 天 → 增量拉 (gap + 5) 根，buffer 用于复权检测 + 节假日跳跃容错
+    fetch_count = min(gap + 5, 50)
+    new_klines = get_stock_kline(code, timeframe, fetch_count)
+    if not new_klines:
+        # 增量失败 → 退回全量重拉（TDX 对小 count 偶尔返空，但同一只票全量往往能拿到）
+        # 全量本身已写缓存；若它也失败会返 []，让前端识别为真失败
+        logger.info(f'TDX {code} 增量返空，退回全量重拉')
+        return _fetch_and_cache_full(code, timeframe, count)
+
+    # 复权检测：重叠日期的 close 平均偏差 > 1% → 全量重拉
+    if _detect_adjustment(cached_klines, new_klines):
+        logger.warning(f'TDX {code} 检测到复权调整，全量重拉')
+        return _fetch_and_cache_full(code, timeframe, count)
+
+    merged = _merge_klines_by_time(cached_klines, new_klines)
+    kline_cache.store(code, timeframe, merged)
+    return merged
+
+
 def is_available():
     """探测当前 TDX 是否可用（admin 解锁 UI 上可显示连接状态）。"""
     return _ensure_api() is not None
+
+
+# A 股代码段：6xxx (沪) / 000-003xxx, 300xxx (深)；排除北交所 4xxx/8xxx/920xxx 和 ETF/基金
+_A_SHARE_PREFIXES_SH = ('600', '601', '603', '605', '688')   # 沪市主板 + 科创板
+_A_SHARE_PREFIXES_SZ = ('000', '001', '002', '003', '300')   # 深市主板 + 中小板 + 创业板
+
+
+def _is_a_share_code(code):
+    code = (code or '').strip()
+    if len(code) != 6 or not code.isdigit():
+        return False
+    return code.startswith(_A_SHARE_PREFIXES_SH) or code.startswith(_A_SHARE_PREFIXES_SZ)
+
+
+# A 股代码列表缓存：内存 + 磁盘双层
+# 内存：(cached_date, codes) — 同进程秒级返回
+# 磁盘：JSON 文件（cache 目录下）— 跨重启留存，按交易日命中
+_a_share_codes_cache = (None, [])     # (cached_date_str, codes)
+_a_share_codes_lock = threading.Lock()
+
+
+def _a_share_codes_disk_path():
+    """磁盘缓存路径：跟 kline_cache.db 同目录。"""
+    import os
+    import services.kline_cache_service as _kc
+    return os.path.join(os.path.dirname(_kc._CACHE_DB_PATH), 'a_share_codes.json')
+
+
+def _load_a_share_codes_disk():
+    """读磁盘缓存。返回 (cached_date_str, codes) 或 (None, [])。"""
+    import os
+    import json
+    path = _a_share_codes_disk_path()
+    if not os.path.exists(path):
+        return None, []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get('codes'), list):
+            return data.get('cached_date'), data['codes']
+    except Exception as e:
+        logger.warning(f'A 股代码磁盘缓存读取失败：{e}')
+    return None, []
+
+
+def _save_a_share_codes_disk(codes):
+    """写磁盘缓存（cached_date = 今天）。"""
+    import json
+    try:
+        path = _a_share_codes_disk_path()
+        today = datetime.date.today().isoformat()
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'cached_date': today, 'codes': codes}, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f'A 股代码磁盘缓存写入失败：{e}')
+
+
+def _enumerate_a_share_codes_once():
+    """单次枚举尝试。返回 [] 表示失败 / 空。"""
+    api = _ensure_api()
+    if api is None:
+        logger.warning('TDX 不可用，无法枚举 A 股列表')
+        return []
+
+    results = []
+    PAGE = 1000  # pytdx get_security_list 单次最多 1000 条
+    for market_id in (0, 1):  # 0=深市, 1=沪市
+        try:
+            count = api.get_security_count(market_id)
+        except Exception as e:
+            logger.warning(f'TDX get_security_count 失败 market={market_id}: {e}')
+            continue
+        if not count or count <= 0:
+            continue
+        for start in range(0, count, PAGE):
+            try:
+                page = api.get_security_list(market_id, start)
+            except Exception as e:
+                logger.warning(f'TDX get_security_list 失败 market={market_id} start={start}: {e}')
+                continue
+            if not page:
+                continue
+            for item in page:
+                code = str(item.get('code', '')).strip()
+                if not _is_a_share_code(code):
+                    continue
+                actual_market = 'SH' if code.startswith(_A_SHARE_PREFIXES_SH) else 'SZ'
+                results.append({
+                    'code': code,
+                    'name': str(item.get('name', '')).strip(),
+                    'market': actual_market,
+                })
+
+    seen = set()
+    deduped = []
+    for s in results:
+        if s['code'] in seen:
+            continue
+        seen.add(s['code'])
+        deduped.append(s)
+    return deduped
+
+
+def get_all_a_share_codes():
+    """
+    通过 TDX 枚举沪深两市全部 A 股代码。约 4500-5500 条。
+
+    缓存策略：
+      1) 内存命中（同进程同日）→ 秒级返回
+      2) 磁盘命中（cached_date >= 最近完成交易日）→ 返回，不调 TDX
+         - 周末/节假日：cached_date = 节前最后交易日 → 必命中
+         - 工作日盘前：cached_date = 昨日 → 命中（早间没新 IPO）
+         - 工作日盘后：cached_date = 今日 → 命中
+      3) 缓存陈旧或无 → 调 TDX 枚举（失败换 host 重试一次）
+      4) TDX 全失败但磁盘有任意旧缓存 → 兜底返回旧缓存（带警告）
+
+    Returns:
+        [{code, name, market}, ...] — market: 'SH' / 'SZ'
+        失败返 []（磁盘也没有兜底缓存）
+    """
+    global _a_share_codes_cache
+    import services.kline_cache_service as _kc
+    today = datetime.date.today().isoformat()
+    last_trading_day = _kc.latest_completed_trading_day()
+
+    # 1) 内存缓存 — 仅同日命中
+    with _a_share_codes_lock:
+        mem_date, mem_codes = _a_share_codes_cache
+        if mem_codes and mem_date == today:
+            return mem_codes
+
+    # 2) 磁盘缓存 — cached_date >= last_trading_day 即命中
+    disk_date, disk_codes = _load_a_share_codes_disk()
+    if disk_codes and disk_date and disk_date >= last_trading_day:
+        # 命中：写回内存缓存
+        with _a_share_codes_lock:
+            _a_share_codes_cache = (disk_date, disk_codes)
+        logger.warning(f'TDX A 股枚举命中磁盘缓存（{disk_date}）：{len(disk_codes)} 条，跳过 TDX')
+        return disk_codes
+
+    # 3) 调 TDX 枚举（失败重试）
+    deduped = _enumerate_a_share_codes_once()
+    if not deduped:
+        logger.warning('TDX A 股枚举返 0 条，换 host 重试')
+        new_api = _force_reconnect()
+        if new_api is not None:
+            deduped = _enumerate_a_share_codes_once()
+
+    if deduped:
+        # 写双层缓存
+        with _a_share_codes_lock:
+            _a_share_codes_cache = (today, deduped)
+        _save_a_share_codes_disk(deduped)
+        logger.warning(f'TDX 全市场 A 股枚举完成：{len(deduped)} 条')
+        return deduped
+
+    # 4) 兜底：TDX 失败但磁盘还有旧缓存 → 用旧的（带警告，不让用户彻底无法用）
+    if disk_codes:
+        with _a_share_codes_lock:
+            _a_share_codes_cache = (disk_date, disk_codes)
+        logger.warning(
+            f'TDX 枚举失败，回退到磁盘旧缓存（{disk_date}）：{len(disk_codes)} 条 — '
+            '可能漏掉新 IPO/退市，但能继续工作'
+        )
+        return disk_codes
+
+    logger.warning('TDX 全市场 A 股枚举完成：0 条（TDX + 磁盘缓存都没有）')
+    return []
 
 
 # 指数代码映射：display_name → (market, code)

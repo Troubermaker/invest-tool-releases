@@ -390,6 +390,43 @@ class Api:
         return tdx_service.is_available()
 
     @api_endpoint
+    @admin_only
+    def list_all_a_share_codes(self):
+        """全市场 A 股代码列表（admin only），给批量回测 / 全市场扫描用。约 5000 条。"""
+        return tdx_service.get_all_a_share_codes()
+
+    @api_endpoint
+    @admin_only
+    def get_stock_kline_via_tdx_cached(self, code, timeframe='日K', count=800):
+        """带 SQLite 持久化缓存的 TDX K线（仅回测用，每日刷新，跨重启留存）。"""
+        return tdx_service.get_stock_kline_cached(code, timeframe, count)
+
+    @api_endpoint
+    @admin_only
+    def kline_cache_stats(self):
+        """K线缓存统计：行数 / 当日命中数 / 文件大小。"""
+        from services import kline_cache_service
+        return kline_cache_service.stats()
+
+    @api_endpoint
+    @admin_only
+    def kline_cache_clear(self):
+        """清空 K线缓存表 + VACUUM。"""
+        from services import kline_cache_service
+        kline_cache_service.clear()
+        return {'cleared': True}
+
+    @api_endpoint
+    @admin_only
+    def bulk_check_kline_freshness(self, codes, timeframe='日K'):
+        """
+        批量查询缓存里每只票 K 线最后一根日期，得出哪些已有今日数据 / 哪些待下载。
+        用于"下载今日 K 线"按钮的预检：避免无脑全量重下，只下缺口。
+        """
+        from services import kline_cache_service
+        return kline_cache_service.bulk_check_freshness(codes, timeframe)
+
+    @api_endpoint
     def get_sector_stocks(self, plate_id, date=None):
         """根据 KPL 板块 ID 返回该板块精选联动股票列表。date 历史日期 'YYYY-MM-DD'。"""
         return sector_stocks_service.get_sector_stocks(plate_id, date=date)
@@ -759,6 +796,31 @@ class Api:
     def clear_candidate_picks(self):
         """清空整个候选池（危险操作，前端要二次确认）。"""
         return candidate_pool_service.clear_all()
+
+    @api_endpoint
+    def update_candidate_tracking(self, payload):
+        """
+        Phase 5：更新单条候选池的动态追踪字段（peak_gain_since_save / formation_state /
+        last_refreshed_at）。前端跑完 detector 后调用。
+        """
+        if not isinstance(payload, dict):
+            raise ValueError('payload 必须是 dict')
+        return candidate_pool_service.update_tracking(
+            code=payload.get('code'),
+            peak_gain_since_save=payload.get('peak_gain_since_save'),
+            formation_state=payload.get('formation_state'),
+        )
+
+    @api_endpoint
+    def bulk_update_candidate_tracking(self, payloads):
+        """
+        Phase 5：批量更新追踪字段（候选池刷新一次性写回所有票）。
+        payloads: [{code, peak_gain_since_save?, formation_state?}, ...]
+        所有记录共用同一个 last_refreshed_at。
+        """
+        if not isinstance(payloads, list):
+            raise ValueError('payloads 必须是 list')
+        return candidate_pool_service.bulk_update_tracking(payloads)
 
     # =========== 老板键 =========== #
 

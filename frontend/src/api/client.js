@@ -84,6 +84,18 @@ export const api = {
     call('get_index_kline_via_tdx', name, timeframe, count),
   /** 管理员专用：TDX 连接是否可用 */
   tdxIsAvailable: () => call('tdx_is_available'),
+  /** 管理员专用：全市场 A 股代码列表（约 5000 条），给批量回测 / 扫描用 */
+  listAllAShareCodes: () => call('list_all_a_share_codes'),
+  /** 管理员专用：带 SQLite 持久化缓存的 TDX K线（仅回测用，每日刷新，跨重启留存）*/
+  getStockKlineViaTdxCached: (code, timeframe = '日K', count = 800) =>
+    call('get_stock_kline_via_tdx_cached', code, timeframe, count),
+  /** 管理员专用：K线缓存统计 */
+  klineCacheStats: () => call('kline_cache_stats'),
+  /** 管理员专用：清空 K线缓存表 */
+  klineCacheClear: () => call('kline_cache_clear'),
+  /** 管理员专用：批量预检缓存 freshness（cached / missing 分组），给"下载今日 K 线"用 */
+  bulkCheckKlineFreshness: (codes, timeframe = '日K') =>
+    call('bulk_check_kline_freshness', codes || [], timeframe),
 
   /** 板块联动个股。plateId: KPL 板块代码；date='YYYY-MM-DD' 切历史 */
   getSectorStocks: (plateId, date = null) => call('get_sector_stocks', plateId, date),
@@ -201,6 +213,10 @@ export const api = {
   updateCandidateNote: (code, note) => call('update_candidate_note', code, note || ''),
   /** 清空整个候选池（危险）*/
   clearCandidatePicks: () => call('clear_candidate_picks'),
+  /** Phase 5：更新单条候选池的追踪字段（peak_gain_since_save / formation_state）*/
+  updateCandidateTracking: (payload) => call('update_candidate_tracking', payload || {}),
+  /** Phase 5：批量更新追踪字段（候选池刷新一次性写回所有票）*/
+  bulkUpdateCandidateTracking: (payloads) => call('bulk_update_candidate_tracking', payloads || []),
 
   /** 股票搜索（A 股，支持代码/中文名/拼音）*/
   searchStocks: (query, limit) => call('search_stocks', query, limit ?? 20),

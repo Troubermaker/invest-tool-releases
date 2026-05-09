@@ -179,10 +179,35 @@ def init_db():
             s1_lower REAL,                              -- Stage 1 下沿（跌破 = 已失效）
             consolidation_bars INTEGER,                 -- 入选时蓄势已持续根数
             source TEXT DEFAULT '三维启动找候选',         -- 来源标签（未来支持多种扫描器）
-            note TEXT DEFAULT ''                        -- 用户备注
+            note TEXT DEFAULT '',                       -- 用户备注
+            -- Phase 5：动态追踪字段（前端定期跑 detector 刷新写入；旧记录全 NULL，刷新后填充）
+            peak_gain_since_save REAL,                  -- 收藏后历史最大涨幅 %（看是否抓到主升）
+            formation_state TEXT,                       -- detector 判定的形态状态：
+                                                        -- consolidating / tested / breakout / rally / exhausted / invalid
+            last_refreshed_at TIMESTAMP,                -- 上次刷新时间（数据新鲜度）
+            -- Phase 6：二次买点（突破后回踩不破 + 反包阳线）
+            secondary_entry_at TIMESTAMP,               -- 反包K的时间（NULL = 没出现 / 未刷新）
+            secondary_entry_price REAL,                 -- 反包K收盘价（用户参考介入点位）
+            -- 突破日跟踪：detector 跑出的最新 stage 3 突破 K 时间（仅 stage 3 / rally / exhausted / invalid 有值）
+            breakout_at TIMESTAMP                       -- s3Time，前端用来算"距今 N 天"
         )
     ''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_candidate_saved_at ON candidate_picks(saved_at DESC)')
+
+    # Phase 5/6/7 迁移：给老库的 candidate_picks 表补字段（新建库 CREATE TABLE 已含）
+    # SQLite 不支持 IF NOT EXISTS for ADD COLUMN，所以 try/except 兜底
+    for migration in (
+        'ALTER TABLE candidate_picks ADD COLUMN peak_gain_since_save REAL',
+        'ALTER TABLE candidate_picks ADD COLUMN formation_state TEXT',
+        'ALTER TABLE candidate_picks ADD COLUMN last_refreshed_at TIMESTAMP',
+        'ALTER TABLE candidate_picks ADD COLUMN secondary_entry_at TIMESTAMP',
+        'ALTER TABLE candidate_picks ADD COLUMN secondary_entry_price REAL',
+        'ALTER TABLE candidate_picks ADD COLUMN breakout_at TIMESTAMP',
+    ):
+        try:
+            c.execute(migration)
+        except Exception:
+            pass   # 列已存在 → 忽略
 
     # 开启外键约束（sqlite 默认关闭）
     c.execute('PRAGMA foreign_keys = ON')

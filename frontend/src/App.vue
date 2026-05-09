@@ -7,11 +7,13 @@ import UpdateBanner from './components/UpdateBanner.vue'
 import Toaster from './components/Toaster.vue'
 import StockChartDrawer from './components/StockChartDrawer.vue'
 import AddToWatchlistModal from './components/AddToWatchlistModal.vue'
+import ConfirmModal from './components/ConfirmModal.vue'
 import AdminUnlockModal from './components/AdminUnlockModal.vue'
 import Market from './views/Market.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
 import CandidatePool from './views/CandidatePool.vue'
+import Quant from './views/Quant.vue'
 import Review from './views/Review.vue'
 import Settings from './views/Settings.vue'
 import { api } from './api/client'
@@ -132,6 +134,7 @@ onUnmounted(() => {
         <Watchlist v-else-if="currentTab === 'watchlist'" />
         <Positions v-else-if="currentTab === 'positions'" />
         <CandidatePool v-else-if="currentTab === 'candidates'" />
+        <Quant v-else-if="currentTab === 'quant'" />
         <Review v-else-if="currentTab === 'review'" />
         <Settings v-else-if="currentTab === 'settings'" />
 
@@ -155,6 +158,9 @@ onUnmounted(() => {
 
     <!-- 全局"添加到自选" modal（任意页股票行点 + 触发）-->
     <AddToWatchlistModal />
+
+    <!-- 全局确认框（confirmDialog() 触发，统一替代浏览器原生 confirm）-->
+    <ConfirmModal />
 
     <!-- 管理员解锁 modal（Ctrl+Shift+A 唤起）-->
     <AdminUnlockModal :open="showAdminModal" @close="showAdminModal = false" />

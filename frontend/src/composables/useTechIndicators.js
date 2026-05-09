@@ -979,13 +979,26 @@ export function detectGaps(klines, opts = {}) {
  *   - 55-69: B 级（信号成立但有瑕疵）
  *   - < 55:  C 级（观望，参考即可）
  *
+ * Phase 3 双锚点 formScore：
+ *   全市场回测显示评级倒挂（A 46% < B 51% < C 53%）。根因：旧版 formScore 只奖励
+ *   "距黄金买点近"，但黄金买点近 = 突破后股价没飞起来 = 弱势票。真正强势的突破
+ *   不会回踩到黄金买点，反而是从突破价 +0~5% 一路上涨。
+ *
+ *   新版同时计算两个锚点的位置分，取较高者 — 体现"任一好买点都满意"：
+ *     form_golden: 距回踩买点（goldenBuyPrice = min(试盘 K 中点, 蓄势上沿)）的偏离
+ *     form_chase:  距追涨买点（chasePrice = breakoutPrice × 1.01）的偏离
+ *
+ *   现价从 klines 末尾取（live 调用 = 当下；回测调用 = klines 已截断到 s3Idx+1
+ *   即突破当天）。这样不再需要 caller 传 distancePct。
+ *
  * @param klines  日 K
  * @param event   detectThreeStageLaunch 返回的单条事件（必须 currentStage === 3）
- * @param distancePct  现价 vs 黄金买点的偏离 % （从扫描器算好传入）
  * @param marketEnv  computeMarketEnvScore 返回值（可选，没有就给中性 50）
- * @returns { grade: 'S'|'A'|'B'|'C', score, breakdown: {form, vol, ma, env}, reasons: [] }
+ * @param weeklyConfirmed  Phase 4：可选 boolean，true=周线趋势确认，false=未确认 → grade 降一档
+ *                         全市场回测：周共振票胜率 51% vs 无共振 43%（+8pp 显著差异）
+ * @returns { grade: 'S'|'A'|'B'|'C', score, breakdown, reasons, weeklyConfirmed, gradeRaw }
  */
-export function gradeFreshSignal(klines, event, distancePct, marketEnv) {
+export function gradeFreshSignal(klines, event, marketEnv, weeklyConfirmed = null) {
     if (!klines || !event || event.currentStage !== 3) return null
     const closes = klines.map(k => +k.close)
     const ma5Arr  = ma(closes, 5)
@@ -995,65 +1008,121 @@ export function gradeFreshSignal(klines, event, distancePct, marketEnv) {
     const lastIdx = closes.length - 1
     const reasons = []
 
-    // === 形态分 (0-30) ===
-    let formScore = 0
-    const absDist = Math.abs(distancePct ?? 999)
-    if      (absDist <= 1.5) { formScore += 22; reasons.push('黄金买点附近') }
-    else if (distancePct < 0 && distancePct >= -5) { formScore += 18; reasons.push('折扣区') }
-    else if (distancePct > 0 && distancePct <= 5)  { formScore += 14; reasons.push('追涨区') }
-    else if (distancePct < -5)                      { formScore += 10; reasons.push('深度折扣') }
-    else                                            { formScore += 4;  reasons.push('已涨过 >5%') }
+    // === Phase 3 v2 评级框架（5 维 100 分）===
+    // 全市场回测发现旧版评级与胜率倒挂（S 级表现最差）。根因：旧版多个维度都奖励
+    // "突破当天 strong"（量能爆 / 实体大 / MA 强势），而"突破当天 strong"= 当天涨过头
+    // = 后续 mean reversion → 评级越高反而 30 天后跌得越多。
+    //
+    // 新版重分配：降权"当天爆发"维度，加重"持续累积"维度（预突破吸筹 / 长期均线 / 蓄势紧度）。
+    //
+    //   形态分 (0-25): 位置 20 + 实体 5         （位置降 2、实体降 3）
+    //   量能分 (0-25): 突破当天 10 + 预突破 15  （当天爆发降权，累积升权）
+    //   均线分 (0-20): 短期 10 + 长期 10        （短期降权，长期升权）
+    //   蓄势分 (0-10): 时长越长越紧 = 越好  ★ 新增
+    //   大盘分 (0-20): 不变
+    //   ─────────────────────────────────────
+    //   合计 100
 
-    // Stage 3 实体饱满度（突破 K 的 body/range）
+    // === 形态分 (0-25) ===
+    // 位置（0-20）：健康介入区 = [回踩买点, 追涨买点 = 突破价×1.01]
+    let formScore = 0
+    const lastClose = closes[lastIdx]
+    const goldenBuy = event.goldenBuyPrice ?? null
+    const chasePrice = event.breakoutPrice != null ? event.breakoutPrice * 1.01 : null
+
+    let positionScore = 0
+    let positionLabel = null
+    if (goldenBuy != null && chasePrice != null && goldenBuy < chasePrice) {
+        if (lastClose >= goldenBuy && lastClose <= chasePrice) {
+            positionScore = 20; positionLabel = '健康介入区'
+        } else if (lastClose < goldenBuy) {
+            const drop = (goldenBuy - lastClose) / goldenBuy
+            if      (drop <= 0.03) { positionScore = 12; positionLabel = '浅跌破回踩' }
+            else if (drop <= 0.10) { positionScore = 5;  positionLabel = '深跌破回踩' }
+            else                   { positionScore = 1;  positionLabel = '远跌破回踩' }
+        } else {
+            const overChase = (lastClose - chasePrice) / chasePrice
+            if      (overChase <= 0.05) { positionScore = 14; positionLabel = '小幅追涨' }
+            else if (overChase <= 0.10) { positionScore = 7;  positionLabel = '追涨偏高' }
+            else if (overChase <= 0.20) { positionScore = 2;  positionLabel = '已追高' }
+            else                        { positionScore = 0;  positionLabel = '远超追涨(过热)' }
+        }
+    }
+    formScore += positionScore
+    if (positionLabel) reasons.push(positionLabel)
+
+    // 实体饱满度（0-5，原 8 → 5 降权）
     if (event.s3Idx >= 0) {
         const k = klines[event.s3Idx]
         const range = +k.high - +k.low
         const body  = Math.abs(+k.close - +k.open)
         if (range > 0) {
             const ratio = body / range
-            if      (ratio >= 0.75) { formScore += 8; reasons.push('实体饱满') }
-            else if (ratio >= 0.55) { formScore += 5 }
-            else                    { formScore += 2 }
+            if      (ratio >= 0.75) { formScore += 5; reasons.push('实体饱满') }
+            else if (ratio >= 0.55) { formScore += 3 }
+            else                    { formScore += 1 }
         }
     }
-    formScore = Math.min(30, formScore)
+    formScore = Math.min(25, formScore)
 
-    // === 量能分 (0-25) ===
+    // === 量能分 (0-25) — 突破当天降权 + 预突破累积升权 ===
     let volScore = 0
+    // 突破当天量比（0-10，原 15 → 10 降权）
     if (event.s3Idx >= 0) {
         const vr = volumeRatio(klines, event.s3Idx, 5)
         if (vr != null) {
-            if      (vr >= 1.5 && vr <= 2.5) { volScore += 15; reasons.push(`突破量比 ${vr.toFixed(1)}× 健康`) }
-            else if (vr > 2.5  && vr <= 3.5) { volScore += 10; reasons.push(`突破量比 ${vr.toFixed(1)}× 偏高`) }
-            else if (vr >= 1.3)              { volScore += 8 }
+            if      (vr >= 1.5 && vr <= 2.5) { volScore += 10; reasons.push(`突破量比 ${vr.toFixed(1)}× 健康`) }
+            else if (vr > 2.5  && vr <= 3.5) { volScore += 5;  reasons.push(`突破量比 ${vr.toFixed(1)}× 偏高`) }
+            else if (vr >= 1.3)              { volScore += 7 }
         }
     }
-    // 预突破温和放量铺垫
+    // 预突破温和放量铺垫（0-15，原 10 → 15 升权）— 主力暗中吸筹的真信号
     const preBars = event.preBreakoutVolBars || 0
-    if      (preBars >= 3) { volScore += 10; reasons.push(`突破前 ${preBars} 根温和放量铺垫`) }
-    else if (preBars >= 2) { volScore += 7;  reasons.push(`突破前 ${preBars} 根温和放量`) }
-    else if (preBars >= 1) { volScore += 4 }
+    if      (preBars >= 3) { volScore += 15; reasons.push(`突破前 ${preBars} 根温和放量(主力吸筹)`) }
+    else if (preBars >= 2) { volScore += 10; reasons.push(`突破前 ${preBars} 根温和放量`) }
+    else if (preBars >= 1) { volScore += 5 }
     volScore = Math.min(25, volScore)
 
-    // === 均线分 (0-25) — MA60 作为评级加分项，不做硬过滤 ===
+    // === 均线分 (0-20) — 短期降权 + 长期升权 ===
     let maScore = 0
     const m5  = ma5Arr [lastIdx]
     const m10 = ma10Arr[lastIdx]
     const m20 = ma20Arr[lastIdx]
     const m60 = ma60Arr[lastIdx]
     const close = closes[lastIdx]
-    if (m5 != null && m20 != null) {
-        if (close > m20 && m5 > m20) maScore += 10  // 基础多头（detector 已要求）
-        if (m10 != null && m5 > m10 && m10 > m20) { maScore += 8; reasons.push('MA5>10>20 标准多头') }
-        if (m60 != null && m20 > m60) { maScore += 4; reasons.push('MA20 > MA60') }
-        if (m60 != null && m5 > m10 && m10 > m20 && m20 > m60) {
-            maScore += 3
-            // 把"标准多头"提升为"强势多头"
+    // 短期 (0-10)
+    if (m5 != null && m20 != null && close > m20 && m5 > m20) {
+        maScore += 5
+        if (m10 != null && m5 > m10 && m10 > m20) { maScore += 5; reasons.push('MA5>10>20 标准多头') }
+    }
+    // 长期 (0-10) — MA60 作为中长线趋势锚（升权，原 7 → 10）
+    if (m60 != null && m20 != null && m20 > m60) {
+        maScore += 5; reasons.push('MA20 > MA60')
+        if (m5 != null && m10 != null && m5 > m10 && m10 > m20) {
+            maScore += 5
+            // 升级标签
             const idx = reasons.indexOf('MA5>10>20 标准多头')
             if (idx >= 0) reasons[idx] = 'MA5>10>20>60 强势多头'
+            else reasons.push('MA20>MA60 长期多头')
         }
     }
-    maScore = Math.min(25, maScore)
+    maScore = Math.min(20, maScore)
+
+    // === 蓄势分 (0-10) ★ 新增 — 持续性信号：蓄势越长越紧 = 突破后能量越足 ===
+    let consolidationScore = 0
+    if (event.s1StartIdx != null && event.s1EndIdx != null) {
+        const bars = event.s1EndIdx - event.s1StartIdx + 1
+        if      (bars >= 80) { consolidationScore += 6; reasons.push(`蓄势 ${bars} 根(超长)`) }
+        else if (bars >= 50) { consolidationScore += 4; reasons.push(`蓄势 ${bars} 根(长)`) }
+        else if (bars >= 30) { consolidationScore += 2 }
+
+        // 振幅紧度（dynMaxRange 越小越紧，奖励紧蓄势）
+        if (event.dynMaxRange != null) {
+            if      (event.dynMaxRange <= 0.10) { consolidationScore += 4; reasons.push('低波动紧蓄势') }
+            else if (event.dynMaxRange <= 0.15) { consolidationScore += 2 }
+        }
+    }
+    consolidationScore = Math.min(10, consolidationScore)
 
     // === 大盘分 (0-20) ===
     const envScore01 = marketEnv && typeof marketEnv.score === 'number'
@@ -1063,17 +1132,29 @@ export function gradeFreshSignal(klines, event, distancePct, marketEnv) {
     if (marketEnv) reasons.push(`大盘${marketEnv.level}`)
 
     // === 总分 + 评级 ===
-    const score = formScore + volScore + maScore + envScore
+    const score = formScore + volScore + maScore + consolidationScore + envScore
     let grade
     if      (score >= 85) grade = 'S'
     else if (score >= 70) grade = 'A'
     else if (score >= 55) grade = 'B'
     else                  grade = 'C'
 
+    // Phase 4：weeklyConfirmed 作为独立维度输出，不再绑进 grade
+    // 实证：降级反而让 grade 信号变扁平（B/C 接近），grade + weeklyConfirmed 独立排序更清晰
+    if      (weeklyConfirmed === true)  reasons.push('✓ 周线趋势确认')
+    else if (weeklyConfirmed === false) reasons.push('✗ 周线未确认')
+
     return {
         grade,
         score,
-        breakdown: { form: formScore, vol: volScore, ma: maScore, env: envScore },
+        weeklyConfirmed,               // null / true / false（独立维度）
+        breakdown: {
+            form: formScore,           // 0-25
+            vol: volScore,             // 0-25
+            ma: maScore,               // 0-20
+            consolidation: consolidationScore,  // 0-10  ★ Phase 3 v2 新增
+            env: envScore,             // 0-20
+        },
         reasons,
     }
 }
@@ -1394,6 +1475,222 @@ export function detectThreeStageLaunch(klines, opts = {}) {
         i = s1End + 5
     }
     return events
+}
+
+// ---------------- 🎯 二次买点检测（Phase 6 第三档买点）----------------
+/**
+ * 突破后第二次入场机会：回踩不破 + 反包阳线。
+ *
+ * 触发流程（最干净的一种形态，不含走四方 / 单阳不破 / 涨停回踩等口语形态）：
+ *   1. Stage 3 突破 K 之后扫描 N 根
+ *   2. 找第一根"回踩K"：close < 突破K收盘（出现回调）
+ *      且 close ≥ goldenBuyPrice × 0.97（没跌破回踩位 = 形态没破）
+ *   3. 回踩K 之后找"反包K"：阳线 + close > 前一根 close + 实体饱满 ≥ 0.5
+ *   4. 新鲜度过滤：反包K必须在最近 freshWithinBars 根内（否则信号已过期，没参考意义）
+ *
+ * 实战意义：用户错过 Stage 3 fresh 窗口、票仍处于 rally 状态时，反包是第二次介入信号。
+ *
+ * @param klines  日 K 线
+ * @param event   detectThreeStageLaunch 返回的 Stage 3 event
+ * @param opts:
+ *   scanWindow         突破后扫描根数（默认 30）
+ *   pullbackToleranceRatio  跌破 goldenBuyPrice 的容忍比例（默认 0.97 = 允许跌破 3%）
+ *   reboundBodyMin     反包K实体饱满度下限（默认 0.5）
+ *   freshWithinBars    反包K距今上限（默认 10 根，约 2 周）— 过期信号无介入意义
+ * @returns { idx, time, pullbackIdx, pullbackTime, pullbackLow, reboundClose, barsAgo } 或 null
+ */
+export function detectSecondaryEntry(klines, event, opts = {}) {
+    const {
+        scanWindow             = 30,
+        pullbackToleranceRatio = 0.97,
+        reboundBodyMin         = 0.5,
+        freshWithinBars        = 10,
+    } = opts
+
+    if (!event || event.s3Idx == null || event.currentStage !== 3) return null
+    if (!Array.isArray(klines)) return null
+
+    const breakoutClose = +klines[event.s3Idx]?.close
+    if (!(breakoutClose > 0)) return null
+    const goldenBuy = event.goldenBuyPrice ?? null
+    const start = event.s3Idx + 1
+    const end = Math.min(klines.length - 1, start + scanWindow - 1)
+    if (start > end) return null
+
+    // 找第一根"回踩K" — 突破后第一次 close < breakoutClose
+    let pullbackIdx = -1
+    for (let t = start; t <= end; t++) {
+        if (+klines[t].close < breakoutClose) {
+            pullbackIdx = t
+            break
+        }
+    }
+    if (pullbackIdx < 0) return null   // 突破后一路没回踩 → 没二次买点（也不需要，一路涨）
+
+    // 检查回踩没破回踩位（形态没破坏）
+    const pullbackClose = +klines[pullbackIdx].close
+    if (goldenBuy != null && pullbackClose < goldenBuy * pullbackToleranceRatio) return null
+
+    // 找反包K — 回踩后第一根满足条件的 K
+    for (let t = pullbackIdx + 1; t <= end; t++) {
+        const k     = klines[t]
+        const close = +k.close
+        const open  = +k.open
+        const high  = +k.high
+        const low   = +k.low
+        const body  = Math.abs(close - open)
+        const range = high - low
+        const prevClose = +klines[t - 1].close
+
+        if (close > open                                  // 阳线
+            && close > prevClose                          // 收盘超过前一根 close
+            && range > 0 && body / range >= reboundBodyMin
+        ) {
+            // 新鲜度过滤：反包K距今超过 freshWithinBars → 信号已过期没参考意义
+            const lastIdx = klines.length - 1
+            const barsAgo = lastIdx - t
+            if (barsAgo > freshWithinBars) return null
+
+            return {
+                idx:          t,
+                time:         k.time,
+                pullbackIdx,
+                pullbackTime: klines[pullbackIdx].time,
+                pullbackLow:  pullbackClose,
+                reboundClose: close,
+                barsAgo,
+            }
+        }
+    }
+
+    return null
+}
+
+// ---------------- 📅 周线共振确认（Phase 4 多周期过滤）----------------
+/**
+ * 判断周 K 是否处于趋势确认状态。日线突破 + 周线确认 = 真趋势变化（不是日线 noise）。
+ *
+ * 设计依据：
+ *   - A 股散户主导、日线 noise 多；周线突破才是机构 / 真实资金流入信号
+ *   - 周线趋势确认 = (close > 周MA20) + (周MA20 上行) + (周MA5 > 周MA20)
+ *   - 需要至少 25 周数据（约半年）才能算 MA20
+ *
+ * @param weeklyKlines  周 K 线数组
+ * @returns boolean — true 表示周线层面也处于多头趋势
+ */
+export function hasWeeklyTrendConfirmation(weeklyKlines) {
+    if (!Array.isArray(weeklyKlines) || weeklyKlines.length < 25) return false
+
+    const closes = weeklyKlines.map(k => +k.close)
+    const ma5Arr  = ma(closes, 5)
+    const ma20Arr = ma(closes, 20)
+    const last = closes.length - 1
+    const lastClose = closes[last]
+    const m5  = ma5Arr[last]
+    const m20 = ma20Arr[last]
+    if (m20 == null || m5 == null) return false
+
+    // 4 周前的 MA20 — 用来判断 MA20 是否上行
+    const m20Prev4 = last >= 4 ? ma20Arr[last - 4] : null
+    if (m20Prev4 == null) return false
+
+    // 三个条件必须都满足才算"周线确认"
+    const aboveMA20  = lastClose > m20
+    const ma20Rising = m20 > m20Prev4 * 1.005   // MA20 上行 ≥ 0.5%（4周）
+    const ma5AboveMA20 = m5 > m20
+
+    return aboveMA20 && ma20Rising && ma5AboveMA20
+}
+
+// ---------------- 🚪 主升结束信号（Phase 2 离场 detector）----------------
+/**
+ * 给定一个 Stage 3 突破 event，扫描其之后的 K 线找退场信号。
+ *
+ * 三档信号（按严重程度递增）：
+ *   - 'reduce'：减仓警示（爆量长上影 + 量比 ≥ 3.5）—— 不立即清仓，提示风险
+ *   - 'exit'  ：清仓信号（跌破 MA10）—— 趋势走破
+ *   - 'invalid'：形态作废（跌破突破K收盘 / 跌破蓄势下沿×0.97）—— 立即全清
+ *
+ * 设计依据 — 全市场回测（4743 只 × 1 年）数据：
+ *   - 旧版用静态 stopLossPrice = s1Lower×0.97 作止损 → 触发率仅 1.28%（形同虚设）
+ *   - 平均收益 5.52% / 中位收益仅 0.68% → 长尾驱动，大量信号 30 天后基本不动
+ *   - 急需"主升走破"动态信号代替静态止损位
+ *
+ * 命中遵循"先发生先生效"：'invalid' / 'exit' 一旦触发立即返回（已无意义继续扫）
+ * 'reduce' 不返回，继续扫，最终返回所有命中
+ *
+ * @param klines  日K线
+ * @param event   detectThreeStageLaunch 返回的 Stage 3 event（必须有 s3Idx, breakoutPrice, s1Lower）
+ * @param opts:
+ *   recencyBars     检查范围 = breakoutIdx 之后多少根（默认 60，覆盖典型主升周期）
+ *   protectBars     突破后保护期（前 N 根不查 MA10 / 突破价跌破，避免噪音）
+ *   volClimaxRatio  爆量阈值（量比 ≥ 多少算爆量）
+ *   shadowRatio     长上影阈值（上影 / 实体）
+ * @returns [{ idx, time, level: 'reduce'|'exit'|'invalid', reason }, ...]
+ */
+export function detectRallyExhaustion(klines, event, opts = {}) {
+    const {
+        recencyBars     = 60,
+        protectBars     = 3,
+        volClimaxRatio  = 3.5,
+        shadowRatio     = 1.5,
+    } = opts
+
+    if (!klines || !event || event.s3Idx == null || event.s3Idx < 0) return []
+    const n = klines.length
+    const start = event.s3Idx + 1
+    if (start >= n) return []
+
+    const closes = klines.map(k => +k.close)
+    // Phase 2 锁定 Option A 基线：MA10。Option B 试过 MA20 反而胜率从 41% 跌到 34% —
+    // 数据证明 MA10 的"假信号"其实多为真信号，给它机会反弹反而亏更多。
+    const ma10Arr = ma(closes, 10)
+
+    const out = []
+    const end = Math.min(n - 1, start + recencyBars - 1)
+    const bp = event.breakoutPrice
+    const sl = event.s1Lower != null ? event.s1Lower * 0.97 : null
+
+    for (let t = start; t <= end; t++) {
+        const k = klines[t]
+        const close = +k.close
+        const open  = +k.open
+        const high  = +k.high
+        const body  = Math.abs(close - open)
+        const upperShadow = high - Math.max(open, close)
+
+        // === Level 'invalid'：形态作废（仅跌破蓄势下沿这种真正破位）===
+        if (sl != null && close < sl) {
+            out.push({ idx: t, time: k.time, level: 'invalid', reason: '跌破蓄势下沿×0.97' })
+            return out
+        }
+
+        // === Level 'exit'：趋势走破（突破后保护期外才查）===
+        // Phase 2.2 调整：把"跌破突破K收盘"从 invalid 降级为 exit，加 0.97 缓冲。
+        // 旧版（0 缓冲 + invalid）在主板 3001 只回测里 invalid 率 65%，过度激进，
+        // 砍掉大量"突破后小幅回踩 -2% 又涨回去"的健康形态。3% 缓冲 + 降级为 exit
+        // 与 MA10 跌破并列，让"跌破突破K"和"跌破MA10"成为同等级的趋势走破信号。
+        if (bp != null && close < bp * 0.97 && t >= start + protectBars) {
+            out.push({ idx: t, time: k.time, level: 'exit', reason: '跌破突破K收盘×0.97' })
+            return out
+        }
+        if (ma10Arr[t] != null && close < ma10Arr[t] && t >= start + protectBars) {
+            out.push({ idx: t, time: k.time, level: 'exit', reason: '跌破MA10' })
+            return out
+        }
+
+        // === Level 'reduce'：爆量长上影警示（不返回，继续扫）===
+        if (body > 0 && upperShadow > body * shadowRatio) {
+            const vr = volumeRatio(klines, t, 5)
+            if (vr != null && vr >= volClimaxRatio) {
+                out.push({
+                    idx: t, time: k.time, level: 'reduce',
+                    reason: `爆量长上影(VR=${vr.toFixed(1)})`,
+                })
+            }
+        }
+    }
+    return out
 }
 
 // ---------------- 主升 / 主跌段识别（独立趋势段染色）----------------
@@ -1998,4 +2295,329 @@ export function detectPlatforms(klines, opts = {}) {
         const priorAvg = priorSum / priorCount
         return inAvg < priorAvg * volumeShrinkRatio
     })
+}
+
+
+// ============== 龙回头检测器 ==============
+//
+// 真龙回头特征：短促拉升 + 快速回踩，整个周期 10~30 天就完事。
+//
+// Phase 1 加固（基于外审反馈）：
+//   • 连板硬约束（cluster 内必须存在连续 2 板，过滤"零散涨停伪龙"）
+//   • 量能基期改用回踩末期均量（不再被涨停日基期污染）
+//   • 启动 K 形态约束（实体占比 50% 或涨幅 4%，过滤上影线诱多）
+//   • 上市 ≥ 60 日（次新逻辑性质不同，先剔除避免噪声）
+//
+// 三段式逻辑：
+//   1. 龙（短促拉升 + 连板锁筹）：clusterWindow 根内堆 ≥ minLimitUps 个涨停 + 至少出现一次连板
+//   2. 回头（迫切型）：高点 ≤ peakMaxBarsAgo 根前 + 回踩 [pullbackMin, pullbackMax]% + 近 N 根振幅收敛
+//   3. 启动：近 signalLookback 根至少一根 K，满足 量比≥signalVolRatio (vs 回踩末期均量) + 实体或涨幅约束
+//
+// 涨停阈值 close/prev_close ≥ 1.095（主板 10% / 创业科创 20% 都覆盖）。
+//
+// @param {Object} klines  日 K 数组
+// @param {Object} opts    可调参数
+// @returns {Object|null}
+export function detectDragonReturn(klines, opts = {}) {
+    const {
+        clusterWindow      = 15,    // 涨停聚集窗口：15 根内 ≥3 涨停
+        minLimitUps        = 3,     // 涨停板下限
+        limitUpThreshold   = 1.095, // close/prev_close 阈值（主板 10% / 创业 20% 全覆盖）
+        peakMaxBarsAgo     = 15,    // 峰值 ≤ N 根前
+        pullbackMin        = 15,    // 回踩 ≥ 15%
+        pullbackMax        = 30,    // 回踩 ≤ 30%（再深就是死龙）
+        stabilizeBars      = 5,     // 近 N 根振幅收敛
+        stabilizeRangePct  = 10,    // 5 根范围振幅 ≤ 10%
+        // ↓ Phase 1 加固 + 后续松动调整（兼顾质量与命中率）
+        signalLookback     = 5,     // 近 N 根找启动 K（3→5：覆盖整周信号）
+        signalVolRatio     = 1.7,   // 启动 K 量比 vs 回踩末期均量（2.0→1.7：包容温和启动）
+        pullbackEndBars    = 5,     // 启动 K 之前 N 根作为"回踩末期地量"基期
+        ignitionMinBodyRatio = 0.5, // 启动 K 实体占 K 线全长比例下限
+        ignitionMinPct     = 4,     // 或涨幅 ≥ 4%（与上面 OR 关系）
+        consecutiveWindow  = 3,     // 连板软化：3 天内含 2 个涨停即认（含"涨停-横-涨停"型）
+        minIpoBars         = 60,    // 上市 < N 根的次新跳过（数据本身就不足）
+    } = opts
+
+    // 数据长度：至少要装下 search 窗口 + 稳定区 + IPO 过滤
+    const minLen = Math.max(minIpoBars, peakMaxBarsAgo + clusterWindow + stabilizeBars + 5)
+    if (!Array.isArray(klines) || klines.length < minLen) return null
+
+    const n = klines.length
+    const lastIdx = n - 1
+
+    // 1. 找涨停聚集：在最近 (peakMaxBarsAgo + clusterWindow) 根范围内，
+    //    寻找任一 clusterWindow 根滑动窗口里含 ≥ minLimitUps 个涨停
+    const searchStart = Math.max(1, lastIdx - (peakMaxBarsAgo + clusterWindow) + 1)
+    const limitUpIndices = []
+    for (let t = searchStart; t <= lastIdx; t++) {
+        const prev = +klines[t - 1].close
+        const close = +klines[t].close
+        if (prev > 0 && close / prev >= limitUpThreshold) {
+            limitUpIndices.push(t)
+        }
+    }
+    if (limitUpIndices.length < minLimitUps) return null
+
+    // 滑动窗口找最早的合格 cluster
+    let clusterStart = -1, clusterCount = 0, clusterIndices = []
+    for (let i = 0; i <= limitUpIndices.length - minLimitUps; i++) {
+        const span = limitUpIndices[i + minLimitUps - 1] - limitUpIndices[i] + 1
+        if (span <= clusterWindow) {
+            clusterStart = limitUpIndices[i]
+            clusterIndices = limitUpIndices.filter(
+                idx => idx >= clusterStart && idx <= clusterStart + clusterWindow - 1,
+            )
+            clusterCount = clusterIndices.length
+            break
+        }
+    }
+    if (clusterStart < 0) return null
+
+    // 1.1 连板软化约束：cluster 内必须存在 consecutiveWindow 天内含 ≥ 2 涨停的紧密簇
+    // 涵盖：连板（间隔 1）/ 涨停-横盘-涨停（间隔 2-3）
+    // 过滤掉：涨停-跌停-涨停-横盘 5 天-涨停 这类零散反复票
+    const hasTightCluster = clusterIndices.some(
+        (idx, i) => i > 0 && (idx - clusterIndices[i - 1]) < consecutiveWindow,
+    )
+    if (!hasTightCluster) return null
+
+    // 2. 高点：从 cluster 开始到现在的最高 high
+    let peakIdx = clusterStart
+    let peakHigh = +klines[clusterStart].high
+    for (let t = clusterStart; t <= lastIdx; t++) {
+        const h = +klines[t].high
+        if (h > peakHigh) { peakHigh = h; peakIdx = t }
+    }
+    if (!(peakHigh > 0)) return null
+
+    // 高点必须近 peakMaxBarsAgo 根（迫切型回头）
+    const peakBarsAgo = lastIdx - peakIdx
+    if (peakBarsAgo > peakMaxBarsAgo) return null
+
+    // 3. 回踩幅度（峰 → 现价）
+    const lastClose = +klines[lastIdx].close
+    const pullbackPct = (peakHigh - lastClose) / peakHigh * 100
+    if (pullbackPct < pullbackMin || pullbackPct > pullbackMax) return null
+
+    // 4. 近 stabilizeBars 根振幅收敛（回头企稳）
+    const stabStart = lastIdx - stabilizeBars + 1
+    if (stabStart <= peakIdx) return null     // 还没回完，峰还在企稳窗口里
+    let stabHigh = 0, stabLow = Infinity
+    for (let t = stabStart; t <= lastIdx; t++) {
+        const h = +klines[t].high, l = +klines[t].low
+        if (h > stabHigh) stabHigh = h
+        if (l < stabLow) stabLow = l
+    }
+    const stabRangePct = stabLow > 0 ? (stabHigh - stabLow) / stabLow * 100 : 999
+    if (stabRangePct > stabilizeRangePct) return null
+
+    // 5. 启动信号：近 signalLookback 根找一根满足
+    //    a) 收阳
+    //    b) 量比 ≥ signalVolRatio （基期 = 启动 K 之前 pullbackEndBars 根均量，地量基期）
+    //    c) 实体 ≥ 50% 全长 OR 涨幅 ≥ 4%（剔除上影线诱多）
+    const ignStart = lastIdx - signalLookback + 1
+    let ignitionIdx = -1
+    let ignitionVr = null
+    for (let t = ignStart; t <= lastIdx; t++) {
+        const open = +klines[t].open
+        const close = +klines[t].close
+        const high = +klines[t].high
+        const low = +klines[t].low
+        if (close <= open) continue                 // 必须收阳
+
+        // 量比基期：启动 K 之前 pullbackEndBars 根均量（地量基期，不被涨停日污染）
+        const baseStart = Math.max(0, t - pullbackEndBars)
+        if (baseStart >= t) continue
+        let volSum = 0, volCnt = 0
+        for (let k = baseStart; k < t; k++) {
+            const v = +klines[k].vol
+            if (Number.isFinite(v) && v > 0) { volSum += v; volCnt++ }
+        }
+        if (volCnt === 0) continue
+        const baseVol = volSum / volCnt
+        const ignVol = +klines[t].vol
+        if (!(baseVol > 0) || !(ignVol > 0)) continue
+        const realVr = ignVol / baseVol
+        if (realVr < signalVolRatio) continue       // 量能不足
+
+        // K 线形态：实体占比 ≥ 50% 或 涨幅 ≥ 4%
+        const body = Math.abs(close - open)
+        const range = high - low
+        const bodyRatio = range > 0 ? body / range : 0
+        const prevClose = +klines[t - 1].close
+        const pct = prevClose > 0 ? (close - prevClose) / prevClose * 100 : 0
+        if (bodyRatio < ignitionMinBodyRatio && pct < ignitionMinPct) continue
+
+        ignitionIdx = t
+        ignitionVr  = realVr
+        break
+    }
+    if (ignitionIdx < 0) return null
+
+    return {
+        // 龙（cluster 内涨停数 — 不是全 60 天的）
+        limitUpCount:     clusterCount,
+        clusterStartIdx:  clusterStart,
+        clusterStartTime: klines[clusterStart].time,
+        // 高点
+        peakIdx,
+        peakBarsAgo,
+        peakTime:         klines[peakIdx].time,
+        peakHigh,
+        // 回头
+        pullbackPct,
+        stabRangePct,
+        // 启动
+        ignitionIdx,
+        ignitionTime:     klines[ignitionIdx].time,
+        ignitionVr,
+        // 现状
+        lastClose,
+        // 推荐买价（启动 K 收盘）
+        suggestedEntry:   +klines[ignitionIdx].close,
+        // 止损：回踩区低点 × 0.97
+        stopLoss:         stabLow * 0.97,
+    }
+}
+
+
+// ============== 连板游资策略（Ptrade 1:1 迁移）==============
+//
+// 来源：Ptrade 量化平台「极速优化版游资连板策略」
+// 核心：今日触板股 + 三种形态（连板接力 / 反包确认 / 摸板试盘）+ 妖股基因
+//
+// 涨停判定：close >= high_limit - 0.01 - EPSILON 且 volume > 0（排除停牌假板）
+// 涨停幅度：主板 10% / 创业科创 20% / ST 5%（按 code 段 + 名称识别）
+//
+// @param {Array}   klines  日 K 数组（至少 30 根）
+// @param {Object}  opts
+//   @param {String}  code    股票代码（决定主板/创业/科创涨停幅度）
+//   @param {String}  name    股票名（识别 ST：含 'ST'/'*ST' 即 ST 股）
+// @returns {Object|null}  匹配则返回 { mode, height, boards5, ... }，否则 null
+export function detectLimitUpRelay(klines, opts = {}) {
+    const { code = '', name = '' } = opts
+
+    if (!Array.isArray(klines) || klines.length < 30) return null
+    const n = klines.length
+    const lastIdx = n - 1
+    const EPSILON = 1e-6
+
+    // ---------------- 涨停幅度判定 ----------------
+    const isST = /\*?ST/i.test((name || '').replace(/\s+/g, ''))
+    let limitPct
+    if (isST) limitPct = 1.05
+    else if (/^(30|688)/.test(code)) limitPct = 1.20
+    else limitPct = 1.10
+
+    function calcLimit(prevClose) {
+        // 跟 A 股实际规则对齐：四舍五入到 2 位小数
+        return Math.round(prevClose * limitPct * 100) / 100
+    }
+
+    // ---------------- 涨停矩阵（含成交量约束）----------------
+    // 每根 K 是否涨停：close >= limit - 0.01 - EPSILON 且 volume > 0
+    // 停牌日 vol = 0 → 即使 close 看起来 == limit 也不算涨停
+    const isZt = new Array(n).fill(false)
+    for (let t = 1; t < n; t++) {
+        const prevClose = +klines[t - 1].close
+        const close = +klines[t].close
+        const vol = +klines[t].vol
+        if (!(prevClose > 0) || !(close > 0)) continue
+        const limit = calcLimit(prevClose)
+        if (close >= limit - 0.01 - EPSILON && vol > 0) {
+            isZt[t] = true
+        }
+    }
+
+    // ---------------- 关键价格 ----------------
+    const c0 = +klines[lastIdx].close       // 今日收盘
+    const c1 = +klines[lastIdx - 1].close    // 昨日收盘
+    const c2 = +klines[lastIdx - 2].close    // 前日收盘
+    const h0 = +klines[lastIdx].high         // 今日最高
+    const v0 = +klines[lastIdx].vol          // 今日成交量
+
+    if (!(c0 > 0) || !(v0 > 0)) return null  // 今日停牌或数据异常 → 跳过
+
+    const limit0 = calcLimit(c1)             // 今日涨停价（基于昨日收盘）
+    const isAlive = v0 > 0
+    const isZt0 = isZt[lastIdx]
+    const isZt1 = isZt[lastIdx - 1]
+
+    // ---------------- 三种形态识别 ----------------
+    // A) 连板接力：今天涨停 + 昨天涨停
+    const modeA = isZt0 && isZt1
+    // B) 反包确认：今天涨停 + 昨天未涨停 + 昨日相对前日跌幅 < 8%（c1/c2 > 0.92）
+    const modeB = isZt0 && !isZt1 && c2 > 0 && (c1 / c2) > 0.92 - EPSILON
+    // C) 摸板试盘：今天 high 触涨停但收盘未封 + 收涨 + 上影线 < 5%
+    const touchZt0 = h0 >= limit0 - 0.01 - EPSILON
+    const upperShadow = c0 > 0 ? (h0 - c0) / c0 : 999
+    const modeC = touchZt0 && !isZt0 && c0 > c1 && upperShadow < 0.05
+
+    const formationMatched = modeA || modeB || modeC
+    if (!formationMatched) return null
+
+    // ---------------- 妖股基因 ----------------
+    // 基因 1：近 5 个有效交易日（vol > 0）至少 2 个涨停
+    //         跨停牌按"有效交易日"算，停牌日不进 5 日窗口
+    let realZt = []   // 有效交易日的涨停状态序列
+    for (let t = 0; t < n; t++) {
+        const v = +klines[t].vol
+        if (Number.isFinite(v) && v > 0) realZt.push(isZt[t])
+    }
+    const recent5 = realZt.slice(-5)
+    const recent5Zt = recent5.filter(Boolean).length
+    const hotGene = recent5Zt >= 2
+
+    if (!hotGene) return null
+
+    // 基因 2：今日 close >= 近 20 日 high 最大值 × 0.95
+    const lookback20Start = Math.max(0, lastIdx - 19)
+    let hhv20 = 0
+    for (let t = lookback20Start; t <= lastIdx; t++) {
+        const h = +klines[t].high
+        if (Number.isFinite(h) && h > hhv20) hhv20 = h
+    }
+    const newHigh = c0 >= hhv20 * 0.95 - EPSILON
+
+    if (!newHigh) return null
+
+    // ---------------- 跨停牌连板高度 + 5 天板数 ----------------
+    // height: 从最新有效交易日往前数，连续涨停的有效日数（停牌日不算断）
+    let height = 0
+    if (realZt.length > 0 && realZt[realZt.length - 1]) {
+        for (let i = realZt.length - 1; i >= 0; i--) {
+            if (realZt[i]) height++
+            else break
+        }
+    }
+    const boards5 = recent5Zt   // 跟基因 1 复用，省一次遍历
+
+    // ---------------- 形态标签 ----------------
+    const modes = []
+    if (modeA) modes.push('A')
+    if (modeB) modes.push('B')
+    if (modeC) modes.push('C')
+
+    let stat
+    if (height > 1) stat = `${height}连板`
+    else if (height === 1) stat = '首板'
+    else stat = '断板'
+
+    const reasonMap = { A: '连板接力', B: '反包确认', C: '摸板试盘' }
+    const reason = modes.map(m => reasonMap[m]).join('+')
+
+    return {
+        modes,           // ['A', 'B', ...]
+        reason,          // '连板接力+反包确认' 等
+        stat,            // '3连板' / '首板' / '断板'
+        height,          // 连板高度
+        boards5,         // 近 5 有效交易日板数
+        isST,
+        // 价格状态
+        lastClose:   c0,
+        limitPrice:  limit0,
+        hhv20,
+        // 形态标记（给 UI 排序/过滤）
+        modeA, modeB, modeC,
+    }
 }

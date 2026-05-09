@@ -28,6 +28,14 @@ export function useStockScanner(opts = {}) {
         minBars      = 100,    // 数据条数不足直接归为 errors
         excludeST    = false,  // ST 不强制排除（部分 ST 也有合法形态信号）
         excludeBJ    = true,   // 北交所（4xxx/8xxx/920xxx）pytdx 不支持 + 用户不关注，默认排除
+        // 自定义拉取函数（注入点）：默认走 api.getStockKlineViaTdx，回测可以注入带缓存的版本
+        // 必须返回 { ok, data, error?, code? } 信封，与 api.getStockKlineViaTdx 一致
+        fetchFn      = (code, tf) => api.getStockKlineViaTdx(code, tf),
+        // 自适应节流：批次执行时间 < 此值（毫秒）就跳过 gap。
+        // 用于回测缓存场景：命中缓存时 SQLite 读 + 桥接调用毫秒级 → 无需 TDX 反爬节流；
+        // cache miss 时批次会变慢（百毫秒级）→ 自动恢复 gap 保护 TDX。
+        // null 表示不启用（默认行为，每批必等 gap）
+        adaptiveGapThresholdMs = null,
     } = opts
 
     const scanning   = ref(false)
@@ -38,6 +46,7 @@ export function useStockScanner(opts = {}) {
     const results    = ref([])
     const errors     = ref([])
     const skipped    = ref(0)    // ST 等开扫前就过滤掉的数量
+    const newStocksSkipped = ref(0)  // K 线 < 60 根（新上市），独立计数不混 errors
     const startedAt  = ref(0)
 
     let _token = 0
@@ -79,20 +88,31 @@ export function useStockScanner(opts = {}) {
         results.value   = []
         errors.value    = []
         skipped.value   = skippedCount
+        newStocksSkipped.value = 0
         startedAt.value = Date.now()
 
         for (let i = 0; i < filtered.length; i += batchSize) {
             if (myToken !== _token || cancelled.value) break
             const batch = filtered.slice(i, i + batchSize)
+            const batchT0 = Date.now()
             await Promise.all(batch.map(async (s) => {
                 if (myToken !== _token || cancelled.value) return
                 currentCode.value = s.code
                 try {
                     // admin-only 扫描器走 TDX（pytdx 私有协议，无反爬）；
                     // 端点内部 TDX 失败时会自动 fallback 到普通 kline_service
-                    const res = await api.getStockKlineViaTdx(s.code, timeframe)
+                    const res = await fetchFn(s.code, timeframe)
                     if (myToken !== _token || cancelled.value) return
-                    if (!res.ok || !Array.isArray(res.data) || res.data.length < minBars) {
+                    if (!res.ok || !Array.isArray(res.data)) {
+                        errors.value.push({ code: s.code, name: s.name, reason: '数据不足' })
+                        return
+                    }
+                    // K 线 < 60 根 = 新上市股，不算 error，独立计数
+                    if (res.data.length < 60) {
+                        newStocksSkipped.value++
+                        return
+                    }
+                    if (res.data.length < minBars) {
                         errors.value.push({ code: s.code, name: s.name, reason: '数据不足' })
                         return
                     }
@@ -105,10 +125,14 @@ export function useStockScanner(opts = {}) {
                     scanned.value++
                 }
             }))
-            // 批间抖动间隔（最后一批不睡）
+            // 批间抖动间隔（最后一批不睡）；自适应：批次响应快说明走的是缓存，跳过 gap
             if (i + batchSize < filtered.length && !cancelled.value && myToken === _token) {
-                const gap = minGapMs + Math.random() * (maxGapMs - minGapMs)
-                await new Promise(r => setTimeout(r, gap))
+                const batchElapsed = Date.now() - batchT0
+                const fastBatch = adaptiveGapThresholdMs != null && batchElapsed < adaptiveGapThresholdMs
+                if (!fastBatch) {
+                    const gap = minGapMs + Math.random() * (maxGapMs - minGapMs)
+                    await new Promise(r => setTimeout(r, gap))
+                }
             }
         }
 
@@ -135,7 +159,7 @@ export function useStockScanner(opts = {}) {
 
     return {
         // state
-        scanning, cancelled, scanned, total, currentCode, results, errors, skipped, progressPct, startedAt,
+        scanning, cancelled, scanned, total, currentCode, results, errors, skipped, newStocksSkipped, progressPct, startedAt,
         // actions
         scan, cancel, reset,
     }

@@ -17,6 +17,11 @@ import { useStockScanner } from '../composables/useStockScanner'
 import { useMarketEnv } from '../composables/useMarketEnv'
 import { api } from '../api/client'
 import { pushSuccess, pushError } from '../composables/useNotifications'
+import { useDraggable } from '../composables/useDraggable'
+
+// 拖动支持：用户可拖动 modal 标题栏到任意位置；不点 ✕ 不会关闭
+const modalRef = ref(null)
+const { style: draggableStyle, onMouseDown: onHeaderMouseDown, reset: resetDragPos } = useDraggable(modalRef)
 
 const props = defineProps({
     open:   { type: Boolean, default: false },
@@ -87,6 +92,13 @@ async function startScan() {
             : null
         // 蓄势已经持续了多少根
         const consolidationBars = evt.s1EndIdx - evt.s1StartIdx + 1
+
+        // === 候选有效性过滤 ===
+        // 1) 距突破 > 5%：detector S3 窗口（30 根）漏抓的"远古逃逸突破"，不是真候选
+        // 2) 蓄势 > 80 根：先涨后跌再蓄势的长期横盘，多为"卡住的票"，不符合主升需求
+        if (distanceToBreakPct != null && distanceToBreakPct > 5)  return null
+        if (consolidationBars > 80) return null
+
         // 当前价距黄金买点（如果 Stage 2 已确立，黄金买点是有意义的回踩位）
         const distanceToGoldenPct = evt.goldenBuyPrice
             ? (lastClose - evt.goldenBuyPrice) / evt.goldenBuyPrice * 100
@@ -252,8 +264,12 @@ function stageBadge(stage) {
 }
 
 watch(() => props.open, (v) => {
-    if (v) startScan()
-    else scanner.cancel()
+    if (v) {
+        resetDragPos()      // 每次打开都回到屏幕中央
+        startScan()
+    } else {
+        scanner.cancel()
+    }
 })
 
 function onKeydown(e) {
@@ -268,14 +284,17 @@ onUnmounted(() => {
 
 <template>
     <Transition name="fade">
+        <!-- 遮罩：不再点击关闭（用户要求只通过 ✕ 关），仅起视觉聚焦作用 -->
         <div v-if="open"
-             @click="$emit('close')"
-             class="fixed inset-0 bg-black/30 z-[300] flex items-center justify-center">
-            <div @click.stop
-                 class="bg-white rounded-[10px] shadow-[0_10px_40px_rgba(0,0,0,0.18)]
+             class="fixed inset-0 bg-black/30 z-[300]">
+            <!-- 弹窗本体：absolute 定位，初始 50%+translate 居中；拖动后 left/top 跟踪鼠标 -->
+            <div ref="modalRef"
+                 :style="draggableStyle"
+                 class="absolute bg-white rounded-[10px] shadow-[0_10px_40px_rgba(0,0,0,0.18)]
                         w-[820px] max-w-[94vw] max-h-[82vh] overflow-hidden flex flex-col">
-                <!-- Header -->
-                <div class="px-[16px] py-[12px] border-b border-[#f0f0f0] flex items-center gap-[10px]">
+                <!-- Header（可拖动；点其上的按钮 / 输入元素不触发拖动）-->
+                <div @mousedown="onHeaderMouseDown"
+                     class="px-[16px] py-[12px] border-b border-[#f0f0f0] flex items-center gap-[10px] cursor-move select-none">
                     <span class="text-[14px] font-bold text-[#111]">{{ title }}</span>
                     <span class="text-[11px] text-[#94a3b8]">{{ subtitle }}</span>
                     <!-- 大盘环境 chip -->
