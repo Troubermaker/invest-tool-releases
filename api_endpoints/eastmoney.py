@@ -222,6 +222,32 @@ def raw_em_fast_news():
     return fetch_json(url, params=params, headers=headers)
 
 
+# ---------------- 龙虎榜 ---------------- #
+
+def raw_em_lhb_daily_list(start_date, end_date, page_size=500, page_number=1):
+    """
+    东方财富龙虎榜每日列表。
+      start_date / end_date: 'YYYY-MM-DD'
+      page_size / page_number: 分页（一天最多 100-200 条记录）
+    """
+    url = 'https://datacenter-web.eastmoney.com/api/data/v1/get'
+    params = {
+        'sortColumns': 'TRADE_DATE,SECURITY_CODE',
+        'sortTypes':   '-1,1',
+        'pageSize':    page_size,
+        'pageNumber':  page_number,
+        'reportName':  'RPT_DAILYBILLBOARD_DETAILSNEW',
+        'columns':     'SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,BILLBOARD_NET_AMT,BILLBOARD_BUY_AMT,BILLBOARD_SELL_AMT,BILLBOARD_DEAL_AMT,EXPLAIN,CHANGE_RATE,CLOSE_PRICE',
+        'source':      'WEB',
+        'client':      'WEB',
+        'filter':      f"(TRADE_DATE>='{start_date}')(TRADE_DATE<='{end_date}')",
+    }
+    return fetch_json(url, params=params, headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer':    'https://data.eastmoney.com/',
+    })
+
+
 # ---------------- 交易日探测 ---------------- #
 
 def raw_em_latest_kline(secid='1.000001'):

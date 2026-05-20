@@ -90,10 +90,18 @@ def get_stock_kline(code, timeframe):
 # ---------------- 分时 ---------------- #
 def _fetch_minute(symbol):
     url = f"http://ifzq.gtimg.cn/appstock/app/minute/query?code={symbol}"
-    res = fetch_json(url)
-    data_arr = res['data'][symbol]['data']['data']
-    qt_arr = res['data'][symbol]['qt'][symbol]
-    prev_close = float(qt_arr[4])
+    try:
+        res = fetch_json(url)
+        # 防御性提取：gtimg 偶尔返回空 data 结构（小市值股 / 新上市 / 停牌等）
+        symbol_obj = (res.get('data') or {}).get(symbol) or {}
+        data_arr = ((symbol_obj.get('data') or {}).get('data')) or []
+        qt_arr = (symbol_obj.get('qt') or {}).get(symbol) or []
+        if not data_arr or len(qt_arr) < 5:
+            return []
+        prev_close = float(qt_arr[4])
+    except Exception as e:
+        # KeyError / TypeError / ValueError / 网络异常 都吞掉返 []，上层走 fallback 或显示"无数据"
+        return []
     today = datetime.date.today().strftime("%Y-%m-%d")
 
     results = []

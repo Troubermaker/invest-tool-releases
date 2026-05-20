@@ -8,8 +8,12 @@
 数据源：东财 push2delay.ulist.np（批量，一次调用可查 200+ 只）
 
 缓存策略（按 code 独立缓存 key: "quote:XXXXXX"）：
-- 盘中 TTL 10s：与前端轮询节奏对齐，正常每次都重抓（保证实时性）
+- 盘中（含集合竞价 9:15-9:30）TTL 3s：跟前端轮询节奏对齐，保证集合竞价
+  期间撮合价能及时反映，不会卡在昨日数据
 - 非交易 TTL 24h：收盘后价格冻结，命中缓存完全不抓接口
+
+TTL 常量 QUOTE_TTL_TRADING_SEC 必须 ≤ 前端 QUOTE_INTERVAL_ACTIVE（refreshIntervals.js）；
+两者一致时每次前端 poll 都会刷新缓存（理想情况）。前端是 3s，这里就是 3s。
 """
 import logging
 
@@ -19,6 +23,9 @@ from api_endpoints import eastmoney
 logger = logging.getLogger(__name__)
 
 CACHE_KEY_PREFIX = "quote:"
+
+# 跟前端 frontend/src/config/refreshIntervals.js 的 QUOTE_INTERVAL_ACTIVE 对齐
+QUOTE_TTL_TRADING_SEC = 3
 
 
 def code_to_secid(code):
@@ -71,7 +78,7 @@ def get_batch_quotes(codes):
     codes_to_fetch = []
     for code in unique_codes:
         cached, updated_at = db.get_cache(f"{CACHE_KEY_PREFIX}{code}")
-        if cached and not db.is_market_cache_stale(updated_at, trading_ttl=10):
+        if cached and not db.is_market_cache_stale(updated_at, trading_ttl=QUOTE_TTL_TRADING_SEC):
             results[code] = cached
         else:
             codes_to_fetch.append(code)

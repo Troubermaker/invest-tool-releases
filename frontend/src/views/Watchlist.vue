@@ -10,7 +10,6 @@ import {
     QUOTE_INTERVAL_HIDDEN,
     SPARKLINE_INTERVAL_ACTIVE,
 } from '../config/refreshIntervals'
-import ScanSignalsModal from '../components/ScanSignalsModal.vue'
 import WatchlistImportModal from '../components/WatchlistImportModal.vue'
 import { useUserRole } from '../composables/useUserRole'
 const { isAdmin } = useUserRole()
@@ -41,6 +40,28 @@ let addDebounceTimer = null
 // 搜索
 const searchQuery = ref('')
 
+// 自选时间筛选：'all' | 'today' | '7d' | '30d' | 'custom'
+// custom 模式用 dateFilterStart / dateFilterEnd（YYYY-MM-DD 字符串）
+function _todayStr() {
+    const d = new Date()
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+const dateFilter      = ref('all')
+const dateFilterStart = ref(_todayStr())   // 默认今天，避免 placeholder yyyy/mm/dd 让用户困惑
+const dateFilterEnd   = ref(_todayStr())
+const showDateFilter  = ref(false)   // 控制日期面板展开
+const dateFilterBoxRef = ref(null)   // 用于"点外部关闭"
+
+// 按钮 tooltip & 标签文案
+const DATE_FILTER_LABEL = { all: '入选时间', today: '今天', '7d': '近 7 天', '30d': '近 30 天', custom: '自定义' }
+const dateFilterTitle = computed(() => {
+    if (dateFilter.value === 'all') return '按添加自选的日期筛选'
+    if (dateFilter.value === 'custom') {
+        return `当前筛选：${dateFilterStart.value || '*'} ~ ${dateFilterEnd.value || '*'}`
+    }
+    return `当前筛选：${DATE_FILTER_LABEL[dateFilter.value]}`
+})
+
 // 排序：3 态循环（desc → asc → 默认原序）
 // sortKey 支持: 'changePct' | 'speedPct' | 'profit' | null
 const sortKey = ref(null)
@@ -70,12 +91,6 @@ const columnOrder = ref([...DEFAULT_COLUMN_ORDER])
 
 // 编辑股票弹窗
 const editingStock = ref(null)
-
-// 三维启动信号扫描器
-const showScanModal = ref(false)
-const scanStocksList = computed(() =>
-    stocks.value.map(s => ({ code: s.code, name: s.name }))
-)
 
 // 批量导入 modal
 const showImportModal = ref(false)
@@ -246,6 +261,16 @@ async function refreshSparklines() {
 // ---------- sparkline SVG 计算 ----------
 const SPARK_W = 140
 const SPARK_H = 56
+// A 股交易日 = 240 分钟（9:30-11:30 + 13:00-15:00）。X 轴按真实交易分钟数铺满，
+// 后端 sparkline_service.py 在 sp.minutes 里给出每个点的 minute offset（0-239），
+// 这样下午 14:00 的数据点稳定落在 X = (180/239)*W ≈ 75% 处。
+const TOTAL_TRADING_MINUTES = 240
+function xForPoint(sp, i) {
+    const m = sp?.minutes?.[i]
+    if (typeof m === 'number') return (m / (TOTAL_TRADING_MINUTES - 1)) * SPARK_W
+    // 老缓存兜底：没有 minutes 时退化到下标线性映射
+    return (i / (TOTAL_TRADING_MINUTES - 1)) * SPARK_W
+}
 
 /**
  * 计算 sparkline 的 Y 轴范围（含价格线、均价线、昨收基线）。
@@ -289,7 +314,7 @@ function sparkPath(sp, key = 'prices') {
     const n = arr.length
     let path = ''
     for (let i = 0; i < n; i++) {
-        const x = n > 1 ? (i / (n - 1)) * SPARK_W : SPARK_W / 2
+        const x = xForPoint(sp, i)
         const y = yToSvg(arr[i], range)
         path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' '
     }
@@ -316,12 +341,12 @@ function sparkAreaPath(sp) {
     const n = arr.length
     let path = ''
     for (let i = 0; i < n; i++) {
-        const x = n > 1 ? (i / (n - 1)) * SPARK_W : SPARK_W / 2
+        const x = xForPoint(sp, i)
         const y = yToSvg(arr[i], range)
         path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' '
     }
-    // 闭合到画布底部
-    const lastX = n > 1 ? SPARK_W : SPARK_W / 2
+    // 闭合到最后一根的 x（不再硬贴右边沿，避免开盘初期"假填充"）
+    const lastX = xForPoint(sp, n - 1)
     path += `L${lastX.toFixed(1)},${SPARK_H} L0,${SPARK_H} Z`
     return path
 }
@@ -343,7 +368,7 @@ function endMarkerPath(sp) {
     if (!range) return ''
     const baseline = sp.preClose
     const last = sp.prices[sp.prices.length - 1]
-    const x = SPARK_W
+    const x = xForPoint(sp, sp.prices.length - 1)   // 跟着实际进度走，不再硬贴右边沿
     const y = yToSvg(last, range)
     if (last > baseline) {
         // ▲ 向上三角
@@ -370,6 +395,37 @@ const selectedGroup = computed(() =>
     groups.value.find(g => g.id === selectedGroupId.value) || null
 )
 
+// 解析 added_at（兼容 ISO / 'YYYY-MM-DD HH:MM:SS' / 'YYYY-MM-DD'）→ 本地日 0 点 timestamp
+function _parseAddedAtAsDay(addedAt) {
+    if (!addedAt) return null
+    const s = String(addedAt).slice(0, 10)   // 取前 10 位 = YYYY-MM-DD
+    const t = new Date(s + 'T00:00:00').getTime()
+    return Number.isNaN(t) ? null : t
+}
+
+// 当前 date 过滤的时间窗口：返回 [startTs, endTs] 或 null（全部）
+const dateFilterRange = computed(() => {
+    const today = new Date()
+    const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
+    const oneDay = 86400000
+    switch (dateFilter.value) {
+        case 'today':  return [todayStart, todayStart + oneDay]
+        case '7d':     return [todayStart - 6 * oneDay, todayStart + oneDay]
+        case '30d':    return [todayStart - 29 * oneDay, todayStart + oneDay]
+        case 'custom': {
+            if (!dateFilterStart.value && !dateFilterEnd.value) return null
+            const s = dateFilterStart.value
+                ? new Date(dateFilterStart.value + 'T00:00:00').getTime()
+                : -Infinity
+            const e = dateFilterEnd.value
+                ? new Date(dateFilterEnd.value + 'T00:00:00').getTime() + oneDay
+                : Infinity
+            return [s, e]
+        }
+        default: return null   // 'all'
+    }
+})
+
 const filteredStocks = computed(() => {
     // ① 关键字过滤
     const q = searchQuery.value.trim().toLowerCase()
@@ -378,6 +434,16 @@ const filteredStocks = computed(() => {
             (s.name && s.name.toLowerCase().includes(q)) || (s.code && s.code.includes(q))
           )
         : stocks.value
+
+    // ① 半 添加自选时间过滤（按 added_at 落在窗口内）
+    const range = dateFilterRange.value
+    if (range) {
+        const [start, end] = range
+        list = list.filter(s => {
+            const ts = _parseAddedAtAsDay(s.added_at)
+            return ts != null && ts >= start && ts < end
+        })
+    }
 
     // ② 按选中列排序（未排序时保持原顺序）
     if (sortKey.value) {
@@ -845,6 +911,10 @@ function onDocumentClick(e) {
     if (addBoxRef.value && !addBoxRef.value.contains(e.target)) {
         addDropdownOpen.value = false
     }
+    // 日期筛选面板：点外部关闭
+    if (showDateFilter.value && dateFilterBoxRef.value && !dateFilterBoxRef.value.contains(e.target)) {
+        showDateFilter.value = false
+    }
 }
 
 // 股票列表一变就刷一次行情 + 分时（切分组、加/减股票都触发）
@@ -1006,6 +1076,93 @@ onUnmounted(() => {
                         </svg>
                     </button>
                 </div>
+
+                <!-- 添加自选时间筛选：预设 chip + 可选自定义日期范围 -->
+                <div ref="dateFilterBoxRef" class="relative">
+                    <button @click="showDateFilter = !showDateFilter"
+                            :class="['text-[12px] px-[10px] py-[4px] rounded-[4px] border transition flex items-center gap-[4px] shrink-0',
+                                    dateFilter !== 'all'
+                                      ? 'border-[#dc2626] bg-[#fef2f2] text-[#dc2626] font-semibold'
+                                      : 'border-[#e5e5e5] bg-white text-[#666] hover:border-[#dc2626]/40 hover:text-[#dc2626]']"
+                            :title="dateFilterTitle">
+                        <svg class="w-[12px] h-[12px]" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" />
+                        </svg>
+                        <span>{{ DATE_FILTER_LABEL[dateFilter] }}</span>
+                        <span v-if="dateFilter !== 'all'" class="text-[10px] opacity-70">▾</span>
+                    </button>
+                    <!-- 弹出面板 -->
+                    <div v-if="showDateFilter"
+                         class="absolute top-full right-0 mt-[6px] w-[300px] bg-white border border-[#e5e7eb] rounded-[8px] shadow-[0_10px_25px_-5px_rgba(0,0,0,0.1),0_4px_6px_-2px_rgba(0,0,0,0.05)] z-[100] overflow-hidden">
+                        <!-- Header -->
+                        <div class="flex items-center justify-between px-[12px] h-[34px] bg-[#fafafa] border-b border-[#f0f0f0]">
+                            <span class="text-[11px] font-semibold text-[#374151]">按入选日期筛选</span>
+                            <button @click="showDateFilter = false"
+                                    class="text-[#94a3b8] hover:text-[#111] w-[18px] h-[18px] flex items-center justify-center rounded transition">
+                                <svg class="w-[10px] h-[10px]" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                                </svg>
+                            </button>
+                        </div>
+
+                        <!-- Body -->
+                        <div class="p-[12px]">
+                            <!-- 预设：分段控件风格（无 gap，hover/active 一体）-->
+                            <div class="text-[10px] text-[#94a3b8] mb-[5px]">快速选择</div>
+                            <div class="flex rounded-[5px] border border-[#e5e7eb] overflow-hidden divide-x divide-[#f0f0f0] mb-[10px]">
+                                <button v-for="opt in [
+                                    { key: 'all',    label: '全部' },
+                                    { key: 'today',  label: '今天' },
+                                    { key: '7d',     label: '近 7 天' },
+                                    { key: '30d',    label: '近 30 天' },
+                                ]" :key="opt.key"
+                                        @click="dateFilter = opt.key; showDateFilter = false"
+                                        :class="['flex-1 text-[11px] py-[6px] transition font-medium',
+                                                dateFilter === opt.key
+                                                  ? 'bg-[#dc2626] text-white'
+                                                  : 'bg-white text-[#475569] hover:bg-[#fef2f2] hover:text-[#dc2626]']">
+                                    {{ opt.label }}
+                                </button>
+                            </div>
+
+                            <!-- 自定义日期：单独区块（始终可见，选了日期就切到 custom 模式）-->
+                            <div class="text-[10px] text-[#94a3b8] mb-[5px]">自定义范围</div>
+                            <div class="grid grid-cols-2 gap-[8px] mb-[8px]">
+                                <div>
+                                    <label class="block text-[10px] text-[#94a3b8] mb-[2px]">起始</label>
+                                    <input v-model="dateFilterStart"
+                                           @change="dateFilter = 'custom'"
+                                           type="date"
+                                           class="w-full px-[6px] py-[4px] border border-[#e5e7eb] rounded-[4px] text-[11px] text-[#111] bg-white tabular-nums focus:outline-none focus:border-[#dc2626] focus:ring-1 focus:ring-[#dc2626]/30 transition">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] text-[#94a3b8] mb-[2px]">截止</label>
+                                    <input v-model="dateFilterEnd"
+                                           @change="dateFilter = 'custom'"
+                                           type="date"
+                                           class="w-full px-[6px] py-[4px] border border-[#e5e7eb] rounded-[4px] text-[11px] text-[#111] bg-white tabular-nums focus:outline-none focus:border-[#dc2626] focus:ring-1 focus:ring-[#dc2626]/30 transition">
+                                </div>
+                            </div>
+                            <div v-if="dateFilter === 'custom'"
+                                 class="text-[10px] text-[#dc2626] flex items-center gap-[3px] mb-[8px]">
+                                <span class="w-[6px] h-[6px] rounded-full bg-[#dc2626] inline-block"></span>
+                                已应用自定义范围
+                            </div>
+                        </div>
+
+                        <!-- Footer -->
+                        <div class="flex items-center justify-between px-[12px] h-[36px] bg-[#fafafa] border-t border-[#f0f0f0]">
+                            <button @click="dateFilter = 'all'; dateFilterStart = _todayStr(); dateFilterEnd = _todayStr()"
+                                    class="text-[11px] text-[#666] hover:text-[#dc2626] transition">
+                                清空
+                            </button>
+                            <button @click="showDateFilter = false"
+                                    class="text-[11px] px-[12px] py-[4px] rounded-[4px] bg-[#dc2626] text-white hover:bg-[#b91c1c] transition font-medium">
+                                完成
+                            </button>
+                        </div>
+                    </div>
+                </div>
                 <!-- 批量导入（所有用户）-->
                 <button @click="showImportModal = true"
                         title="从文本/图片批量识别并导入股票（通达信/同花顺式导入）"
@@ -1016,21 +1173,6 @@ onUnmounted(() => {
                         <path d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 9.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 8.414V13a1 1 0 11-2 0V8.414L7.707 9.707a1 1 0 01-1.414 0z" />
                     </svg>
                     <span>批量导入</span>
-                </button>
-
-                <!-- 三维启动扫描（仅管理员）-->
-                <button v-if="isAdmin"
-                        @click="showScanModal = true"
-                        :disabled="!stocks.length"
-                        title="扫描当前分组的三维启动信号（蓄势→试盘→突破）"
-                        class="text-[12px] px-[10px] py-[4px] rounded-[4px] border border-[#dc2626]/40
-                               text-[#dc2626] bg-white hover:bg-[#fff5f5] hover:border-[#dc2626]
-                               disabled:opacity-40 disabled:cursor-not-allowed transition
-                               flex items-center gap-[4px] shrink-0">
-                    <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
-                        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-.293.707L12 11.414V15a1 1 0 01-.293.707l-2 2A1 1 0 018 17v-5.586L3.293 6.707A1 1 0 013 6V4z" />
-                    </svg>
-                    <span>扫描信号</span>
                 </button>
 
                 <!-- 搜索并添加股票（支持代码/中文名/拼音）-->
@@ -1128,8 +1270,8 @@ onUnmounted(() => {
                         <!-- 可拖拽列：13 列数据列 -->
                         <th v-for="key in columnOrder" :key="key"
                             :data-col-key="key"
-                            class="col-draggable px-[10px] py-[10px] font-normal cursor-move select-none"
-                            :class="[ALIGN_CLASS[COLUMN_META[key].align], COLUMN_META[key].sortable ? 'hover:text-[#dc2626] transition group' : '']"
+                            class="col-draggable px-[10px] py-[10px] font-normal select-none"
+                            :class="[ALIGN_CLASS[COLUMN_META[key].align], COLUMN_META[key].sortable ? 'cursor-pointer hover:text-[#dc2626] transition group' : 'cursor-pointer']"
                             :style="{ width: COLUMN_META[key].width + 'px' }"
                             @click="COLUMN_META[key].sortable ? handleSort(key) : null">
                             {{ COLUMN_META[key].label }}
@@ -1387,7 +1529,7 @@ onUnmounted(() => {
                     <template #item="{ element: g }">
                         <div class="flex items-center gap-[10px] px-[8px] py-[8px] rounded-[4px] hover:bg-[#fafafa] transition">
                             <!-- 拖拽手柄 -->
-                            <div class="drag-handle cursor-grab active:cursor-grabbing text-[#bbb] hover:text-[#666] transition shrink-0">
+                            <div class="drag-handle cursor-pointer text-[#bbb] hover:text-[#666] transition shrink-0">
                                 <svg class="w-[14px] h-[14px]" viewBox="0 0 20 20" fill="currentColor">
                                     <circle cx="6" cy="5" r="1.5"/><circle cx="6" cy="10" r="1.5"/><circle cx="6" cy="15" r="1.5"/>
                                     <circle cx="14" cy="5" r="1.5"/><circle cx="14" cy="10" r="1.5"/><circle cx="14" cy="15" r="1.5"/>
@@ -1489,10 +1631,7 @@ onUnmounted(() => {
         </div>
     </div>
 
-    <!-- ============ 三维启动信号扫描器 ============ -->
-    <ScanSignalsModal :open="showScanModal"
-                      :stocks="scanStocksList"
-                      @close="showScanModal = false" />
+    <!-- 三维启动扫描已迁移到 选股 tab（Quant.vue > 主升突破） -->
 
     <!-- ============ 批量导入 modal ============ -->
     <WatchlistImportModal :open="showImportModal"

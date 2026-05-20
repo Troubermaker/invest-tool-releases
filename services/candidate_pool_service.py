@@ -31,7 +31,8 @@ def list_picks():
                consolidation_bars, source, note,
                peak_gain_since_save, formation_state, last_refreshed_at,
                secondary_entry_at, secondary_entry_price,
-               breakout_at
+               breakout_at, ml_score,
+               breakout_confirm, lhb_in_window, lhb_count, lhb_net_buy, star_level
         FROM candidate_picks
         ORDER BY saved_at DESC, id DESC
     ''')
@@ -60,6 +61,14 @@ def list_picks():
             'secondary_entry_price': r[16],
             # Phase 7 突破日跟踪（detector 跑出的最新 stage 3 突破 K 时间）
             'breakout_at':           r[17],
+            # Phase 3 Step 2 ML 预测分数（0-1；None = 未刷新过 / 非突破态）
+            'ml_score':              r[18],
+            # P2 + Week 2 Day 1：综合信号
+            'breakout_confirm':      r[19],
+            'lhb_in_window':         r[20],
+            'lhb_count':             r[21],
+            'lhb_net_buy':           r[22],
+            'star_level':            r[23],
         }
         for r in rows
     ]
@@ -178,6 +187,8 @@ _VALID_FORMATION_STATES = {
     'rally',          # 主升中（已突破一段时间，趋势仍有效）
     'exhausted',      # 衰竭警示（detectRallyExhaustion 'reduce'/'exit'）
     'invalid',        # 形态作废（detectRallyExhaustion 'invalid'）
+    'stretched',      # 横盘跳空型主升（detectStretchedRally —— 跟三维启动互补，
+                      # 抓"长横盘 → 直接跳空"型，不要求 S2 试盘）
     'unknown',        # detector 跑失败 / 数据不足
 }
 
@@ -254,6 +265,7 @@ def bulk_update_tracking(payloads):
         'secondary_entry_at': '2026-04-15',       # optional, '' 显式清空（detector 判定失效）
         'secondary_entry_price': 23.45,           # optional
         'breakout_at': '2026-04-10',              # optional, '' 显式清空（不是 stage 3）
+        'ml_score': 0.47,                         # optional, None 跳过 / 'clear' 显式清空（非突破态时）
     }, ...]
 
     所有记录共用同一个 last_refreshed_at（调用时刻）。
@@ -284,11 +296,38 @@ def bulk_update_tracking(payloads):
         bo_clear  = bo_at_raw == ''
         bo_at     = None if bo_at_raw in (None, '') else bo_at_raw
 
-        # 动态 SQL: 处理 secondary / breakout 两组的"清空"vs"COALESCE"
+        # Phase 3 Step 2 ML 分数：'clear' / None / float
+        ml_raw    = p.get('ml_score')
+        ml_clear  = ml_raw == 'clear'
+        ml_val    = None if (ml_raw is None or ml_clear) else float(ml_raw)
+
+        # P2 + Week 2 Day 1：综合信号（'clear' / None 跳过 / 值）
+        def _coerce_or_clear(v, caster=None):
+            """返回 (clear_bool, value_or_none, skip_bool)。"""
+            if v == 'clear': return True, None, False
+            if v is None:    return False, None, True
+            return False, (caster(v) if caster else v), False
+
+        bc_clear, bc_val, bc_skip = _coerce_or_clear(p.get('breakout_confirm'))
+        liw_clear, liw_val, liw_skip = _coerce_or_clear(p.get('lhb_in_window'), int)
+        lc_clear, lc_val, lc_skip = _coerce_or_clear(p.get('lhb_count'), int)
+        lnb_clear, lnb_val, lnb_skip = _coerce_or_clear(p.get('lhb_net_buy'), float)
+        st_clear, st_val, st_skip = _coerce_or_clear(p.get('star_level'), int)
+
+        # 动态 SQL
         se_clause = 'secondary_entry_at = NULL, secondary_entry_price = NULL' if se_clear \
                     else 'secondary_entry_at = COALESCE(?, secondary_entry_at), ' \
                          'secondary_entry_price = COALESCE(?, secondary_entry_price)'
         bo_clause = 'breakout_at = NULL' if bo_clear else 'breakout_at = COALESCE(?, breakout_at)'
+        ml_clause = 'ml_score = NULL' if ml_clear else 'ml_score = COALESCE(?, ml_score)'
+        bc_clause = 'breakout_confirm = NULL' if bc_clear else (None if bc_skip else 'breakout_confirm = ?')
+        liw_clause = 'lhb_in_window = NULL' if liw_clear else (None if liw_skip else 'lhb_in_window = ?')
+        lc_clause  = 'lhb_count = NULL'     if lc_clear  else (None if lc_skip  else 'lhb_count = ?')
+        lnb_clause = 'lhb_net_buy = NULL'   if lnb_clear else (None if lnb_skip else 'lhb_net_buy = ?')
+        st_clause  = 'star_level = NULL'    if st_clear  else (None if st_skip  else 'star_level = ?')
+
+        extra_clauses = [c for c in [bc_clause, liw_clause, lc_clause, lnb_clause, st_clause] if c]
+        extra_sql = (', ' + ', '.join(extra_clauses)) if extra_clauses else ''
 
         sql = f'''
             UPDATE candidate_picks SET
@@ -296,6 +335,7 @@ def bulk_update_tracking(payloads):
                 formation_state       = COALESCE(?, formation_state),
                 {se_clause},
                 {bo_clause},
+                {ml_clause}{extra_sql},
                 last_refreshed_at     = ?
             WHERE code = ?
         '''
@@ -304,6 +344,14 @@ def bulk_update_tracking(payloads):
             params += [se_at, se_pri]
         if not bo_clear:
             params.append(bo_at)
+        if not ml_clear:
+            params.append(ml_val)
+        # 按 clause 顺序追加非 clear / 非 skip 的值
+        if not bc_clear  and not bc_skip:  params.append(bc_val)
+        if not liw_clear and not liw_skip: params.append(liw_val)
+        if not lc_clear  and not lc_skip:  params.append(lc_val)
+        if not lnb_clear and not lnb_skip: params.append(lnb_val)
+        if not st_clear  and not st_skip:  params.append(st_val)
         params += [now_iso, code]
 
         c.execute(sql, params)

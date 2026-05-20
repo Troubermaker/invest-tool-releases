@@ -7,8 +7,12 @@
  * 单位：毫秒。值越小越实时，但也越容易被 EM 反爬识别。
  */
 
-// 自选 + 持仓的实时行情刷新（前台、盘中）。EM push2delay.ulist.np 单次批量请求。
-// 推荐区间：2_000 – 10_000；< 2s 容易触发风控
+// 自选 + 持仓 + 候选池的实时行情刷新（前台、盘中含集合竞价）。
+// EM push2delay.ulist.np 单次批量请求。推荐区间：2_000 – 10_000；< 2s 容易触发风控。
+//
+// ⚠️ 跟后端 services/quote_service.py 的 QUOTE_TTL_TRADING_SEC 强相关：
+//    后端 TTL（秒）≤ 这里（毫秒）/ 1000，否则前端 poll 命中老缓存，集合竞价行情滞后。
+//    两者一致最好（每次 poll 都重新走 EM）。改一处必须同步改另一处。
 export const QUOTE_INTERVAL_ACTIVE = 3_000
 
 // 窗口最小化 / 切到其他 tab 时，行情刷新降到这个间隔（含 deep-hidden）。

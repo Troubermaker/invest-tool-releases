@@ -7,10 +7,10 @@ import RefreshCountdown from '../components/RefreshCountdown.vue'
 import LastRefreshLabel from '../components/LastRefreshLabel.vue'
 import { openStockChart } from '../composables/useStockChart'
 import { openAddToWatchlist } from '../composables/useAddToWatchlist'
-import ScanCandidatesModal from '../components/ScanCandidatesModal.vue'
-import ScanSignalsModal from '../components/ScanSignalsModal.vue'
 import { useUserRole } from '../composables/useUserRole'
+import { useIntradayTimeAxis } from '../composables/useIntradayTimeAxis'
 const { isAdmin } = useUserRole()
+const intraday = useIntradayTimeAxis()
 
 const emit = defineEmits(['openAI'])
 
@@ -97,37 +97,6 @@ const filteredStocks = computed(() => {
         (s.code && s.code.includes(q))
     )
 })
-
-// 三维启动「找候选」扫描器
-const showScanCandidatesModal = ref(false)
-const scanCandidatesStocks = computed(() =>
-    (filteredStocks.value || []).map(s => ({ code: s.code, name: s.name }))
-)
-const scanCandidatesTitle = computed(() =>
-    selectedSector.value ? `${selectedSector.value.name} · 找候选` : '三维启动「找候选」'
-)
-
-// 三维启动「找发车」扫描器（热榜 / 涨跌对比池子复用）
-const showScanFreshModal = ref(false)
-const scanFreshSource = ref(null)   // 'hotlist' | 'pool'
-const scanFreshStocks = computed(() => {
-    if (scanFreshSource.value === 'hotlist') {
-        return (hotListData.value || []).map(s => ({ code: s.code, name: s.name }))
-    }
-    if (scanFreshSource.value === 'pool') {
-        return (filteredPoolStocks.value || []).map(s => ({ code: s.code, name: s.name }))
-    }
-    return []
-})
-const scanFreshTitle = computed(() => {
-    if (scanFreshSource.value === 'hotlist') return '同花顺热榜 · 找发车'
-    if (scanFreshSource.value === 'pool')    return `${activePool.value?.label || '涨停池'} · 找发车`
-    return '三维启动「找发车」'
-})
-function openScanFresh(source) {
-    scanFreshSource.value = source
-    showScanFreshModal.value = true
-}
 
 // 连板天梯数据（按 height 降序分组）—— 后端返全量，前端按 ladderIncludeSt 过滤显示
 const ladderTiersRaw = ref([])
@@ -309,6 +278,25 @@ async function initChart() {
             secondsVisible: false,
             fixLeftEdge:  true,
             rightOffset:  3,       // 最新 bar 右侧留约 18-24px 呼吸空间
+            // 分时模式：time 是合成秒 → 反算墙钟 HH:MM；其他模式 fallback 默认格式
+            tickMarkFormatter: (time, tickMarkType) => {
+                if (activeTimeframe.value === '分时' && intraday.getDayStart()) {
+                    return intraday.tickMarkFormatter(time, tickMarkType)
+                }
+                if (typeof time !== 'number') return String(time ?? '')
+                const d = new Date(time * 1000)
+                const pad = n => String(n).padStart(2, '0')
+                if (tickMarkType === 0) return String(d.getFullYear())
+                if (tickMarkType === 1) return `${d.getMonth() + 1}月`
+                if (tickMarkType === 2) return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+                if (tickMarkType === 3) return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+                return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+            },
+        },
+        crosshair: {
+            mode: 1,
+            // hover 时关掉右轴价格 label（分时图避免"现价"小框遮挡线）
+            horzLine: { labelVisible: false },
         },
     });
 
@@ -343,9 +331,11 @@ async function initChart() {
         if (activeTimeframe.value === '分时') {
             const data = currentLineSeries ? param.seriesData.get(currentLineSeries) : null;
             if (data && data.value !== undefined) {
-                const d = new Date(param.time * 1000);
-                const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                // param.time 是合成秒；优先用 bar 的 _realTime 反算墙钟，找不到走 composable fallback
                 const full = klineDataMap.get(param.time) || {};
+                const timeStr = full._realTime
+                    ? (() => { const d = new Date(full._realTime * 1000); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}` })()
+                    : intraday.formatHoverTime(param.time, klineData);
                 const clr = (full.chg ?? 0) >= 0 ? '#dc2626' : '#059669';
                 tooltipContent = `<div class="font-bold mb-1 text-[#333] border-b border-[#eee] pb-1">${timeStr}</div>
                                   <div class="flex flex-col gap-y-1 mt-1 text-[#555] font-mono min-w-[130px]">
@@ -461,7 +451,13 @@ async function renderChartData() {
         console.error("K线接口返回错误:", res.error);
     }
 
-    // Build lookup map: time → full row (so tooltip can read vol, amt, chg, pct, amp)
+    // 分时模式：240 bar whitespace 填充 + 合成时间映射（午休压缩）
+    // 跟 StockChart 的处理一致：未到的时间留白、上午 0-50% 下午 50-100% 等距划分
+    if (activeTimeframe.value === '分时' && klineData && klineData.length) {
+        klineData = intraday.fillFullDay(klineData);
+    }
+
+    // Build lookup map: time → full row (tooltip 用)
     klineDataMap = new Map();
     if (klineData && klineData.length) {
         klineData.forEach(d => klineDataMap.set(d.time, d));
@@ -469,12 +465,20 @@ async function renderChartData() {
 
     if (activeTimeframe.value === '分时' || activeTimeframe.value === '5日') {
         currentLineSeries = chartInstance.addAreaSeries({
-            lineColor: '#2563eb', 
+            lineColor: '#2563eb',
             topColor: 'rgba(37, 99, 235, 0.4)',
             bottomColor: 'rgba(37, 99, 235, 0.0)',
             lineWidth: 2,
+            lastValueVisible: false,        // 不在右轴贴现价标签
+            priceLineVisible: false,
         });
-        if(klineData && klineData.length) currentLineSeries.setData(klineData);
+        if (klineData && klineData.length) {
+            // 分时模式下含 whitespace 占位（仅 time），需返回 {time} 让 lwc 走 whitespace
+            currentLineSeries.setData(klineData.map(d => d._isWhitespace
+                ? { time: d.time }
+                : { time: d.time, value: +(d.value ?? d.close) }
+            ));
+        }
     } else {
         currentCandleSeries = chartInstance.addCandlestickSeries({
             // 阳线（涨/红）空心：极淡红底 + 红色边框 —— 保留色彩暗示，又兼顾色弱辨识
@@ -535,26 +539,31 @@ async function renderChartData() {
         });
 
         const volData = klineData.map(d => {
+            if (d._isWhitespace) return { time: d.time };   // 分时未到的时间，量柱也留空
             const isRed = d.open !== undefined ? (d.close >= d.open) : (d.chg >= 0);
             return {
                 time: d.time,
                 value: d.vol || 0,
-                // 上涨日红柱低不透明度（视觉"轻"）、下跌日绿柱高不透明度（视觉"重"）—— 与 K 线空心/实心逻辑一致，色弱也能靠明暗区分
                 color: isRed ? 'rgba(220, 38, 38, 0.45)' : 'rgba(5, 150, 105, 0.8)'
             };
         });
         currentVolumeSeries.setData(volData);
     }
     
-    // 默认视窗：蜡烛模式只显示最近 N 根，剩下的可手动拖看
-    const DEFAULT_VISIBLE_BARS = { '日K': 200, '周K': 52, '月K': 36, '年K': 20 }  // 日K ≈ 10 个月
+    // 默认视窗：
+    // · 分时模式：锁定 0-239 logical range（240 bar 均分全宽，未到的时间留白）
+    // · 蜡烛模式：只显示最近 N 根，剩下的可手动拖
+    // · 5 日模式：跨天点数不一，沿用 fitContent
+    const DEFAULT_VISIBLE_BARS = { '日K': 200, '周K': 52, '月K': 36, '年K': 20 }
     const isLineMode = activeTimeframe.value === '分时' || activeTimeframe.value === '5日'
     const total = klineData.length
     const defaultBars = DEFAULT_VISIBLE_BARS[activeTimeframe.value]
-    if (!isLineMode && defaultBars && total > defaultBars) {
+    if (activeTimeframe.value === '分时') {
+        intraday.setIntradayVisibleRange(chartInstance)
+    } else if (!isLineMode && defaultBars && total > defaultBars) {
         chartInstance.timeScale().setVisibleLogicalRange({
             from: total - defaultBars,
-            to:   total - 1 + 3,   // 包含 rightOffset 的留白区，跟主图一致
+            to:   total - 1 + 3,
         })
     } else {
         chartInstance.timeScale().fitContent()
@@ -942,6 +951,10 @@ onUnmounted(() => {
                 </span>
             </div>
         </div>
+        <!-- 右侧：hub 控件注入位（MarketHub 提供 [实时|复盘] segmented + 今日按钮）-->
+        <div class="shrink-0 flex items-center pl-[10px] pr-[14px] border-l border-[#e5e5e5] gap-[10px] h-full">
+            <slot name="tabBarRight" />
+        </div>
     </div>
 
     <!-- ============ 行情页面（主 sub-tab，原有内容）============ -->
@@ -1073,20 +1086,6 @@ onUnmounted(() => {
                     </div>
                 </div>
                 <div class="flex gap-[8px] items-center shrink-0 relative">
-                    <!-- 三维启动「找候选」（仅管理员）-->
-                    <button v-if="isAdmin"
-                            @click="showScanCandidatesModal = true"
-                            :disabled="!sectorStocks.length"
-                            title="在当前板块联动股里找蓄势/试盘候选，加入自选监控"
-                            class="text-[12px] px-[10px] py-[4px] rounded-[4px] border border-[#dc2626]/40
-                                   text-[#dc2626] bg-white hover:bg-[#fff5f5] hover:border-[#dc2626]
-                                   disabled:opacity-40 disabled:cursor-not-allowed transition
-                                   flex items-center gap-[4px] shrink-0">
-                        <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
-                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-                        </svg>
-                        <span>找候选</span>
-                    </button>
                     <input v-model="stockFilter"
                            type="text"
                            placeholder="筛选 名称 / 代码..."
@@ -1311,20 +1310,6 @@ onUnmounted(() => {
                 </div>
             </div>
             <div class="flex items-center gap-[10px]">
-                <!-- 三维启动「找发车」（仅管理员）-->
-                <button v-if="isAdmin"
-                        @click="openScanFresh('hotlist')"
-                        :disabled="!hotListData.length"
-                        title="在热榜里扫描刚突破的三维启动信号（fresh Stage 3）"
-                        class="text-[12px] px-[10px] py-[4px] rounded-[4px] border border-[#dc2626]/40
-                               text-[#dc2626] bg-white hover:bg-[#fff5f5] hover:border-[#dc2626]
-                               disabled:opacity-40 disabled:cursor-not-allowed transition
-                               flex items-center gap-[4px] shrink-0">
-                    <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
-                        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-.293.707L12 11.414V15a1 1 0 01-.293.707l-2 2A1 1 0 018 17v-5.586L3.293 6.707A1 1 0 013 6V4z" />
-                    </svg>
-                    <span>找发车</span>
-                </button>
                 <span class="text-[11px] text-[#999]">{{ hotListData.length }} 只</span>
                 <LastRefreshLabel :timestamp="hotListLastAt" />
                 <RefreshCountdown :seconds="hotListCountdown"
@@ -1519,22 +1504,6 @@ onUnmounted(() => {
             </div>
 
             <div class="flex items-center gap-[10px] shrink-0">
-                <!-- 三维启动「找发车」（仅管理员；跌停池禁用，语义不符）-->
-                <button v-if="isAdmin"
-                        @click="openScanFresh('pool')"
-                        :disabled="!filteredPoolStocks.length || activePoolKey === 'limitDown'"
-                        :title="activePoolKey === 'limitDown'
-                            ? '跌停池不适合三维启动扫描'
-                            : '在当前池子里扫描刚突破的三维启动信号（fresh Stage 3）'"
-                        class="text-[12px] px-[10px] py-[4px] rounded-[4px] border border-[#dc2626]/40
-                               text-[#dc2626] bg-white hover:bg-[#fff5f5] hover:border-[#dc2626]
-                               disabled:opacity-40 disabled:cursor-not-allowed transition
-                               flex items-center gap-[4px] shrink-0">
-                    <svg class="w-[12px] h-[12px]" viewBox="0 0 20 20" fill="currentColor">
-                        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-.293.707L12 11.414V15a1 1 0 01-.293.707l-2 2A1 1 0 018 17v-5.586L3.293 6.707A1 1 0 013 6V4z" />
-                    </svg>
-                    <span>找发车</span>
-                </button>
                 <span v-if="activePool" class="text-[11px] text-[#999] tabular-nums">
                     <template v-if="poolFilter">{{ filteredPoolStocks.length }} / {{ activePool.count }}</template>
                     <template v-else>{{ activePool.count }} 只</template>
@@ -1755,17 +1724,7 @@ onUnmounted(() => {
     <Transition name="fade">
         <div v-if="showIndexDrawer" @click="closeIndexChart" class="absolute inset-0 bg-black/10 z-40 backdrop-blur-[1px]"></div>
     </Transition>
-    <!-- ============ 三维启动「找候选」扫描器（板块联动）============ -->
-    <ScanCandidatesModal :open="showScanCandidatesModal"
-                         :stocks="scanCandidatesStocks"
-                         :title="scanCandidatesTitle"
-                         @close="showScanCandidatesModal = false" />
-
-    <!-- ============ 三维启动「找发车」扫描器（热榜 / 涨跌池）============ -->
-    <ScanSignalsModal :open="showScanFreshModal"
-                      :stocks="scanFreshStocks"
-                      :title="scanFreshTitle"
-                      @close="showScanFreshModal = false" />
+    <!-- 三维启动「找发车」/「找候选」已迁移到 选股 tab（Quant.vue > 主升突破 / 突破前夜） -->
   </div>
 </template>
 

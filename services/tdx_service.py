@@ -418,7 +418,19 @@ def get_stock_kline(code, timeframe='日K', count=800):
     try:
         # 分时 / 5 日 走专用接口，其余走 K 线接口
         if timeframe == '分时':
-            return _fetch_minute_today(api, market, code)
+            # 某些股票（小市值 / 偏门票）单 host 偶尔会返空，给一次换 host 重试机会，
+            # 跟下面 _fetch_paged 的 retry 思路一致
+            data = _fetch_minute_today(api, market, code)
+            if data:
+                return data
+            logger.warning(f'TDX {code} 分时 当前服务器返空，换 host 重试')
+            api = _force_reconnect()
+            if api is None:
+                return []
+            data = _fetch_minute_today(api, market, code)
+            if not data:
+                logger.warning(f'TDX {code} 分时 重试后仍为空，返回 []')
+            return data
         if timeframe == '5日':
             return _fetch_5day(api, market, code)
 

@@ -63,6 +63,22 @@ a = Analysis(
     excludes=[
         # 开发期测试文件，不要进打包
         'scratch', 'tests',
+        # ============ ML 库不打包 ============
+        # 这些是开发期训练/分析工具（services/ml_signal_filter.py 用），
+        # 装进 venv 是为了开发期跑 `python -m services.ml_signal_filter`，
+        # 但分发给最终用户没必要 —— 体积能从 ~700MB 降到 ~180MB
+        # 后端的 ml_predict_service / ml_health_service 已经 catch ImportError 优雅降级，
+        # 用户在 exe 里看到的是 "mlScore=null" / "未安装 ML 支持库" 提示
+        #
+        # ⚠ pandas 不能 exclude —— pytdx.hq 顶层 import pandas，
+        #   一旦 exclude，admin 模式调 TDX 看 K 线 / 分时图会直接 ModuleNotFoundError。
+        #   （ml_predict_service / ml_health_service 都是函数内 import pandas，会受影响但优雅降级。
+        #    pytdx 是顶层 import，没法降级。）
+        'lightgbm', 'shap', 'sklearn', 'scipy', 'matplotlib',
+        'numpy.distutils',           # numpy 内部测试工具
+        'IPython', 'jupyter', 'notebook', 'jedi',   # 调试/REPL 工具
+        'PIL.ImageQt', 'PIL.ImageTk',# pillow 的 Qt/Tk 集成，pywebview 不用
+        # 'numpy' 不能 exclude —— pywebview / 部分日志格式化用到
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

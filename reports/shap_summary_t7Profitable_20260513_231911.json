@@ -1,0 +1,127 @@
+{
+  "label": "t7Profitable",
+  "n_samples": 2000,
+  "features_by_importance": [
+    {
+      "name": "breakoutLowerShadowPct",
+      "mean_abs_shap": 0.17995164826715043
+    },
+    {
+      "name": "ma20Dist",
+      "mean_abs_shap": 0.1366864396125116
+    },
+    {
+      "name": "ma250Dist",
+      "mean_abs_shap": 0.1310064420676205
+    },
+    {
+      "name": "breakoutChangePct",
+      "mean_abs_shap": 0.11100347123135884
+    },
+    {
+      "name": "volRatio5v20",
+      "mean_abs_shap": 0.1035409838810058
+    },
+    {
+      "name": "breakoutUpperShadowPct",
+      "mean_abs_shap": 0.10075773861583931
+    },
+    {
+      "name": "month",
+      "mean_abs_shap": 0.09665446558369642
+    },
+    {
+      "name": "atr20Pct",
+      "mean_abs_shap": 0.09266852813262429
+    },
+    {
+      "name": "s1Amplitude",
+      "mean_abs_shap": 0.06477314930835057
+    },
+    {
+      "name": "s1Length",
+      "mean_abs_shap": 0.059343571917632724
+    },
+    {
+      "name": "volRatio5v60",
+      "mean_abs_shap": 0.051202707083542326
+    },
+    {
+      "name": "gradeScore",
+      "mean_abs_shap": 0.04725517803679717
+    },
+    {
+      "name": "dayOfWeek",
+      "mean_abs_shap": 0.044915098798348416
+    },
+    {
+      "name": "vol60dMean",
+      "mean_abs_shap": 0.04424680556844498
+    },
+    {
+      "name": "breakoutBodyPct",
+      "mean_abs_shap": 0.041548107868042736
+    },
+    {
+      "name": "vol5dMean",
+      "mean_abs_shap": 0.04031354950639395
+    },
+    {
+      "name": "s3VolRatio",
+      "mean_abs_shap": 0.03421836091302279
+    },
+    {
+      "name": "ma50Dist",
+      "mean_abs_shap": 0.03182313121338937
+    },
+    {
+      "name": "breakoutVsS1Upper",
+      "mean_abs_shap": 0.02983578166169308
+    },
+    {
+      "name": "vol20dMean",
+      "mean_abs_shap": 0.02164261838450004
+    },
+    {
+      "name": "s3BarsFromS2",
+      "mean_abs_shap": 0.02057454051413428
+    },
+    {
+      "name": "s2VolRatio",
+      "mean_abs_shap": 0.018024430624624097
+    },
+    {
+      "name": "daysFromLastLimitUp",
+      "mean_abs_shap": 0.013983432385147768
+    },
+    {
+      "name": "limitUps30d",
+      "mean_abs_shap": 0.010579475936589106
+    },
+    {
+      "name": "s2Type",
+      "mean_abs_shap": 0.0068922854040497986
+    },
+    {
+      "name": "s2BarsFromS1",
+      "mean_abs_shap": 0.006526429453022049
+    },
+    {
+      "name": "gradeLetter",
+      "mean_abs_shap": 0.0029414467800907753
+    },
+    {
+      "name": "preBreakoutVolBars",
+      "mean_abs_shap": 0.0005594327141182595
+    },
+    {
+      "name": "signalSource",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "name": "weeklyConfirmed",
+      "mean_abs_shap": 0.0
+    }
+  ],
+  "generated_at": "2026-05-13T23:19:11.679039"
+}

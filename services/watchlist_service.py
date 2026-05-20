@@ -140,8 +140,13 @@ def get_group_stocks(group_id):
     return [dict(r) for r in rows]
 
 
-def add_stock(group_id, code, name='', added_price=None, remark=''):
-    """向分组添加股票。如果同组已有该代码则静默跳过（基于 UNIQUE 约束）。"""
+def add_stock(group_id, code, name='', added_price=None, remark='', added_at=None):
+    """向分组添加股票。如果同组已有该代码则静默跳过（基于 UNIQUE 约束）。
+
+    added_at 接受 ISO 字符串（如 '2026-05-19T10:23:00.000Z'）。未传则使用 SQLite
+    默认 CURRENT_TIMESTAMP（UTC now）。批量入库时建议从前端统一传一个时刻，
+    避免逐行 INSERT 的微秒差异，也避免服务器/客户端时钟漂移。
+    """
     code = (code or '').strip()
     if not code:
         raise ValueError("股票代码不能为空")
@@ -154,10 +159,18 @@ def add_stock(group_id, code, name='', added_price=None, remark=''):
     c.execute('SELECT COALESCE(MAX(sort_order), -1) AS m FROM watchlist_stocks WHERE group_id = ?', (group_id,))
     next_order = c.fetchone()['m'] + 1
     try:
-        c.execute(
-            'INSERT INTO watchlist_stocks (group_id, code, name, added_price, remark, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
-            (group_id, code, name, added_price, remark or '', next_order)
-        )
+        if added_at:
+            c.execute(
+                'INSERT INTO watchlist_stocks (group_id, code, name, added_price, remark, sort_order, added_at) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (group_id, code, name, added_price, remark or '', next_order, added_at)
+            )
+        else:
+            c.execute(
+                'INSERT INTO watchlist_stocks (group_id, code, name, added_price, remark, sort_order) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (group_id, code, name, added_price, remark or '', next_order)
+            )
         conn.commit()
     except Exception as e:
         logger.info(f"股票 {code} 已在分组 {group_id}，忽略: {e}")

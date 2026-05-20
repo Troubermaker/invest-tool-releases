@@ -42,7 +42,14 @@ async function pickGroup(g) {
     try {
         if (isBatch.value) {
             // 批量：调用 importBatchAdd（自动跳过已存在的 code）
-            const payload = stocks.value.map(s => ({ code: s.code, name: s.name }))
+            // added_at 优先用每只票自带的（如扫描数据最后一根 K 线日），否则 fallback 到当下。
+            const nowIso = new Date().toISOString()
+            const payload = stocks.value.map(s => ({
+                code: s.code,
+                name: s.name,
+                price: s.price ?? null,
+                added_at: s.added_at || nowIso,
+            }))
             const res = await api.importBatchAdd(g.id, payload)
             if (res.ok) {
                 const d = res.data || {}

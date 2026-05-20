@@ -18,6 +18,7 @@
  */
 import { ref, computed } from 'vue'
 import { api } from '../api/client'
+import { findRecentGap } from './useTechIndicators'
 
 export function useStockScanner(opts = {}) {
     const {
@@ -36,6 +37,11 @@ export function useStockScanner(opts = {}) {
         // cache miss 时批次会变慢（百毫秒级）→ 自动恢复 gap 保护 TDX。
         // null 表示不启用（默认行为，每批必等 gap）
         adaptiveGapThresholdMs = null,
+        // K 线连续性校验：检测最近 N 根 K 是否有日历空洞（停牌缺失等）
+        // 命中即把这只票丢进 gapStocks 队列，不让 detector 看到含空洞的数据
+        // 传 null 关闭；传 { lookbackBars, maxGapDays } 启用
+        // 例：{ lookbackBars: 250, maxGapDays: 12 } 检查最近 250 根有无 > 12 日历日的跳跃
+        verifyContinuity = null,
     } = opts
 
     const scanning   = ref(false)
@@ -47,6 +53,7 @@ export function useStockScanner(opts = {}) {
     const errors     = ref([])
     const skipped    = ref(0)    // ST 等开扫前就过滤掉的数量
     const newStocksSkipped = ref(0)  // K 线 < 60 根（新上市），独立计数不混 errors
+    const gapStocks  = ref([])   // 缓存有空洞、被跳过的票（用户可以手动重拉这些）
     const startedAt  = ref(0)
 
     let _token = 0
@@ -89,6 +96,7 @@ export function useStockScanner(opts = {}) {
         errors.value    = []
         skipped.value   = skippedCount
         newStocksSkipped.value = 0
+        gapStocks.value = []
         startedAt.value = Date.now()
 
         for (let i = 0; i < filtered.length; i += batchSize) {
@@ -115,6 +123,24 @@ export function useStockScanner(opts = {}) {
                     if (res.data.length < minBars) {
                         errors.value.push({ code: s.code, name: s.name, reason: '数据不足' })
                         return
+                    }
+                    // 连续性校验：检测最近 N 根有无停牌空洞
+                    if (verifyContinuity) {
+                        const gap = findRecentGap(
+                            res.data,
+                            verifyContinuity.lookbackBars,
+                            verifyContinuity.maxGapDays ?? 12,
+                        )
+                        if (gap) {
+                            gapStocks.value.push({
+                                code: s.code,
+                                name: s.name,
+                                daysGap: gap.daysGap,
+                                fromTime: res.data[gap.idxFrom]?.time,
+                                toTime: res.data[gap.idxTo]?.time,
+                            })
+                            return   // 不让 detector 看到含空洞的数据
+                        }
                     }
                     const result = await processor(s, res.data)
                     if (myToken !== _token || cancelled.value) return
@@ -159,7 +185,7 @@ export function useStockScanner(opts = {}) {
 
     return {
         // state
-        scanning, cancelled, scanned, total, currentCode, results, errors, skipped, newStocksSkipped, progressPct, startedAt,
+        scanning, cancelled, scanned, total, currentCode, results, errors, skipped, newStocksSkipped, gapStocks, progressPct, startedAt,
         // actions
         scan, cancel, reset,
     }

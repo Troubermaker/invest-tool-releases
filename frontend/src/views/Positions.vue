@@ -684,6 +684,16 @@ async function refreshSparklines() {
 // ---------- sparkline SVG 计算（与 Watchlist 共用一套规则）----------
 const SPARK_W = 140
 const SPARK_H = 50
+// A 股交易日 = 240 分钟（9:30-11:30 + 13:00-15:00）。X 轴按真实交易分钟数铺满，
+// 后端在 sparkline_service.py 把每个点的 minute offset（0-239）放在 sp.minutes 里。
+// 这样下午 14:00 的数据点稳定落在 X = (180/239)*W ≈ 75% 处，跟同花顺等专业软件一致。
+const TOTAL_TRADING_MINUTES = 240
+function xForPoint(sp, i) {
+    const m = sp?.minutes?.[i]
+    if (typeof m === 'number') return (m / (TOTAL_TRADING_MINUTES - 1)) * SPARK_W
+    // 老缓存兜底：没有 minutes 时退化到下标线性映射
+    return (i / (TOTAL_TRADING_MINUTES - 1)) * SPARK_W
+}
 
 function computeYRange(sp) {
     if (!sp || sp.preClose == null) return null
@@ -707,7 +717,7 @@ function sparkPath(sp, key = 'prices') {
     const arr = sp[key]; const n = arr.length
     let path = ''
     for (let i = 0; i < n; i++) {
-        const x = n > 1 ? (i / (n - 1)) * SPARK_W : SPARK_W / 2
+        const x = xForPoint(sp, i)
         const y = yToSvg(arr[i], range)
         path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' '
     }
@@ -724,11 +734,12 @@ function sparkAreaPath(sp) {
     const arr = sp.prices; const n = arr.length
     let path = ''
     for (let i = 0; i < n; i++) {
-        const x = n > 1 ? (i / (n - 1)) * SPARK_W : SPARK_W / 2
+        const x = xForPoint(sp, i)
         const y = yToSvg(arr[i], range)
         path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' '
     }
-    const lastX = n > 1 ? SPARK_W : SPARK_W / 2
+    // 面积闭合到最后一根的 x 而不是右边沿，否则开盘初期会有"虚假填充"
+    const lastX = xForPoint(sp, n - 1)
     path += `L${lastX.toFixed(1)},${SPARK_H} L0,${SPARK_H} Z`
     return path
 }
@@ -744,7 +755,7 @@ function endMarkerPath(sp) {
     const range = computeYRange(sp); if (!range) return ''
     const baseline = sp.preClose
     const last = sp.prices[sp.prices.length - 1]
-    const x = SPARK_W
+    const x = xForPoint(sp, sp.prices.length - 1)   // 跟着实际进度走，不再硬贴右边沿
     const y = yToSvg(last, range)
     if (last > baseline) return `M${x - 2.8},${y + 2.2} L${x},${y - 2.8} L${x + 2.8},${y + 2.2} Z`
     if (last < baseline) return `M${x - 2.8},${y - 2.2} L${x},${y + 2.8} L${x + 2.8},${y - 2.2} Z`
@@ -1524,7 +1535,7 @@ onMounted(async () => {
         <div class="bg-white rounded-[6px] w-[540px] shadow-[0_10px_40px_rgba(0,0,0,0.15)] overflow-hidden"
              :style="{ transform: `translate(${simDragOffset.x}px, ${simDragOffset.y}px)` }">
             <!-- 可拖拽的标题栏（按住这里移动弹窗）-->
-            <div class="px-[20px] pt-[16px] pb-[8px] cursor-grab active:cursor-grabbing select-none bg-gradient-to-b from-[#fafafa] to-white border-b border-[#f0f0f0]"
+            <div class="px-[20px] pt-[16px] pb-[8px] cursor-pointer select-none bg-gradient-to-b from-[#fafafa] to-white border-b border-[#f0f0f0]"
                  @mousedown="onSimDragStart">
                 <div class="flex items-center justify-between">
                     <div class="text-[14px] font-bold text-[#111]">
@@ -1918,7 +1929,7 @@ onMounted(async () => {
                            class="flex flex-col gap-[2px]">
                     <template #item="{ element: a }">
                         <div class="flex items-center gap-[10px] px-[8px] py-[8px] rounded-[4px] hover:bg-[#fafafa] transition">
-                            <div class="drag-handle cursor-grab active:cursor-grabbing text-[#bbb] hover:text-[#666] transition shrink-0">
+                            <div class="drag-handle cursor-pointer text-[#bbb] hover:text-[#666] transition shrink-0">
                                 <svg class="w-[14px] h-[14px]" viewBox="0 0 20 20" fill="currentColor">
                                     <circle cx="6" cy="5" r="1.5"/><circle cx="6" cy="10" r="1.5"/><circle cx="6" cy="15" r="1.5"/>
                                     <circle cx="14" cy="5" r="1.5"/><circle cx="14" cy="10" r="1.5"/><circle cx="14" cy="15" r="1.5"/>

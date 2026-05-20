@@ -10,4 +10,4 @@
 不要手动改这里——用 `python release.py --bump patch/minor/major` 升版，
 release.py 会自动更新。如果手动改也无所谓，只是要保持唯一性。
 """
-__version__ = "0.2.31"
+__version__ = "0.2.36"

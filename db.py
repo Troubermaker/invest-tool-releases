@@ -189,7 +189,18 @@ def init_db():
             secondary_entry_at TIMESTAMP,               -- 反包K的时间（NULL = 没出现 / 未刷新）
             secondary_entry_price REAL,                 -- 反包K收盘价（用户参考介入点位）
             -- 突破日跟踪：detector 跑出的最新 stage 3 突破 K 时间（仅 stage 3 / rally / exhausted / invalid 有值）
-            breakout_at TIMESTAMP                       -- s3Time，前端用来算"距今 N 天"
+            breakout_at TIMESTAMP,                      -- s3Time，前端用来算"距今 N 天"
+            -- Phase 3 Step 2：ML 模型 T+7 盈利预测分数（0-1）
+            -- 仅突破态（breakout/rally/stretched）有值；阈值 0.40 触发 ⭐ 优选
+            ml_score REAL,
+            -- Week 2 Day 1：N+1 突破确认（'strong'|'medium'|'fail'|'pending'|NULL）
+            breakout_confirm TEXT,
+            -- P2 龙虎榜（30 天窗口）
+            lhb_in_window INTEGER,                       -- 0/1 是否上过榜
+            lhb_count INTEGER,                           -- 30 天上榜次数
+            lhb_net_buy REAL,                            -- 累计净买额（元）
+            -- 综合星级 0-4（refresh 时 getTradeStarLevel 计算 + 持久化）
+            star_level INTEGER
         )
     ''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_candidate_saved_at ON candidate_picks(saved_at DESC)')
@@ -203,11 +214,122 @@ def init_db():
         'ALTER TABLE candidate_picks ADD COLUMN secondary_entry_at TIMESTAMP',
         'ALTER TABLE candidate_picks ADD COLUMN secondary_entry_price REAL',
         'ALTER TABLE candidate_picks ADD COLUMN breakout_at TIMESTAMP',
+        'ALTER TABLE candidate_picks ADD COLUMN ml_score REAL',
+        'ALTER TABLE candidate_picks ADD COLUMN breakout_confirm TEXT',
+        'ALTER TABLE candidate_picks ADD COLUMN lhb_in_window INTEGER',
+        'ALTER TABLE candidate_picks ADD COLUMN lhb_count INTEGER',
+        'ALTER TABLE candidate_picks ADD COLUMN lhb_net_buy REAL',
+        'ALTER TABLE candidate_picks ADD COLUMN star_level INTEGER',
     ):
         try:
             c.execute(migration)
         except Exception:
             pass   # 列已存在 → 忽略
+
+    # ========= Phase 1 Day 3：回测持久化 =========
+    # backtest_runs：每次跑 bt.runAll / bt.gridSearch / bt.runV0 后存一条
+    # 后续可对比"调参前后"的胜率变化，避免凭直觉调参
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS backtest_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            run_type TEXT,                          -- 'runAll' | 'gridSearch' | 'runV0' | 'runExitExperiment'
+            sample_size INTEGER,                    -- 实际扫描的股票数
+            hold_days INTEGER,
+            boards TEXT,                            -- JSON array: ['sh_main', 'sz_main', 'sme']
+            detector_opts TEXT,                     -- JSON: 调用时显式传入的 detect opts
+                                                    -- gridSearch 时含网格定义；其它含单个 config
+            summary TEXT,                           -- JSON: aggregate stats (overall + byGrade + byWeekly + ...)
+                                                    -- gridSearch 时含每个 combo 的 summary
+            top_combos TEXT,                        -- 仅 gridSearch：JSON top 10 combos by win%
+            notes TEXT DEFAULT ''                   -- 用户后期备注（调参意图 / 验证结论等）
+        )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_backtest_runs_at ON backtest_runs(run_at DESC)')
+
+    # 智能重训关联：记录 run 产生的 dataset 文件 + 训练出的 model 文件，
+    # 删除 run 时可一并清理文件
+    for migration in (
+        'ALTER TABLE backtest_runs ADD COLUMN produced_dataset TEXT',
+        'ALTER TABLE backtest_runs ADD COLUMN produced_model   TEXT',
+    ):
+        try:
+            c.execute(migration)
+        except Exception:
+            pass
+
+    # ========= P0 交易日志（真实交易闭环 + 仓位管理 + 实绩对比）=========
+    # 跟候选池的"paper trading"正交：候选池是观察哨，trades_journal 是实战账本。
+    # 用途：1) 实盘真实胜率追踪 vs 回测预期  2) 仓位 / 风险管理  3) 归因分析
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS trades_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            name TEXT,
+            -- 信号来源（哪个 tab / 哪条规则触发的买入）
+            signal_source TEXT,                  -- 'main_breakout' | 'breakout_eve' | 'dragon_return' | 'limit_up_relay' | 'manual'
+            star_level INTEGER,                  -- 0-3：⭐ 数量（手动买入 = 0）
+            signal_metadata TEXT,                -- JSON：买入时的 breakoutConfirm / sectorScore / mlScore 等快照
+            -- 买入
+            entry_at TIMESTAMP NOT NULL,
+            entry_price REAL NOT NULL,
+            position_pct REAL,                   -- 占总资金 %（如 10 表示 10%）
+            -- 计划价位（买入时由系统/用户填写）
+            target_price REAL,                   -- 目标止盈位
+            stop_loss REAL,                      -- 计划止损位
+            -- 卖出（持仓中时这些为 NULL）
+            exit_at TIMESTAMP,
+            exit_price REAL,
+            exit_reason TEXT,                    -- 'stop_loss' | 'take_profit' | 'time_out' | 'manual' | 'invalid'
+            -- 收益
+            pnl_pct REAL,                        -- 实际收益 %（自动算）
+            hold_days INTEGER,                   -- 持仓天数（自动算）
+            -- 备注
+            notes TEXT DEFAULT '',
+            -- 元数据
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP
+        )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_trades_journal_entry_at ON trades_journal(entry_at DESC)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_trades_journal_code ON trades_journal(code)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_trades_journal_signal ON trades_journal(signal_source, star_level)')
+
+    # ========= P2 龙虎榜数据（每日盘后增量更新）=========
+    # 用途：作为 ML 特征，识别"真主力进场"vs"散户追涨"。
+    # 业内实测：龙虎榜净买信号能给突破策略 +15-20pp 胜率。
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS lhb_records (
+            code TEXT NOT NULL,
+            date TEXT NOT NULL,                 -- YYYY-MM-DD
+            name TEXT,
+            net_buy REAL,                       -- 龙虎榜净买额（元，正=机构净买）
+            buy_amt REAL,                       -- 买入额（元）
+            sell_amt REAL,                      -- 卖出额（元）
+            deal_amt REAL,                      -- 龙虎榜总成交额
+            explain TEXT,                       -- 解读（如"3家机构买入，成功率68%"）
+            change_rate REAL,                   -- 当日涨跌幅 %
+            close_price REAL,
+            inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (code, date)
+        )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_lhb_date ON lhb_records(date DESC)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_lhb_code_date ON lhb_records(code, date DESC)')
+
+    # ========= 每日自动扫描结果（盘前推送） =========
+    # 每天一行，存当天 ⭐⭐⭐+ 信号摘要，供 banner / 通知用
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS auto_scan_results (
+            scan_date TEXT PRIMARY KEY,            -- YYYY-MM-DD
+            star_count INTEGER NOT NULL,           -- ⭐⭐⭐+ 数量
+            star4_count INTEGER DEFAULT 0,         -- ⭐⭐⭐⭐ 数量（细分）
+            top_codes TEXT,                        -- JSON: [{code,name,starLevel,...}]
+            total_scanned INTEGER,                 -- 本次扫了多少只
+            scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notes TEXT DEFAULT ''
+        )
+    ''')
 
     # 开启外键约束（sqlite 默认关闭）
     c.execute('PRAGMA foreign_keys = ON')
@@ -339,14 +461,13 @@ def is_market_cache_stale(updated_at_str, trading_ttl=60, offhours_ttl=24*3600):
         if updated_at < session_close <= now:
             return True
 
-        cur = now.time()
-        # A 股交易日 + 交易时段双重校验，节假日 / 调休日不算交易时段
-        is_trading = is_trading_day(now.date()) and (
-            (dtime(9, 30) <= cur <= dtime(11, 35)) or
-            (dtime(13, 0) <= cur <= dtime(15, 0))
-        )
+        # 交易时段判定走 services.market_session（单一来源），
+        # 跟前端 useSmartRefresh.js 的 isMarketOpen 共用同一份边界。
+        # 含集合竞价 9:15-9:25 + 撮合静默期 9:25-9:30 —— 这两段 EM
+        # 接口仍返撮合价，应走 trading_ttl 才能拿到竞价行情。
+        from services import market_session
         delta = (now - updated_at).total_seconds()
-        if is_trading:
+        if market_session.is_trading_hours(now):
             return delta > trading_ttl
         return delta > offhours_ttl
     except Exception:

@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 /**
  * 候选池 View —— 找发车 / 找候选扫出来后用户 ⭐ 收藏的票，持续追踪买点。
  *
@@ -15,7 +15,9 @@ import { api } from '../api/client'
 import { useSmartRefresh } from '../composables/useSmartRefresh'
 import { openStockChart } from '../composables/useStockChart'
 import { openAddToWatchlist } from '../composables/useAddToWatchlist'
-import { pushSuccess, pushError } from '../composables/useNotifications'
+import AddTradeJournalModal from '../components/AddTradeJournalModal.vue'
+import RowActionMenu from '../components/RowActionMenu.vue'
+import { pushSuccess, pushError, pushWarn } from '../composables/useNotifications'
 import { confirmDialog } from '../composables/useConfirm'
 import { useCandidateRefresh } from '../composables/useCandidateRefresh'
 // 全市场扫描器已迁出到 Quant.vue（量化选股 view）
@@ -28,6 +30,7 @@ import {
 const picks = ref([])           // [{id, code, name, saved_at, stage, save_price, ...}]
 const quotes = ref({})          // {code: {price, changePct, ...}}
 const loading = ref(false)
+const journalingCodes = ref(new Set())   // 在交易日志且 status=open 的票（持仓中）
 
 // 顶部 source tab：'all' | 'candidate'（找候选 Stage 1/2）| 'signal'（找发车 Stage 3）
 const sourceTab = ref('all')
@@ -35,22 +38,47 @@ const sourceTab = ref('all')
 // 状态过滤 chip：跟来源 tab 独立，可叠加
 const filter = ref('all')
 
+// 排序方式：'default'（状态优先） | 'sinceSavePct'（入选以来涨幅） | 'distBreak'（突破后涨幅）
+const sortBy = ref('default')
+
+// 列头点击切换排序：当前已按这个 key 排 → 回到默认；否则按这个 key
+function toggleHeaderSort(sortKey) {
+    if (!sortKey) return
+    sortBy.value = sortBy.value === sortKey ? 'default' : sortKey
+}
+
 // 把 source 字段归类成 'candidate' / 'signal' / 'other'。
 // 兼容字段缺失或自定义来源时按 stage 兜底。
 function categorizeSource(pick) {
     const src = pick?.source || ''
-    if (src.includes('发车')) return 'signal'
-    if (src.includes('候选')) return 'candidate'
-    // 兜底：stage 3 = 发车，stage 1/2 = 候选
+    // 明确把量化四大板块对应到新的两个池子中：
+    // 主升突破 / 龙回头 / 连板游资 / 原发车信号 -> 主升启动池 (Stage 3)
+    if (src.includes('主升启动') || src.includes('发车') || src.includes('主升突破') || src.includes('龙回头') || src.includes('连板')) return 'signal'
+    // 突破前夜 / 原候选信号 -> 起爆前夜池 (Stage 1/2)
+    if (src.includes('起爆前夜') || src.includes('候选') || src.includes('突破前夜')) return 'candidate'
+    // 兜底：stage 3 = 主升启动，stage 1/2 = 起爆前夜
     if (pick?.stage === 3) return 'signal'
     return 'candidate'
 }
 
 // ---------------- 加载 ----------------
+async function loadJournalingCodes() {
+    try {
+        const res = await api.listTradeJournal('open', null, 500)
+        if (res?.ok && Array.isArray(res.data)) {
+            journalingCodes.value = new Set(res.data.map(t => t.code))
+        }
+    } catch { /* 失败不阻塞主流程 */ }
+}
+function isInJournal(code) { return journalingCodes.value.has(code) }
+
 async function loadPicks() {
     loading.value = true
     try {
-        const res = await api.listCandidatePicks()
+        const [res, _] = await Promise.all([
+            api.listCandidatePicks(),
+            loadJournalingCodes(),
+        ])
         if (res.ok) picks.value = res.data || []
         else pushError(res.error || '加载候选池失败')
     } catch (e) {
@@ -145,8 +173,8 @@ function inferState(pick, currentPrice, category) {
 
 // 来源 chip（行内紧凑显示）
 function sourceChip(category) {
-    if (category === 'signal') return { text: '发车', cls: 'bg-[#fee2e2] text-[#b91c1c] border-[#fecaca]' }
-    return { text: '候选', cls: 'bg-[#fef3c7] text-[#92400e] border-[#fde68a]' }
+    if (category === 'signal') return { text: '主升启动', cls: 'bg-[#fee2e2] text-[#b91c1c] border-[#fecaca]' }
+    return { text: '起爆前夜', cls: 'bg-[#fef3c7] text-[#92400e] border-[#fde68a]' }
 }
 
 const enrichedPicks = computed(() => {
@@ -183,6 +211,8 @@ const enrichedPicks = computed(() => {
             secondaryEntryPrice: p.secondary_entry_price,
             // Phase 7：突破日（仅 stage 3 / rally / exhausted / invalid 有值）
             breakoutAt: p.breakout_at,
+            // Phase 3 Step 2：ML 模型预测分数（持久化在 DB；null = 未刷新过 / 非突破态）
+            mlScore: p.ml_score,
         }
     })
 })
@@ -192,10 +222,12 @@ const enrichedPicks = computed(() => {
 // 跟 saveXxxToCandidatePool 里写的 source 字符串保持一致
 // 用于：1) 在表格"来源"列显示彩色标签  2) 工具栏来源筛选
 const SOURCE_DISPLAY_LIST = [
-    { key: 'three_stage', label: '三维启动', match: src => /候选/.test(src),
-      cls: 'bg-[#fef3c7] text-[#92400e] border-[#fde68a]' },
-    { key: 'recent',      label: '近期发车', match: src => /发车/.test(src),
+    // 主升突破：替代了 '近期发车追踪' / '三维启动找发车'（旧 source 兼容）
+    { key: 'recent',      label: '主升突破', match: src => /主升突破|近期发车追踪|发车/.test(src),
       cls: 'bg-[#cffafe] text-[#155e75] border-[#a5f3fc]' },
+    // 突破前夜：替代了 '三维启动找候选'（旧 source 兼容）
+    { key: 'eve',         label: '突破前夜', match: src => /突破前夜|三维启动找候选|候选/.test(src),
+      cls: 'bg-[#fef3c7] text-[#92400e] border-[#fde68a]' },
     { key: 'dragon',      label: '龙回头',   match: src => src === '龙回头',
       cls: 'bg-[#fee2e2] text-[#991b1b] border-[#fecaca]' },
     { key: 'relay',       label: '连板游资', match: src => src === '连板游资',
@@ -226,13 +258,16 @@ const SAVED_COLUMNS_META = {
     formation:    { label: '形态',     width: '80px',  align: 'text-center', title: 'detector 判定的形态状态（刷新追踪后填充）' },
     source:       { label: '来源',     width: '110px', align: 'text-center', title: '入选时所用的扫描器（多 detector 命中时叠多标签）' },
     currentPrice: { label: '现价',     width: '80px',  align: 'text-right' },
-    changePct:    { label: '今日%',    width: '80px',  align: 'text-right' },
+    changePct:    { label: '今日%',    width: '80px',  align: 'text-right',
+                    sortKey: 'changePct', title: '点击按"今日涨幅"排序 · 拖动可改列序' },
     savePrice:    { label: '入选价',   width: '90px',  align: 'text-right' },
     breakLevel:   { label: '突破点位', width: '100px', align: 'text-right' },
-    distBreak:    { label: '距突破',   width: '90px',  align: 'text-right' },
+    distBreak:    { label: '距突破',   width: '90px',  align: 'text-right',
+                    sortKey: 'distBreak', title: '点击按"突破后涨幅"排序 · 拖动可改列序' },
     goldenPrice:  { label: '黄金买点', width: '100px', align: 'text-right' },
     distGold:     { label: '距黄金',   width: '90px',  align: 'text-right' },
-    sinceSavePct: { label: '入选以来', width: '90px',  align: 'text-right' },
+    sinceSavePct: { label: '入选以来', width: '90px',  align: 'text-right',
+                    sortKey: 'sinceSavePct', title: '点击按"入选以来涨幅"排序 · 拖动可改列序' },
     savedAt:      { label: '入选时间', width: '90px',  align: 'text-center' },
     breakoutAt:   { label: '突破日',   width: '90px',  align: 'text-center', title: '突破日 = detector 找到的最新 stage 3 K 线日期（仅突破后的票有值）' },
 }
@@ -314,7 +349,29 @@ const visiblePicks = computed(() => {
     if (filter.value !== 'all') {
         arr = arr.filter(p => p.state.code === filter.value)
     }
+    // 按 sortBy 切换排序键
+    //   default      → 状态 rank + distBreak（旧行为）
+    //   sinceSavePct → 入选以来涨幅 desc（null 沉底）
+    //   distBreak    → 突破后涨幅 desc（null 沉底）
     return [...arr].sort((a, b) => {
+        if (sortBy.value === 'sinceSavePct') {
+            const va = a.sinceSavePct == null ? -Infinity : a.sinceSavePct
+            const vb = b.sinceSavePct == null ? -Infinity : b.sinceSavePct
+            return vb - va
+        }
+        if (sortBy.value === 'distBreak') {
+            const va = a.distBreak == null ? -Infinity : a.distBreak
+            const vb = b.distBreak == null ? -Infinity : b.distBreak
+            return vb - va
+        }
+        if (sortBy.value === 'changePct') {
+            const va = a.changePct == null ? -Infinity : a.changePct
+            const vb = b.changePct == null ? -Infinity : b.changePct
+            if (va !== vb) return vb - va
+            // 同涨幅 → 按股票代码升序（稳定排序，方便对照）
+            return String(a.code || '').localeCompare(String(b.code || ''))
+        }
+        // default：状态 rank + distBreak 兜底
         const ra = STATE_RANK[a.state.code] ?? 9
         const rb = STATE_RANK[b.state.code] ?? 9
         if (ra !== rb) return ra - rb
@@ -327,7 +384,8 @@ const visiblePicks = computed(() => {
 // 来源筛选 chip 计数（基于 tabFilteredPicks，跟当前 sourceTab 联动）
 // 多源命中的票会在每个对应来源 key 下都计 1（计数总和会 > 总票数，符合直觉）
 const sourceFilterCounts = computed(() => {
-    const c = { all: tabFilteredPicks.value.length, three_stage: 0, recent: 0, dragon: 0, relay: 0, other: 0 }
+    const c = { all: tabFilteredPicks.value.length, other: 0 }
+    for (const item of SOURCE_DISPLAY_LIST) c[item.key] = 0
     for (const p of tabFilteredPicks.value) {
         for (const lbl of categorizeSourceLabels(p)) {
             if (lbl.key in c) c[lbl.key]++
@@ -339,12 +397,9 @@ const sourceFilterCounts = computed(() => {
 // 仅显示当前 tab 下数量 > 0 的来源 chip
 const visibleSourceChips = computed(() => {
     const all = [
-        { key: 'all',         label: '全部来源' },
-        { key: 'three_stage', label: '三维启动' },
-        { key: 'recent',      label: '近期发车' },
-        { key: 'dragon',      label: '龙回头'   },
-        { key: 'relay',       label: '连板游资' },
-        { key: 'other',       label: '其它'     },
+        { key: 'all', label: '全部来源' },
+        ...SOURCE_DISPLAY_LIST.map(item => ({ key: item.key, label: item.label })),
+        { key: 'other', label: '其它' },
     ]
     return all.filter(x => x.key === 'all' || (sourceFilterCounts.value[x.key] ?? 0) > 0)
 })
@@ -372,10 +427,11 @@ const stateCounts = computed(() => {
     return c
 })
 
-// 切换来源 tab 时重置状态过滤 + 来源筛选（不同 tab 语义不同，留着会困惑）
+// 切换来源 tab 时重置状态过滤 + 来源筛选 + 排序（不同 tab 语义不同，留着会困惑）
 watch(sourceTab, () => {
     filter.value = 'all'
     sourceFilter.value = 'all'
+    sortBy.value = 'default'
 })
 
 // 当前 tab 下应展示哪些状态过滤 chip（避免出现 0 数量的"无效选项"）
@@ -524,6 +580,92 @@ function marketPrefix(code) {
 // ---------------- Phase 5：动态追踪刷新 ----------------
 const { refreshing: tracking, lastSession: trackingSession, refresh: doRefreshTracking } = useCandidateRefresh()
 
+// Phase 3 Step 2 + P2 综合星级：星级体系跟 Quant.vue 严格一致
+//   ⭐⭐⭐⭐  confirm in [strong,medium] AND lhbInWindow（最强稀缺）
+//   ⭐⭐⭐   confirm in [strong,medium] OR  lhbInWindow（holdout 74.4%）
+//   ⭐⭐    confirm='medium'  (62-91% 稳定段)
+//   ⭐      confirm='strong' / mlScore≥0.40
+const ML_STAR_THRESHOLD = 0.40
+const sessionMlScores = ref({})
+
+function mlScoreFor(code) {
+    const p = picks.value.find(x => x.code === code)
+    if (p && p.ml_score != null) return p.ml_score
+    return sessionMlScores.value[code]
+}
+// 格式化龙虎榜净买额（元 → 万）。空/无效 → '?'，避免 toFixed NaN
+function fmtLhbNet(v) {
+    if (v == null || !Number.isFinite(+v)) return '?'
+    return (+v / 1e4).toFixed(0) + '万'
+}
+
+function starLevelFor(code) {
+    // DB 持久化的 star_level 优先；如果没值（旧记录），实时算
+    const p = picks.value.find(x => x.code === code)
+    if (!p) return 0
+    if (typeof p.star_level === 'number') return p.star_level
+    // fallback（兼容尚未 refresh 的老记录）
+    const confirmGood = p.breakout_confirm === 'strong' || p.breakout_confirm === 'medium'
+    const hasLhb = p.lhb_in_window === 1
+    if (confirmGood && hasLhb) return 4
+    if (confirmGood || hasLhb) return 3
+    if (p.breakout_confirm === 'medium') return 2
+    if (p.breakout_confirm === 'strong') return 1
+    if (typeof p.ml_score === 'number' && p.ml_score >= ML_STAR_THRESHOLD) return 1
+    return 0
+}
+function isMLStar(code) { return starLevelFor(code) >= 1 }
+
+// 加日志 modal 状态
+const journalModal = ref({ open: false, prefill: {} })
+function openAddJournalForPick(p, e) {
+    e?.stopPropagation()
+    // source 映射 -> signal_source key
+    const srcKey = (() => {
+        const s = p.source || ''
+        if (s.includes('主升突破') || s.includes('发车')) return 'main_breakout'
+        if (s.includes('突破前夜') || s.includes('候选')) return 'breakout_eve'
+        if (s.includes('龙回头')) return 'dragon_return'
+        if (s.includes('连板游资')) return 'limit_up_relay'
+        return 'manual'
+    })()
+    journalModal.value = {
+        open: true,
+        prefill: {
+            code:           p.code,
+            name:           p.name,
+            signalSource:   srcKey,
+            starLevel:      starLevelFor(p.code),
+            suggestedEntry: p.currentPrice ?? p.save_price ?? p.break_level,
+            breakLevel:     p.break_level,
+            s1Lower:        p.s1_lower,
+            signalMetadata: {
+                breakoutConfirm: p.breakout_confirm,
+                lhbInWindow:     p.lhb_in_window,
+                lhbCount:        p.lhb_count,
+                mlScore:         p.ml_score,
+                source:          p.source,
+                breakoutAt:      p.breakout_at,
+            },
+        },
+    }
+}
+function closeJournalModal() { journalModal.value.open = false }
+function starHintFor(code) {
+    const p = picks.value.find(x => x.code === code)
+    if (!p) return ''
+    const parts = []
+    if (p.breakout_confirm === 'strong')   parts.push('N+1 强确认')
+    else if (p.breakout_confirm === 'medium') parts.push('N+1 中等确认')
+    if (p.lhb_in_window === 1) {
+        parts.push(`龙虎榜 ${p.lhb_count || 0} 次 净 ${fmtLhbNet(p.lhb_net_buy)}`)
+    }
+    if (typeof p.ml_score === 'number' && p.ml_score >= ML_STAR_THRESHOLD) {
+        parts.push(`ML ${(p.ml_score*100).toFixed(0)}%`)
+    }
+    return parts.join(' · ')
+}
+
 // 上次刷新摘要 — 取所有 picks 里最新的 last_refreshed_at（没刷过 = null）
 const oldestRefresh = computed(() => {
     if (!picks.value.length) return null
@@ -555,11 +697,24 @@ async function refreshTracking() {
     if (!picks.value.length) return
     const session = await doRefreshTracking(picks.value)
     if (session) {
-        await loadPicks()   // 重新拉取以获得新的 peak_gain / formation_state / last_refreshed_at
+        // Phase 3 Step 2：session 内的 mlScores 先填到 sessionMlScores，
+        // 然后 loadPicks 拉 DB 值（含 ml_score），把 session 值覆盖掉
+        if (session.mlScores) sessionMlScores.value = session.mlScores
+        await loadPicks()
+        const starCount = Object.values(session.mlScores || {}).filter(s => s >= ML_STAR_THRESHOLD).length
         let msg = `追踪刷新完成 · 更新 ${session.updated} / ${session.total}`
-        if (session.removed) msg += ` · 剔除过期 ${session.removed}`
+        if (starCount)       msg += ` · ⭐ ${starCount} 只 ML 优选`
+        if (session.removed) {
+            const list = (session.expiredList || []).slice(0, 5)
+                .map(x => `${x.name || x.code}(${x.code})`).join(' / ')
+            const more = (session.expiredList || []).length > 5 ? ` 等 ${session.expiredList.length} 只` : ''
+            msg += ` · 剔除过期 ${session.removed}：${list}${more}`
+            // 同时控制台输出全量
+            console.warn('[candidate-refresh] 自动剔除过期票:', session.expiredList)
+        }
         if (session.errors)  msg += ` · ${session.errors} 失败`
-        pushSuccess(msg)
+        if (session.removed) pushWarn(msg)
+        else pushSuccess(msg)
     }
 }
 
@@ -572,7 +727,46 @@ const FORMATION_DISPLAY = {
     rally:         { text: '主升中',   icon: '▲', cls: 'text-[#dc2626]' },
     exhausted:     { text: '衰竭警示', icon: '⚠', cls: 'text-[#666] font-semibold' },
     invalid:       { text: '形态作废', icon: '✗', cls: 'text-[#999] line-through' },
+    stretched:     { text: '横盘跳空', icon: '🚀', cls: 'text-[#dc2626] font-semibold' },
     unknown:       { text: '未识别',   icon: '—', cls: 'text-[#cbd5e1]' },
+}
+
+// 形态有效集合 —— detector 当前认为这只票仍在某个有效形态里
+const ACTIVE_3D_STATES = new Set(['consolidating', 'tested', 'breakout', 'rally'])
+function threeStageBadge(formationState) {
+    // 三维启动形态
+    if (ACTIVE_3D_STATES.has(formationState)) {
+        if (formationState === 'breakout' || formationState === 'rally') {
+            return { text: '✓三维', cls: 'bg-[#dc2626] text-white', title: 'detector 当前判定：三维启动 Stage 3 已突破' }
+        }
+        return { text: '✓三维', cls: 'bg-[#dcfce7] text-[#166534] border border-[#bbf7d0]',
+                 title: `detector 当前判定：三维启动 ${formationState === 'tested' ? 'Stage 2 试盘后' : 'Stage 1 蓄势中'}` }
+    }
+    // 横盘跳空型（detectStretchedRally）—— 跟三维启动并列的另一种有效形态
+    if (formationState === 'stretched') {
+        return { text: '🚀 跳空', cls: 'bg-[#dc2626] text-white',
+                 title: 'detector 当前判定：长横盘后直接跳空突破（detectStretchedRally）' }
+    }
+    return null
+}
+
+// "疑似已突破" 警示：当前价已经明显高过 break_level，但 detector 还停在 S1/S2
+// 典型场景：爆量涨停日，量比超上限导致 S3 没被识别 —— 用户视角已经突破，detector 滞后
+function suspectedBreakoutBadge(pick) {
+    if (pick.distBreak == null) return null
+    // 当前价高于突破点位 > 5%，且 detector 没认 S3 —— 标记为"已破未确认"
+    if (pick.distBreak > 5
+        && pick.formationState !== 'breakout'
+        && pick.formationState !== 'rally'
+        && pick.formationState !== 'invalid') {
+        return {
+            text: '⚡已破未认',
+            cls: 'bg-[#fef3c7] text-[#b45309] border border-[#fde68a]',
+            title: `现价已高过突破点位 ${pick.distBreak.toFixed(1)}%，但 detector 仍判 ${pick.formationState || '未识别'} —— `
+                 + '通常是爆量涨停超出 detector 量比上限。建议手动看 K 线确认',
+        }
+    }
+    return null
 }
 
 
@@ -618,8 +812,8 @@ watch(() => picks.value.length, () => {
         <div class="h-[44px] bg-[#fafafa] border-b border-[#e5e5e5] flex items-center shrink-0 px-[12px] gap-[2px]">
             <button v-for="t in [
                 { key: 'all',           label: '全部',     count: sourceCounts.all },
-                { key: 'candidate',     label: '候选',     count: sourceCounts.candidate },
-                { key: 'signal',        label: '发车',     count: sourceCounts.signal },
+                { key: 'candidate',     label: '起爆前夜', count: sourceCounts.candidate },
+                { key: 'signal',        label: '主升启动', count: sourceCounts.signal },
             ]" :key="t.key"
                  @click="sourceTab = t.key"
                  :title="t.title || ''"
@@ -634,6 +828,10 @@ watch(() => picks.value.length, () => {
                     {{ t.count }}
                 </span>
             </button>
+            <!-- 最右侧：hub 控件注入位（QuantHub 提供 segmented + 今日按钮）-->
+            <div class="ml-auto shrink-0 flex items-center pl-[10px] pr-[14px] border-l border-[#e5e5e5] gap-[10px] h-full">
+                <slot name="tabBarRight" />
+            </div>
         </div>
 
         <!-- 状态过滤 chips（左）+ 上次刷新 hint + 按钮（右），合并为一行 44px -->
@@ -733,13 +931,24 @@ watch(() => picks.value.length, () => {
                         <!-- 固定列：股票 -->
                         <th class="col-fixed px-[12px] py-[8px] font-normal w-[140px]">股票</th>
                         <!-- 中部 12 列可拖拽（按 savedColumnOrder 排）-->
+                        <!-- 有 sortKey 的列点击触发排序（默认 ↔ 按本列降序），无 sortKey 的只能拖动 -->
                         <th v-for="key in savedColumnOrder" :key="key"
                             :data-col-key="key"
                             :title="SAVED_COLUMNS_META[key].title || '拖拽调整列顺序'"
-                            class="col-draggable px-[8px] py-[8px] font-normal cursor-move select-none"
-                            :class="SAVED_COLUMNS_META[key].align"
+                            @click="toggleHeaderSort(SAVED_COLUMNS_META[key].sortKey)"
+                            class="col-draggable px-[8px] py-[8px] font-normal select-none"
+                            :class="[
+                                SAVED_COLUMNS_META[key].align,
+                                SAVED_COLUMNS_META[key].sortKey ? 'cursor-pointer hover:bg-[#fef2f2]' : 'cursor-pointer',
+                                SAVED_COLUMNS_META[key].sortKey && sortBy === SAVED_COLUMNS_META[key].sortKey
+                                    ? 'text-[#0891b2] font-bold bg-[#cffafe]' : ''
+                            ]"
                             :style="{ width: SAVED_COLUMNS_META[key].width }">
                             {{ SAVED_COLUMNS_META[key].label }}
+                            <span v-if="SAVED_COLUMNS_META[key].sortKey && sortBy === SAVED_COLUMNS_META[key].sortKey"
+                                  class="ml-[2px] text-[10px]">↓</span>
+                            <span v-else-if="SAVED_COLUMNS_META[key].sortKey"
+                                  class="ml-[2px] text-[10px] text-[#cbd5e1]">↕</span>
                         </th>
                         <!-- 固定列：操作 -->
                         <th class="col-fixed px-[8px] py-[8px] font-normal text-center w-[100px]">操作</th>
@@ -760,17 +969,53 @@ watch(() => picks.value.length, () => {
                                    class="w-[13px] h-[13px] accent-[#dc2626] cursor-pointer">
                         </td>
 
-                        <!-- 固定列：股票名 + 代码 + Stage -->
+                        <!-- 固定列：股票名 + 代码 + Stage + 三维启动徽章 + 已破未认警示 -->
                         <td class="px-[12px] py-[8px] align-middle">
-                            <div class="text-[13px] font-bold text-[#111] leading-tight truncate">
-                                {{ p.name || '—' }}
+                            <div class="text-[13px] font-bold text-[#111] leading-tight truncate flex items-center gap-[4px]">
+                                <span class="truncate">{{ p.name || '—' }}</span>
+                                <!-- P2: 星级徽章（4 档，跟 Quant 一致）-->
+                                <span v-if="starLevelFor(p.code) === 4"
+                                      :title="'⭐⭐⭐⭐ ' + starHintFor(p.code) + ' · 最强稀缺信号'"
+                                      class="shrink-0 px-[4px] py-[1px] rounded text-[9px] font-bold bg-[#7c2d12] text-white">⭐⭐⭐⭐</span>
+                                <span v-else-if="starLevelFor(p.code) === 3"
+                                      :title="'⭐⭐⭐ ' + starHintFor(p.code) + ' · holdout 74.4%'"
+                                      class="shrink-0 px-[4px] py-[1px] rounded text-[9px] font-bold bg-[#dc2626] text-white">⭐⭐⭐</span>
+                                <span v-else-if="starLevelFor(p.code) === 2"
+                                      :title="'⭐⭐ ' + starHintFor(p.code) + ' · 4 段稳定 62-91%'"
+                                      class="shrink-0 px-[4px] py-[1px] rounded text-[9px] font-bold bg-[#dc2626] text-white opacity-70">⭐⭐</span>
+                                <span v-else-if="starLevelFor(p.code) === 1"
+                                      :title="'⭐ ' + starHintFor(p.code)"
+                                      class="shrink-0 px-[4px] py-[1px] rounded text-[9px] font-bold bg-[#fde68a] text-[#92400e]">⭐</span>
+                                <!-- 龙虎榜单独标记（即使没进 star_level，也独立提示有 LHB）-->
+                                <span v-if="p.lhb_in_window === 1 && starLevelFor(p.code) < 3"
+                                      :title="`龙虎榜：30 天 ${p.lhb_count ?? '?'} 次 · 净 ${fmtLhbNet(p.lhb_net_buy)}`"
+                                      class="shrink-0 px-[3px] py-[1px] rounded text-[9px] font-bold bg-[#7c2d12] text-white">🔥{{ p.lhb_count }}</span>
+                                <!-- 已在交易日志（持仓中）—— 区分纸面 vs 实盘 -->
+                                <span v-if="isInJournal(p.code)"
+                                      title="已在交易日志（持仓中）—— 实盘记录"
+                                      class="shrink-0 px-[4px] py-[1px] rounded text-[9px] font-bold bg-[#15803d] text-white">📝持仓</span>
+                                <!-- 三维启动有效徽章：detector 当前判定仍在 S1/S2/S3 形态 -->
+                                <span v-if="threeStageBadge(p.formationState)"
+                                      :title="threeStageBadge(p.formationState).title"
+                                      class="shrink-0 px-[5px] py-[1px] rounded-[3px] text-[9px] font-bold"
+                                      :class="threeStageBadge(p.formationState).cls">
+                                    {{ threeStageBadge(p.formationState).text }}
+                                </span>
+                                <!-- 警示：现价已破但 detector 还没认（爆量涨停常见）-->
+                                <span v-if="suspectedBreakoutBadge(p)"
+                                      :title="suspectedBreakoutBadge(p).title"
+                                      class="shrink-0 px-[5px] py-[1px] rounded-[3px] text-[9px] font-bold"
+                                      :class="suspectedBreakoutBadge(p).cls">
+                                    {{ suspectedBreakoutBadge(p).text }}
+                                </span>
                             </div>
                             <div class="text-[10px] text-[#999] font-mono leading-tight mt-[2px] tabular-nums flex items-center gap-[4px]">
                                 <span>{{ marketPrefix(p.code) }}{{ p.code }}</span>
                                 <span class="px-[4px] rounded-[2px] text-[9px] font-semibold"
                                       :class="p.stage === 3 ? 'bg-[#dc2626] text-white'
                                             : p.stage === 2 ? 'bg-[#fef3c7] text-[#b45309]'
-                                                            : 'bg-[#f1f5f9] text-[#64748b]'">
+                                                            : 'bg-[#f1f5f9] text-[#64748b]'"
+                                      title="入选时的 stage（snapshot，不变）">
                                     {{ p.stage === 3 ? 'S3 突破' : (p.stage === 2 ? 'S2 试盘' : 'S1 蓄势') }}
                                 </span>
                             </div>
@@ -899,22 +1144,25 @@ watch(() => picks.value.length, () => {
                             </template>
                         </td>
 
-                        <!-- 固定列：操作 -->
+                        <!-- 固定列：操作（下拉合并）-->
                         <td class="px-[8px] py-[8px] text-center" @click.stop>
-                            <button @click.stop="transferToWatchlist(p, $event)"
-                                    title="加入自选 / 持仓"
-                                    class="text-[11px] text-[#2563eb] hover:underline mr-[8px]">
-                                +自选
-                            </button>
-                            <button @click.stop="removePick(p.code)"
-                                    title="从候选池移除"
-                                    class="text-[11px] text-[#dc2626] hover:underline">
-                                移除
-                            </button>
+                            <RowActionMenu>
+                                <button @click="openAddJournalForPick(p, $event)">📝 加日志</button>
+                                <button @click="transferToWatchlist(p, $event)">+ 加自选</button>
+                                <button @click="openStockChart(p.code, p.name, picks.map(x=>({code:x.code,name:x.name})))">👁 看 K 线</button>
+                                <button @click="removePick(p.code)" class="text-red">✕ 从候选池移除</button>
+                            </RowActionMenu>
                         </td>
                     </tr>
                 </tbody>
             </table>
         </div>
+
+        <!-- 加交易日志 modal -->
+        <AddTradeJournalModal
+            :open="journalModal.open"
+            :prefill="journalModal.prefill"
+            @close="closeJournalModal"
+            @saved="(d) => { closeJournalModal(); loadJournalingCodes() }" />
     </div>
 </template>

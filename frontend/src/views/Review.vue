@@ -394,6 +394,11 @@ function shiftToTradingDay(direction) {
                 最近
             </button>
         </div>
+
+        <!-- 最右侧：hub 控件注入位（MarketHub 提供 segmented + 今日按钮）-->
+        <div class="shrink-0 flex items-center pl-[10px] pr-[14px] border-l border-[#e5e5e5] gap-[10px] h-full">
+            <slot name="tabBarRight" />
+        </div>
     </div>
 
     <!-- ============ 板块复盘（主 sub-tab）============ -->

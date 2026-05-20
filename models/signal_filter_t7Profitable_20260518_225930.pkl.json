@@ -1,0 +1,83 @@
+{
+  "label": "t7Profitable",
+  "features": [
+    "s1Length",
+    "s1Amplitude",
+    "s2BarsFromS1",
+    "s3BarsFromS2",
+    "s2VolRatio",
+    "s3VolRatio",
+    "preBreakoutVolBars",
+    "breakoutVsS1Upper",
+    "gradeScore",
+    "weeklyConfirmed",
+    "ma20Dist",
+    "ma50Dist",
+    "ma250Dist",
+    "vol5dMean",
+    "vol20dMean",
+    "vol60dMean",
+    "volRatio5v20",
+    "volRatio5v60",
+    "atr20Pct",
+    "breakoutBodyPct",
+    "breakoutUpperShadowPct",
+    "breakoutLowerShadowPct",
+    "breakoutChangePct",
+    "limitUps30d",
+    "daysFromLastLimitUp",
+    "dayOfWeek",
+    "month",
+    "sectorStrength",
+    "volAcceleration",
+    "upperShadowDensity",
+    "closeStability",
+    "resistanceTests",
+    "lhbInWindow",
+    "lhbCount",
+    "lhbNetBuySum",
+    "daysSinceLastLhb",
+    "s2Type",
+    "gradeLetter",
+    "signalSource",
+    "breakoutConfirm"
+  ],
+  "metrics": [
+    {
+      "fold": 0,
+      "auc": 0.3818785578747628,
+      "acc": 0.5230769230769231,
+      "n_train": 66,
+      "n_test": 65
+    },
+    {
+      "fold": 1,
+      "auc": 0.6737451737451737,
+      "acc": 0.6153846153846154,
+      "n_train": 131,
+      "n_test": 65
+    },
+    {
+      "fold": 2,
+      "auc": 0.6455938697318008,
+      "acc": 0.6,
+      "n_train": 196,
+      "n_test": 65
+    },
+    {
+      "fold": 3,
+      "auc": 0.6289999999999999,
+      "acc": 0.5846153846153846,
+      "n_train": 261,
+      "n_test": 65
+    },
+    {
+      "fold": 4,
+      "auc": 0.5419254658385093,
+      "acc": 0.5692307692307692,
+      "n_train": 326,
+      "n_test": 65
+    }
+  ],
+  "generated_at": "2026-05-18T22:59:30.849530"
+}

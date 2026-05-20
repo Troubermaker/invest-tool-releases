@@ -44,6 +44,14 @@ from services import tdx_service
 from services import update_service
 from services import alert_service
 from services import candidate_pool_service
+from services import backtest_service
+from services import ml_dataset_service
+from services import ml_predict_service
+from services import sector_strength_service
+from services import trade_journal_service
+from services import lhb_service
+from services import auto_scan_service
+from services import ml_health_service
 import ai_service
 
 
@@ -367,12 +375,16 @@ class Api:
     @admin_only
     def get_stock_kline_via_tdx(self, code, timeframe='日K', count=800):
         """
-        管理员专用：严格 TDX-only。
-        TDX 拉不到（北交所 / 服务器全挂 / 单股票数据缺失）→ 直接返回 []，
-        前端表现为"数据不足"。绝不 fallback 到腾讯/EM，避免触发反爬。
+        管理员专用：日 K / 周 K / 月 K / 年 K 严格 TDX-only（高频回测/扫描，绝不打腾讯/EM 触发反爬）。
+        分时 (intraday) 例外：单股低频查询，TDX 返空时允许 fallback 到腾讯 gtimg，
+        否则 admin 看某些偏门票（如部分中小板）的分时永远是空白。
         count 超过 800 自动分页，最多可拉至股票上市日全历史。
         """
-        return tdx_service.get_stock_kline(code, timeframe, count=count)
+        data = tdx_service.get_stock_kline(code, timeframe, count=count)
+        if not data and timeframe == '分时':
+            # 单次 fallback，低频不会触发反爬
+            data = kline_service.get_stock_kline(code, timeframe) or []
+        return data
 
     @api_endpoint
     @admin_only
@@ -821,6 +833,391 @@ class Api:
         if not isinstance(payloads, list):
             raise ValueError('payloads 必须是 list')
         return candidate_pool_service.bulk_update_tracking(payloads)
+
+    # =========== 回测持久化（Phase 1 Day 3）=========== #
+
+    @api_endpoint
+    @admin_only
+    def save_backtest_run(self, payload):
+        """
+        保存一次回测 run。payload 字段：
+          run_type:       'runAll' | 'gridSearch' | 'runV0' | 'runExitExperiment'
+          sample_size:    扫描股票数
+          hold_days:      持有期
+          boards:         list（可空）
+          detector_opts:  dict（可空，gridSearch 时含网格定义）
+          summary:        dict（聚合统计）
+          top_combos:     list（仅 gridSearch）
+          notes:          str（可空）
+        返回新 run 的 id。
+        """
+        if not isinstance(payload, dict):
+            raise ValueError('payload 必须是 dict')
+        return backtest_service.save_run(
+            run_type=payload.get('run_type'),
+            sample_size=payload.get('sample_size'),
+            hold_days=payload.get('hold_days'),
+            boards=payload.get('boards'),
+            detector_opts=payload.get('detector_opts'),
+            summary=payload.get('summary'),
+            top_combos=payload.get('top_combos'),
+            notes=payload.get('notes', ''),
+            produced_dataset=payload.get('produced_dataset'),
+            produced_model=payload.get('produced_model'),
+        )
+
+    @api_endpoint
+    @admin_only
+    def update_backtest_run_artifacts(self, run_id, produced_dataset=None, produced_model=None):
+        """更新 run 的关联文件（智能重训完成时回填 produced_model）。"""
+        return backtest_service.update_artifacts(run_id, produced_dataset, produced_model)
+
+    @api_endpoint
+    @admin_only
+    def list_backtest_runs(self, limit=50):
+        """列出最近 N 条 backtest run（按时间倒序，轻量元数据）。"""
+        return backtest_service.list_runs(limit=limit)
+
+    @api_endpoint
+    @admin_only
+    def get_backtest_run(self, run_id):
+        """取单条 run 的完整数据（含 summary / top_combos 解析后的 dict/list）。"""
+        return backtest_service.get_run(run_id)
+
+    @api_endpoint
+    @admin_only
+    def update_backtest_notes(self, run_id, notes):
+        """更新 run 的备注。"""
+        return backtest_service.update_notes(run_id, notes)
+
+    @api_endpoint
+    @admin_only
+    def delete_backtest_run(self, run_id, delete_files=False):
+        """
+        删一条 run。
+        delete_files=True 时一并删除该 run 关联的 dataset / model 文件（智能重训产生的）。
+        """
+        return backtest_service.delete_run(run_id, delete_files=bool(delete_files))
+
+    # =========== ML 训练数据落盘（Phase 2 Step 1）=========== #
+
+    @api_endpoint
+    @admin_only
+    def save_ml_dataset(self, payload):
+        """
+        把一批 ML 训练样本写到 data/ml_dataset/dataset_*.ndjson。
+
+        payload: {
+            rows: list[dict],   # 每个 dict 是 backtestStock 输出的 trade（含 features + mlLabels）
+            name: str | None    # 可选文件名后缀
+        }
+        """
+        if not isinstance(payload, dict):
+            raise ValueError('payload 必须是 dict')
+        rows = payload.get('rows') or []
+        return ml_dataset_service.save_dataset(rows, name=payload.get('name'))
+
+    @api_endpoint
+    @admin_only
+    def list_ml_datasets(self):
+        """列出已落盘的数据集文件（最新在前）。"""
+        return ml_dataset_service.list_datasets()
+
+    # =========== ML 在线预测（Phase 3 Step 2）=========== #
+
+    @api_endpoint
+    @admin_only
+    def ml_predict_status(self):
+        """返回 ML 模型加载状态（path / features / label / error）。"""
+        return ml_predict_service.status()
+
+    @api_endpoint
+    @admin_only
+    def ml_predict_score(self, features):
+        """单个 feature dict → 预测分数 [0,1] | None（模型不可用）。"""
+        if not isinstance(features, dict):
+            raise ValueError('features 必须是 dict')
+        return ml_predict_service.predict(features)
+
+    @api_endpoint
+    @admin_only
+    def ml_predict_scores(self, features_list):
+        """批量 feature dict → 分数列表（顺序对应输入）。"""
+        if not isinstance(features_list, list):
+            raise ValueError('features_list 必须是 list')
+        return ml_predict_service.predict_batch(features_list)
+
+    # =========== 板块强度（Week 1 Day 3-5）=========== #
+
+    @api_endpoint
+    def get_sector_strengths(self, force=False):
+        """所有 top 板块的强度评分（0-100），按 score 倒序。"""
+        return sector_strength_service.get_sector_strengths(force=bool(force))
+
+    @api_endpoint
+    def get_stock_sector_strength(self, code):
+        """单只票的板块强度（最强板块）。返回 dict 或 None。"""
+        if not code: return None
+        return sector_strength_service.get_stock_strength(code)
+
+    @api_endpoint
+    def get_batch_stock_sector_strengths(self, codes):
+        """批量查股票的板块强度。返回 { code: dict|null }。"""
+        if not isinstance(codes, list): return {}
+        return sector_strength_service.get_batch_stock_strengths(codes)
+
+    # =========== P0 交易日志 + 仓位管理 =========== #
+
+    @api_endpoint
+    @admin_only
+    def add_trade_journal(self, payload):
+        """记录买入。payload 含 code/name/signal_source/star_level/entry_price/position_pct/target_price/stop_loss/signal_metadata/notes。"""
+        if not isinstance(payload, dict):
+            raise ValueError('payload 必须 dict')
+        return trade_journal_service.add_trade(
+            code=payload.get('code'),
+            name=payload.get('name'),
+            signal_source=payload.get('signal_source', 'manual'),
+            star_level=payload.get('star_level', 0),
+            entry_price=payload.get('entry_price'),
+            position_pct=payload.get('position_pct'),
+            target_price=payload.get('target_price'),
+            stop_loss=payload.get('stop_loss'),
+            signal_metadata=payload.get('signal_metadata'),
+            entry_at=payload.get('entry_at'),
+            notes=payload.get('notes', ''),
+        )
+
+    @api_endpoint
+    @admin_only
+    def close_trade_journal(self, payload):
+        """平仓。payload 含 trade_id/exit_price/exit_reason/exit_at/notes。"""
+        if not isinstance(payload, dict):
+            raise ValueError('payload 必须 dict')
+        return trade_journal_service.close_trade(
+            trade_id=payload.get('trade_id'),
+            exit_price=payload.get('exit_price'),
+            exit_reason=payload.get('exit_reason', 'manual'),
+            exit_at=payload.get('exit_at'),
+            notes=payload.get('notes'),
+        )
+
+    @api_endpoint
+    @admin_only
+    def update_trade_journal(self, payload):
+        """更新入场价/计划止盈/止损/仓位/备注。entry_price 改动且 trade 已平仓时
+        自动重算 pnl_pct。"""
+        if not isinstance(payload, dict):
+            raise ValueError('payload 必须 dict')
+        return trade_journal_service.update_trade(
+            trade_id=payload.get('trade_id'),
+            entry_price=payload.get('entry_price'),
+            target_price=payload.get('target_price'),
+            stop_loss=payload.get('stop_loss'),
+            position_pct=payload.get('position_pct'),
+            notes=payload.get('notes'),
+        )
+
+    @api_endpoint
+    @admin_only
+    def delete_trade_journal(self, trade_id):
+        """删一条 trade（误录可删）。"""
+        return trade_journal_service.delete_trade(trade_id)
+
+    @api_endpoint
+    @admin_only
+    def list_trade_journal(self, status='all', signal_source=None, limit=200):
+        """列出 trades。status='all'|'open'|'closed'。"""
+        return trade_journal_service.list_trades(status=status, signal_source=signal_source, limit=limit)
+
+    @api_endpoint
+    @admin_only
+    def trade_journal_summary(self, period_days=30):
+        """胜率 / 平均盈亏 / 各 signal_source 切片。"""
+        return trade_journal_service.get_summary(period_days=period_days)
+
+    # =========== P2 龙虎榜数据 =========== #
+
+    @api_endpoint
+    @admin_only
+    def refresh_lhb_data(self, days=90, force=False):
+        """从东财拉取最近 N 天龙虎榜数据写入 lhb_records。"""
+        return lhb_service.refresh_lhb_data(days=int(days), force=bool(force))
+
+    @api_endpoint
+    def get_stock_lhb_history(self, code, lookback_days=90):
+        """单只票最近 N 天的 LHB 记录列表。"""
+        if not code: return []
+        return lhb_service.get_stock_lhb_history(code, lookback_days=int(lookback_days))
+
+    @api_endpoint
+    def get_lhb_features(self, code, event_date=None, window_days=30):
+        """4 维 LHB 特征（ML / 排序用）。"""
+        return lhb_service.get_lhb_features(code, event_date=event_date, window_days=int(window_days))
+
+    @api_endpoint
+    def get_batch_lhb_features(self, codes, event_date=None, window_days=30):
+        """批量 LHB 特征。"""
+        if not isinstance(codes, list): return {}
+        return lhb_service.get_lhb_batch_features(codes, event_date=event_date, window_days=int(window_days))
+
+    @api_endpoint
+    @admin_only
+    def lhb_stats(self):
+        """LHB 表统计信息（诊断用）。"""
+        return lhb_service.stats()
+
+    # =========== 每日自动扫描 + 桌面推送 =========== #
+
+    @api_endpoint
+    @admin_only
+    def save_auto_scan_result(self, payload):
+        """保存一次自动扫描结果（按日去重）。"""
+        if not isinstance(payload, dict):
+            raise ValueError('payload 必须是 dict')
+        return auto_scan_service.save_result(
+            scan_date=payload.get('scan_date'),
+            star_count=payload.get('star_count', 0),
+            star4_count=payload.get('star4_count', 0),
+            top_codes=payload.get('top_codes', []),
+            total_scanned=payload.get('total_scanned', 0),
+            notes=payload.get('notes', ''),
+        )
+
+    @api_endpoint
+    def get_today_auto_scan(self):
+        """今日扫描结果（无则 null）。"""
+        return auto_scan_service.get_today()
+
+    @api_endpoint
+    def get_auto_scan_by_date(self, scan_date):
+        """指定日期的扫描结果。"""
+        return auto_scan_service.get_by_date(scan_date)
+
+    @api_endpoint
+    @admin_only
+    def list_recent_auto_scans(self, limit=30):
+        """最近 N 天扫描记录。"""
+        return auto_scan_service.list_recent(limit=int(limit or 30))
+
+    @api_endpoint
+    def send_desktop_notification(self, title, message, timeout=10):
+        """系统桌面通知（plyer）。"""
+        return auto_scan_service.send_desktop_notification(title, message, int(timeout or 10))
+
+    # =========== ML 模型健康监控（P2 alpha 衰减）=========== #
+
+    @api_endpoint
+    @admin_only
+    def ml_health_overview(self):
+        """模型 + 最近 3 个数据集 IC 总览。"""
+        return ml_health_service.overview()
+
+    @api_endpoint
+    @admin_only
+    def ml_health_current_model(self):
+        """当前生产模型信息（含 sidecar）。"""
+        return ml_health_service.get_current_model_info()
+
+    @api_endpoint
+    @admin_only
+    def ml_health_list_models(self):
+        """所有训练过的模型。"""
+        return ml_health_service.list_models()
+
+    @api_endpoint
+    @admin_only
+    def ml_health_list_datasets(self):
+        """所有数据集 NDJSON。"""
+        return ml_health_service.list_datasets()
+
+    @api_endpoint
+    @admin_only
+    def ml_health_compute_ic(self, filename, label_field='t7Return'):
+        """单个数据集 IC（当前模型 vs 实际收益）。"""
+        return ml_health_service.compute_dataset_ic(filename, label_field=label_field)
+
+    @api_endpoint
+    @admin_only
+    def ml_health_ic_trend(self, n=5):
+        """最近 N 个数据集 IC 趋势。"""
+        return ml_health_service.recent_ic_trend(n=int(n or 5))
+
+    @api_endpoint
+    @admin_only
+    def ml_health_list_models_with_ic(self, dataset_filename=None, max_models=10,
+                                       label_field='t7Return', signal_source=None, boards=None):
+        """
+        所有模型 × 最新（或指定）数据集 的 IC 表，可按 范围（信号源 / 板块 / 标签）切片。
+
+        Args:
+            dataset_filename: 评估目标数据集；None=最新
+            max_models:       最多评测的模型数
+            label_field:      t3Return / t7Return / t14Return / t21Return
+            signal_source:    threeStage / breakoutEve / dragonReturn / limitUpRelay / None=全部
+            boards:           list[str]，如 ['sh_main','sme']；None=全部板块
+        """
+        return ml_health_service.list_models_with_ic(
+            dataset_filename=dataset_filename,
+            max_models=int(max_models or 10),
+            label_field=label_field or 't7Return',
+            signal_source=signal_source or None,
+            boards=boards or None,
+        )
+
+    @api_endpoint
+    @admin_only
+    def ml_set_active_model(self, model_path):
+        """切换生产用激活模型（指定 .pkl 路径，必须在 models/ 下）。"""
+        from services import ml_predict_service
+        return ml_predict_service.activate(model_path)
+
+    @api_endpoint
+    @admin_only
+    def ml_delete_model(self, model_path):
+        """删除模型文件 + sidecar JSON。激活中的模型禁止删除。"""
+        return ml_health_service.delete_model(model_path)
+
+    @api_endpoint
+    @admin_only
+    def ml_delete_dataset(self, dataset_filename):
+        """删除 dataset NDJSON 文件。"""
+        return ml_health_service.delete_dataset(dataset_filename)
+
+    @api_endpoint
+    @admin_only
+    def ml_retrain(self, dataset_files=None, label='t7Profitable'):
+        """
+        用指定数据集（或全部）训练新模型 + 落盘 + 重载预测服务。
+        同步阻塞接口，一般耗时 30s-3min（取决于数据量）。
+
+        Args:
+            dataset_files: 数据集文件名 list（不带路径），None=全部
+            label:         标签字段（默认 t7Profitable）
+
+        Returns: do_train 的结果字典 + 重载状态
+        """
+        from services import ml_signal_filter, ml_predict_service
+        res = ml_signal_filter.do_train(
+            dataset_files=dataset_files,
+            label=label,
+            skip_shap=True,
+        )
+        # 训练成功 → 激活新模型
+        if res.get('ok') and res.get('model_path'):
+            activate_res = ml_predict_service.activate(res['model_path'])
+            res['activated'] = activate_res.get('ok', False)
+        return res
+
+    @api_endpoint
+    @admin_only
+    def suggest_trade_position(self, star_level, total_open_positions=0, sector_open_pct=0):
+        """仓位建议（基于星级 + 当前持仓状态）。"""
+        return trade_journal_service.suggest_position(
+            star_level=star_level,
+            total_open_positions=total_open_positions,
+            sector_open_pct=sector_open_pct,
+        )
 
     # =========== 老板键 =========== #
 

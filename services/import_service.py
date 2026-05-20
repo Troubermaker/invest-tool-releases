@@ -152,7 +152,8 @@ def batch_add_to_group(group_id, codes_with_names):
     批量加入分组。已存在的 code 跳过；不会改动现有记录。
     Args:
         group_id: int
-        codes_with_names: [{'code', 'name'}]
+        codes_with_names: [{'code', 'name', 'price'?, 'added_at'?}]
+            price 转 added_price；added_at 接受 ISO 字符串，未传则交给 SQLite 默认 CURRENT_TIMESTAMP
     Returns:
         {'added': int, 'skipped_existing': int, 'failed': int, 'detail': [...]}
     """
@@ -180,8 +181,10 @@ def batch_add_to_group(group_id, codes_with_names):
             skipped_existing += 1
             detail.append({'code': code, 'name': name, 'status': 'skipped'})
             continue
+        price = it.get('price')
+        added_at = it.get('added_at')
         try:
-            watchlist_service.add_stock(group_id, code, name, None, '')
+            watchlist_service.add_stock(group_id, code, name, price, '', added_at=added_at)
             existing.add(code)
             added += 1
             detail.append({'code': code, 'name': name, 'status': 'added'})

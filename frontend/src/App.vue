@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import RightDrawer from './components/RightDrawer.vue'
+import DashboardDrawer from './components/DashboardDrawer.vue'
 import ActivationGate from './components/ActivationGate.vue'
 import UpdateBanner from './components/UpdateBanner.vue'
 import Toaster from './components/Toaster.vue'
@@ -9,19 +10,21 @@ import StockChartDrawer from './components/StockChartDrawer.vue'
 import AddToWatchlistModal from './components/AddToWatchlistModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import AdminUnlockModal from './components/AdminUnlockModal.vue'
-import Market from './views/Market.vue'
+import MarketHub from './views/MarketHub.vue'
 import Watchlist from './views/Watchlist.vue'
 import Positions from './views/Positions.vue'
-import CandidatePool from './views/CandidatePool.vue'
-import Quant from './views/Quant.vue'
-import Review from './views/Review.vue'
+import QuantHub from './views/QuantHub.vue'
 import Settings from './views/Settings.vue'
 import { api } from './api/client'
 import { pushWarn } from './composables/useNotifications'
 import { useUserRole } from './composables/useUserRole'
+import { useDailyAutoScan } from './composables/useDailyAutoScan'
+import { useDashboard } from './composables/useDashboard'
 
 const currentTab = ref('market')
+const hubSubTabs = ref({ market: undefined, quant: undefined })
 const isAIDrawerOpen = ref(false)
+const dashboard = useDashboard()       // 今日仪表盘开关（共享单例，hub 顶部按钮 + Ctrl+J 都改它）
 
 // 激活门禁状态：null=检查中（首屏空白片刻），false=未激活（显示 Gate），true=已激活
 const isActivated = ref(null)
@@ -31,7 +34,7 @@ const { refresh: refreshUserRole, isAdmin } = useUserRole()
 const showAdminModal = ref(false)
 
 // 管理员专属 tab —— 跟 Sidebar.vue 的 ALL_NAV_ITEMS[].adminOnly 必须保持一致
-const ADMIN_ONLY_TABS = new Set(['candidates'])
+const ADMIN_ONLY_TABS = new Set(['quant'])
 
 // 退出管理员模式时，如果当前在管理员专属 tab，自动退回到行情首页
 // （否则 Sidebar 已隐藏入口但视图还在渲染，造成"我看到的内容点不到"的诡异感）
@@ -53,20 +56,46 @@ watch(isActivated, (v) => {
     }
 }, { immediate: true })
 
+// 激活通过 + admin → 启动每日自动扫描守护
+const autoScan = useDailyAutoScan()
+watch([isActivated, isAdmin], ([act, adm]) => {
+    if (act === true && adm === true) {
+        autoScan.start()
+    } else {
+        autoScan.stop()
+    }
+}, { immediate: true })
+
 // 隐藏快捷键 Ctrl+Shift+A：唤起管理员解锁 modal
+// Ctrl+J：召唤 / 关闭 今日仪表盘抽屉（管理员才有意义，但门禁外也允许 toggle）
+// Esc：关闭仪表盘抽屉（如已打开）
 function onGlobalKeydown(e) {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'A' || e.key === 'a')) {
         e.preventDefault()
         if (isActivated.value === true) {
             showAdminModal.value = true
         }
+        return
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'j' || e.key === 'J')) {
+        if (isActivated.value === true && isAdmin.value) {
+            e.preventDefault()
+            dashboard.toggle()
+        }
+        return
+    }
+    if (e.key === 'Escape' && dashboard.isOpen.value) {
+        dashboard.close()
     }
 }
 onMounted(() => window.addEventListener('keydown', onGlobalKeydown))
 onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown))
 
-function handleNavigate(tabId) {
+function handleNavigate(tabId, subTab = undefined) {
     currentTab.value = tabId
+    if (subTab !== undefined) {
+        hubSubTabs.value[tabId] = subTab
+    }
 }
 
 // ============ 价格警报轮询（激活后每 10s 一次）============
@@ -125,30 +154,43 @@ onUnmounted(() => {
     <UpdateBanner />
 
     <!-- Left Sidebar -->
-    <Sidebar :currentTab="currentTab" @navigate="handleNavigate"/>
+    <Sidebar :currentTab="currentTab"
+             @navigate="handleNavigate"/>
 
     <!-- Main Content Area -->
     <main class="flex-1 relative flex flex-col min-w-0">
-        <!-- Render Active View -->
-        <Market v-if="currentTab === 'market'" @openAI="isAIDrawerOpen = true"/>
-        <Watchlist v-else-if="currentTab === 'watchlist'" />
-        <Positions v-else-if="currentTab === 'positions'" />
-        <CandidatePool v-else-if="currentTab === 'candidates'" />
-        <Quant v-else-if="currentTab === 'quant'" />
-        <Review v-else-if="currentTab === 'review'" />
-        <Settings v-else-if="currentTab === 'settings'" />
+        <!-- 注：原顶部 ⭐⭐⭐+ 信号 banner 已撤掉 —— 太占常驻空间。
+             今日信号现在挂在 hub 顶栏 "📊 今日" 按钮的红色徽章上，点开抽屉看完整列表 -->
 
-        <!-- Placeholders for other tabs for now -->
-        <div v-else class="flex items-center justify-center h-full text-gray-400 flex-col bg-white m-4 rounded-xl border border-gray-200">
-            <svg class="w-16 h-16 mb-4 text-red-200" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
-            <h2 class="text-2xl font-semibold text-gray-500 capitalize mb-2">{{ currentTab }} 模块</h2>
-            <p class="text-sm font-medium">界面数据接入中 (Development in progress)</p>
-            <button @click="currentTab = 'market'" class="mt-4 px-4 py-2 border border-red-500 text-red-500 rounded-lg hover:bg-red-50 font-bold transition text-sm">返回行情首页</button>
-        </div>
+        <!-- Render Active View（5 个顶层 tab + dashboard drawer + settings）-->
+        <KeepAlive>
+            <MarketHub v-if="currentTab === 'market'"
+                       v-model:subTab="hubSubTabs.market"
+                       @openAI="isAIDrawerOpen = true"/>
+            <Watchlist v-else-if="currentTab === 'watchlist'" />
+            <Positions v-else-if="currentTab === 'positions'" />
+            <QuantHub v-else-if="currentTab === 'quant'"
+                      v-model:subTab="hubSubTabs.quant" />
+            <Settings v-else-if="currentTab === 'settings'" />
+
+            <!-- Placeholders for other tabs for now -->
+            <div v-else class="flex items-center justify-center h-full text-gray-400 flex-col bg-white m-4 rounded-xl border border-gray-200">
+                <svg class="w-16 h-16 mb-4 text-red-200" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                <h2 class="text-2xl font-semibold text-gray-500 capitalize mb-2">{{ currentTab }} 模块</h2>
+                <p class="text-sm font-medium">界面数据接入中 (Development in progress)</p>
+                <button @click="handleNavigate('market', 'live')" class="mt-4 px-4 py-2 border border-red-500 text-red-500 rounded-lg hover:bg-red-50 font-bold transition text-sm">返回行情首页</button>
+            </div>
+        </KeepAlive>
     </main>
 
     <!-- Right Drawer for AI -->
     <RightDrawer :isOpen="isAIDrawerOpen" @close="isAIDrawerOpen = false"/>
+
+    <!-- 今日仪表盘抽屉（Ctrl+J 召唤 / hub 顶栏 "今日" 按钮 / Esc 关闭）-->
+    <DashboardDrawer v-if="isAdmin"
+        :open="dashboard.isOpen.value"
+        @close="dashboard.close()"
+        @navigate="(t, sub) => { handleNavigate(t, sub); dashboard.close() }"/>
 
     <!-- 全局 toast 通知（接口失败 / 重要事件） -->
     <Toaster />

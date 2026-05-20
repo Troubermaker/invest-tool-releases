@@ -1,0 +1,8 @@
+# Phase 2 ML training/diagnostic deps (not bundled with PyInstaller build)
+# Install: pip install -r requirements-ml.txt
+lightgbm
+shap
+pandas
+scikit-learn
+matplotlib
+numpy

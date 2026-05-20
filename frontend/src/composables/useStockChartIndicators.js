@@ -10,8 +10,8 @@
  */
 import { ref, watch } from 'vue'
 
-const STORAGE_KEY = 'stock_chart_indicators_v1'
-const BASIC_IDS = new Set(['MA', 'BOLL', 'MACD', 'KDJ'])
+const STORAGE_KEY = 'stock_chart_indicators_v2'
+const BASIC_IDS = new Set(['MA', 'BOLL', 'MACD', 'KDJ', 'SCORE'])
 
 function loadStored() {
     try {
@@ -34,17 +34,30 @@ function saveStored(val) {
 
 // 模块级单例：所有 StockChart 实例共享同一个 ref
 // 默认值：管理员能看 TRIPLE，普通用户只 MA/MACD/KDJ
-const DEFAULT_INDICATORS = ['MA', 'MACD', 'KDJ', 'TRIPLE']
+const DEFAULT_INDICATORS = ['MA', 'MACD', 'KDJ', 'TRIPLE', 'SCORE']
 const _stored = loadStored()
 const activeIndicators = ref(_stored || DEFAULT_INDICATORS)
 
 // 自动持久化（深监听数组内部变化）
 watch(activeIndicators, (val) => saveStored(val), { deep: true })
 
+const TF_STORAGE_KEY = 'stock_chart_timeframe_v1'
+function loadStoredTF() {
+    try {
+        const raw = localStorage.getItem(TF_STORAGE_KEY)
+        if (raw) return raw
+    } catch (e) {}
+    return null
+}
+const activeTimeframe = ref(loadStoredTF() || '日K')
+watch(activeTimeframe, (val) => {
+    try { localStorage.setItem(TF_STORAGE_KEY, val) } catch (e) {}
+})
+
 export function useStockChartIndicators() {
     /** 角色降级（管理员退出）时调用：剔除超出权限的高级 chip */
     function clampToBasic() {
         activeIndicators.value = activeIndicators.value.filter(id => BASIC_IDS.has(id))
     }
-    return { activeIndicators, clampToBasic }
+    return { activeIndicators, clampToBasic, activeTimeframe }
 }

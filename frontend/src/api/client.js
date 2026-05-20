@@ -218,6 +218,78 @@ export const api = {
   /** Phase 5：批量更新追踪字段（候选池刷新一次性写回所有票）*/
   bulkUpdateCandidateTracking: (payloads) => call('bulk_update_candidate_tracking', payloads || []),
 
+  /** ---- 回测持久化（Phase 1 Day 3）---- */
+  saveBacktestRun:    (payload) => call('save_backtest_run', payload || {}),
+  updateBacktestRunArtifacts: (runId, producedDataset, producedModel) =>
+                                   call('update_backtest_run_artifacts', runId, producedDataset || null, producedModel || null),
+  listBacktestRuns:   (limit)   => call('list_backtest_runs', limit ?? 50),
+  getBacktestRun:     (runId)   => call('get_backtest_run', runId),
+  updateBacktestNotes:(runId, notes) => call('update_backtest_notes', runId, notes || ''),
+  deleteBacktestRun:  (runId, deleteFiles) => call('delete_backtest_run', runId, !!deleteFiles),
+
+  /** ---- ML 训练数据落盘（Phase 2 Step 1）---- */
+  saveMLDataset:      (rows, name) => call('save_ml_dataset', { rows, name }),
+  listMLDatasets:     ()           => call('list_ml_datasets'),
+
+  /** ---- ML 在线预测（Phase 3 Step 2）---- */
+  mlPredictStatus:    ()           => call('ml_predict_status'),
+  mlPredictScore:     (features)   => call('ml_predict_score', features),
+  mlPredictScores:    (featuresList) => call('ml_predict_scores', featuresList),
+
+  /** ---- 板块强度（Week 1 Day 3-5）---- */
+  getSectorStrengths:           (force) => call('get_sector_strengths', !!force),
+  getStockSectorStrength:       (code)  => call('get_stock_sector_strength', code),
+  getBatchStockSectorStrengths: (codes) => call('get_batch_stock_sector_strengths', codes || []),
+
+  /** ---- P2 龙虎榜 ---- */
+  refreshLhbData:       (days, force)            => call('refresh_lhb_data', days ?? 90, !!force),
+  getStockLhbHistory:   (code, lookbackDays)     => call('get_stock_lhb_history', code, lookbackDays ?? 90),
+  getLhbFeatures:       (code, eventDate, win)   => call('get_lhb_features', code, eventDate || null, win ?? 30),
+  getBatchLhbFeatures:  (codes, eventDate, win)  => call('get_batch_lhb_features', codes || [], eventDate || null, win ?? 30),
+  lhbStats:             ()                       => call('lhb_stats'),
+
+  /** ---- 每日自动扫描 + 桌面推送 ---- */
+  saveAutoScanResult:   (payload)                => call('save_auto_scan_result', payload || {}),
+  getTodayAutoScan:     ()                       => call('get_today_auto_scan'),
+  getAutoScanByDate:    (date)                   => call('get_auto_scan_by_date', date),
+  listRecentAutoScans:  (limit)                  => call('list_recent_auto_scans', limit ?? 30),
+  sendDesktopNotification: (title, msg, timeout) => call('send_desktop_notification', title, msg, timeout ?? 10),
+
+  /** ---- ML 健康监控 (P2) ---- */
+  mlHealthOverview:     ()                       => call('ml_health_overview'),
+  mlHealthCurrentModel: ()                       => call('ml_health_current_model'),
+  mlHealthListModels:   ()                       => call('ml_health_list_models'),
+  mlHealthListDatasets: ()                       => call('ml_health_list_datasets'),
+  mlHealthComputeIc:    (filename, label)        => call('ml_health_compute_ic', filename, label || 't7Return'),
+  mlHealthIcTrend:      (n)                      => call('ml_health_ic_trend', n ?? 5),
+  /** 所有模型 × 最新（或指定）数据集 IC 矩阵，可按范围切片 */
+  mlHealthListModelsWithIc: (dataset, maxModels, labelField, signalSource, boards) =>
+    call('ml_health_list_models_with_ic',
+         dataset || null,
+         maxModels ?? 10,
+         labelField || 't7Return',
+         signalSource || null,
+         boards || null),
+  /** 切换激活模型（指定 .pkl 路径）*/
+  mlSetActiveModel:     (path)                   => call('ml_set_active_model', path),
+  /** 删除模型 .pkl + sidecar JSON（激活中的模型禁止删，先切走）*/
+  mlDeleteModel:        (path)                   => call('ml_delete_model', path),
+  /** 删除 dataset NDJSON */
+  mlDeleteDataset:      (filename)               => call('ml_delete_dataset', filename),
+  /** 用指定 dataset 重训模型（同步阻塞，30s-3min）*/
+  mlRetrain:            (datasetFiles, label)    => call('ml_retrain', datasetFiles || null, label || 't7Profitable'),
+
+  /** ---- P0 交易日志 + 仓位管理 ---- */
+  addTradeJournal:        (payload) => call('add_trade_journal', payload || {}),
+  closeTradeJournal:      (payload) => call('close_trade_journal', payload || {}),
+  updateTradeJournal:     (payload) => call('update_trade_journal', payload || {}),
+  deleteTradeJournal:     (tradeId) => call('delete_trade_journal', tradeId),
+  listTradeJournal:       (status, signalSource, limit) =>
+                            call('list_trade_journal', status || 'all', signalSource || null, limit || 200),
+  tradeJournalSummary:    (periodDays) => call('trade_journal_summary', periodDays || 30),
+  suggestTradePosition:   (starLevel, totalOpen, sectorOpenPct) =>
+                            call('suggest_trade_position', starLevel || 0, totalOpen || 0, sectorOpenPct || 0),
+
   /** 股票搜索（A 股，支持代码/中文名/拼音）*/
   searchStocks: (query, limit) => call('search_stocks', query, limit ?? 20),
   /** 从分组移除股票 */
