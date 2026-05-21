@@ -2,7 +2,7 @@
   "version": "0.2.41",
   "release_date": "2026-05-21",
   "min_compatible_version": "0.0.0",
-  "download_url": "https://ghproxy.net/https://github.com/Troubermaker/invest-tool-releases/releases/download/v0.2.41/invest_tool_v0.2.41_2026-05-21.zip",
+  "download_url": "https://ghp.ci/https://github.com/Troubermaker/invest-tool-releases/releases/download/v0.2.41/invest_tool_v0.2.41_2026-05-21.zip",
   "sha256": "57b59bf5493567fe4e279ee585d369959636ea234850521fec55c9dbb3af09d2",
   "size_bytes": 102969070,
   "release_notes": "（无 git 记录）"
