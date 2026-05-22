@@ -1,9 +1,9 @@
 {
-  "version": "0.2.42",
+  "version": "0.2.45",
   "release_date": "2026-05-22",
   "min_compatible_version": "0.0.0",
-  "download_url": "https://gh-proxy.com/https://github.com/Troubermaker/invest-tool-releases/releases/download/v0.2.42/invest_tool_v0.2.42_2026-05-22.zip",
-  "sha256": "1828eded14c641c96c7389b6c4553e591c622208aec081eb53a58e26d20306f8",
-  "size_bytes": 102969794,
-  "release_notes": "更新下载镜像加速源为极速稳定的 gh-proxy.com，升级版本至 v0.2.42，解决 SSL 校验失败及下载超时问题。"
+  "download_url": "https://invest-tool-releases-1301751305.cos.ap-shanghai.myqcloud.com/invest_tool_v0.2.45_2026-05-22.zip",
+  "sha256": "a74fc1d1d72a17bb8801335157d480063e21115fb9593ea9cb04f0391070e8b0",
+  "size_bytes": 102968837,
+  "release_notes": "（无 git 记录）"
 }
