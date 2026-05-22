@@ -2,8 +2,8 @@
   "version": "0.2.41",
   "release_date": "2026-05-21",
   "min_compatible_version": "0.0.0",
-  "download_url": "https://ghps.cc/https://github.com/Troubermaker/invest-tool-releases/releases/download/v0.2.41/invest_tool_v0.2.41_2026-05-21.zip",
+  "download_url": "https://gh-proxy.com/https://github.com/Troubermaker/invest-tool-releases/releases/download/v0.2.41/invest_tool_v0.2.41_2026-05-21.zip",
   "sha256": "57b59bf5493567fe4e279ee585d369959636ea234850521fec55c9dbb3af09d2",
   "size_bytes": 102969070,
-  "release_notes": "更新下载镜像加速源为极速兼容的 ghps.cc，解决部分网络环境下 SSL UNEXPECTED_EOF_WHILE_READING 报错。"
+  "release_notes": "更新下载镜像加速源为极速稳定的 gh-proxy.com，解决部分网络环境下 SSL UNEXPECTED_EOF_WHILE_READING 及域名过期失效报错。"
 }
