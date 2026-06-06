@@ -1,9 +1,9 @@
 {
-  "version": "0.2.45",
-  "release_date": "2026-05-22",
+  "version": "0.2.46",
+  "release_date": "2026-06-06",
   "min_compatible_version": "0.0.0",
-  "download_url": "https://invest-tool-releases-1301751305.cos.ap-shanghai.myqcloud.com/invest_tool_v0.2.45_2026-05-22.zip",
-  "sha256": "a74fc1d1d72a17bb8801335157d480063e21115fb9593ea9cb04f0391070e8b0",
-  "size_bytes": 102968837,
-  "release_notes": "（无 git 记录）"
+  "download_url": "https://invest-tool-releases-1301751305.cos.ap-shanghai.myqcloud.com/invest_tool_v0.2.46_2026-06-06.zip",
+  "sha256": "5b8bd7f796a774818c254a966abe1423c721ee5a209bb9f9b87e21603f771b06",
+  "size_bytes": 102829665,
+  "release_notes": "自 v0.2.37 起：\n- 760b099 1.添加自选多日维度统计\n- a5b5bd6 1.添加量化周期测试面板\n- 83c11a1 1.项目优化调整\n- 9683354 优化建议更改\n- 8111acf feat: implement comprehensive frontend modularity and backend services for investment analysis tools\n- 26ca09f k线布局修改\n- 840e904 1.k线添加最高点和最低点之间的涨幅"
 }
