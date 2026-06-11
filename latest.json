@@ -1,9 +1,9 @@
 {
-  "version": "0.2.47",
+  "version": "0.2.49",
   "release_date": "2026-06-11",
   "min_compatible_version": "0.0.0",
-  "download_url": "https://invest-tool-releases-1301751305.cos.ap-shanghai.myqcloud.com/invest_tool_v0.2.47_2026-06-11.zip",
-  "sha256": "01f7ae073c01d20a758896cbbe0ad9aaad26dcf06b1d9d3f616493dc46f6e146",
-  "size_bytes": 102923750,
-  "release_notes": "自 v0.2.46 起：\n- 945c317 1.整个系统做减法，把ml回测去除，候选模式和日志去除"
+  "download_url": "https://invest-tool-releases-1301751305.cos.ap-shanghai.myqcloud.com/invest_tool_v0.2.49_2026-06-11.zip",
+  "sha256": "bfac2ac3d31a271ab8b351f402fd8a7fd59031b0d31a9380c885b2ffd11a6bdb",
+  "size_bytes": 102925087,
+  "release_notes": "（无 git 记录）"
 }
