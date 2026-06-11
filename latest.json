@@ -1,9 +1,9 @@
 {
-  "version": "0.2.49",
-  "release_date": "2026-06-11",
+  "version": "0.2.50",
+  "release_date": "2026-06-12",
   "min_compatible_version": "0.0.0",
-  "download_url": "https://invest-tool-releases-1301751305.cos.ap-shanghai.myqcloud.com/invest_tool_v0.2.49_2026-06-11.zip",
-  "sha256": "bfac2ac3d31a271ab8b351f402fd8a7fd59031b0d31a9380c885b2ffd11a6bdb",
-  "size_bytes": 102925087,
+  "download_url": "https://invest-tool-releases-1301751305.cos.ap-shanghai.myqcloud.com/invest_tool_v0.2.50_2026-06-12.zip",
+  "sha256": "5a9db668c83656430036ea082f82eb8575cc9c9dfc89fb1ad87b4872a3a8f4a1",
+  "size_bytes": 102925749,
   "release_notes": "（无 git 记录）"
 }
